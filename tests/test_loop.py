@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 
 from tu_shell_agent.orchestrator.loop import LoopInput, LoopPorts, run_loop
@@ -303,3 +304,18 @@ def test_cancel_token_stops_before_first_generation():
     assert result.rounds == 0
     assert harness.prompts == []
     assert {"outcome": "cancelled", "rounds": 0} in harness.metas
+
+
+def test_execute_json_is_valid_json_even_when_cancelled():
+    """execute.json 必须始终是**合法 JSON**：取消路径 exit_code=None，手写 f-string 会写成
+    `"exit_code": None`（JSON 里应为 null），后续 json.loads 回放会直接抛 JSONDecodeError。"""
+    ports, harness = make_ports(
+        [GOOD],
+        execute_for=lambda _script: ExecuteResult(None, None, False, True, 120, "", ""),
+    )
+    run(ports)
+    # 一轮里 write_attempt 的次序是 notes.md → shellcheck.* → execute.*，execute.json 在最后一次；
+    # 取 [-1] 而非 [0]（[0] 是 notes.md，会 KeyError）。
+    payload = json.loads(harness.attempts[-1][1]["execute.json"])
+    assert payload["exit_code"] is None
+    assert payload["cancelled"] is True
