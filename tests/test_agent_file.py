@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tu_shell_agent.opencode_adapter.agent_file import (
     AGENT_NAME,
     render_agent_file,
@@ -48,3 +50,11 @@ def test_write_agent_file_lands_in_the_run_directory(tmp_path):
     path = write_agent_file(str(tmp_path))
     assert path == str(tmp_path / ".opencode" / "agents" / f"{AGENT_NAME}.md")
     assert Path(path).is_file()
+
+
+def test_empty_run_dir_is_rejected_instead_of_allowlisting_root():
+    """空 run_dir 会退化成 "/**": allow（比 "*": deny 更具体 → 覆盖拒绝 → 整盘可读），必须报错而非放行。"""
+    with pytest.raises(ValueError, match="run_dir"):
+        render_agent_file(run_dir="")
+    with pytest.raises(ValueError, match="run_dir"):
+        write_agent_file("")
