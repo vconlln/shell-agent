@@ -2686,6 +2686,7 @@ def wait_healthy(base_url: str, password: str, timeout_s: float = 20.0) -> None:
                 f"{base_url}/global/health",
                 headers={"authorization": basic_auth_header(password)},
                 timeout=2.0,
+                trust_env=False,  # 同上：回环地址不走用户代理
             )
             if response.status_code == 200:
                 payload = response.json()
@@ -2729,13 +2730,21 @@ def start_serve(opencode_path: str, run_dir: str, timeout_s: float = 20.0) -> Se
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("a", encoding="utf-8", errors="replace")
 
-    process = subprocess.Popen(
-        [opencode_path, *build_serve_args(port)],
-        cwd=run_dir,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
-    )
+    popen_kwargs: dict[str, Any] = {
+        "cwd": run_dir,
+        "stdout": log_file,
+        "stderr": subprocess.STDOUT,
+        "env": {**os.environ, "OPENCODE_SERVER_PASSWORD": password},
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        # 与 execute.run_script 同一个道理：serve 必须自成一个进程组，否则 stop() 里
+        # kill_tree 的 killpg(getpgid(pid)) 会打到调用方自己的进程组 → dispose()/失败路径
+        # 把 CLI 自己一起 SIGKILL（实测变异：删掉该行后 e2e 整体 exit 137）。
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen([opencode_path, *build_serve_args(port)], **popen_kwargs)
 
     base_url = f"http://127.0.0.1:{port}"
     try:
@@ -2797,6 +2806,10 @@ class OpencodeAdapter:
             base_url=self._serve.base_url,
             headers={"authorization": self._auth},
             timeout=httpx.Timeout(300.0, connect=10.0),
+            # 必须 trust_env=False：我们连的是自己刚起的回环 server，绝不该走用户的 HTTP 代理。
+            # 实测：宿主 env 带 http_proxy/ALL_PROXY 时（中文开发环境常态），httpx 的 mount 表会先命中
+            # 代理项，四条路径全部不可用（且 socks 代理会直接 ImportError: 需要 socksio）。
+            trust_env=False,
         )
         self._stop_events.clear()
         self._events_thread = threading.Thread(target=self._consume_events, daemon=True)
@@ -2825,6 +2838,7 @@ class OpencodeAdapter:
                 f"{self._serve.base_url}/event",
                 headers={"authorization": self._auth, "accept": "text/event-stream"},
                 timeout=None,
+                trust_env=False,  # 同上：回环地址不走用户代理
             ) as response:
                 for line in response.iter_lines():
                     if self._stop_events.is_set():
