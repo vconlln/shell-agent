@@ -23,13 +23,19 @@ from .types import RunConfig, RunEvent
 
 
 def _path_overrides(args: argparse.Namespace) -> dict[str, str]:
-    """把 CLI 的 --*-path 覆盖转成 detect_all 认的 {tool: path} 映射。"""
+    """把 CLI 的 --*-path 覆盖转成 detect_all 认的 {tool: path} 映射。
+
+    必须 resolve() 成绝对路径：server.start_serve 用 cwd=run_dir 起 serve 子进程、
+    execute.run_script 也用 cwd=run_dir 执行脚本，**相对路径会在新 cwd 下解析不到**。
+    实测：`--opencode-path tools/opencode` → `[Errno 2] No such file or directory: 'tools/opencode'`
+    → aborted_dependency(0 轮)，而 CLI 自己的自检却是通过的（现象很迷惑）。
+    """
     pairs = (
         ("opencode", args.opencode_path),
         ("bash", args.bash_path),
         ("shellcheck", args.shellcheck_path),
     )
-    return {tool: path for tool, path in pairs if path}
+    return {tool: str(Path(path).resolve()) for tool, path in pairs if path}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

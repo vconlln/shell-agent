@@ -1,6 +1,7 @@
 """离线全链路：真实 shellcheck + 真实 bash + 假 opencode。"""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from tu_shell_agent.orchestrator.loop import LoopInput, LoopPorts, TemplateSpec, run_loop
 from tu_shell_agent.run_store.store import RunStore
@@ -103,3 +104,23 @@ def test_broken_script_is_caught_then_fixed_and_executed(tmp_path, shellcheck_pa
     assert "script.sh" in attempt_two_stdout
     assert "done" in attempt_two_stdout
     assert '"succeeded"' in (tmp_path / "r1" / "meta.json").read_text(encoding="utf-8")
+
+
+def test_path_overrides_are_absolute():
+    """CLI 的 --*-path 必须 resolve 成绝对路径。
+
+    server.start_serve 用 cwd=run_dir 起子进程，相对路径会在新 cwd 下解析不到
+    （实测 `--opencode-path tools/opencode` → [Errno 2] → aborted_dependency(0 轮)，
+    而 CLI 自检却是通过的）。这条测试锁住该回归。
+    """
+    from tu_shell_agent.cli import _parse_args, _path_overrides
+
+    args = _parse_args([
+        "--plan", "p.md",
+        "--opencode-path", "tools/opencode",
+        "--shellcheck-path", "./tools/shellcheck",
+    ])
+    overrides = _path_overrides(args)
+    assert all(Path(value).is_absolute() for value in overrides.values())
+    assert overrides["bash"] if "bash" in overrides else True  # bash 未传则不应出现键
+    assert "bash" not in overrides
