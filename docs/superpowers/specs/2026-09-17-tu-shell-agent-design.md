@@ -323,7 +323,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 - Git Bash 探测与 `bash.exe --noprofile --norc` 执行；进程树取消（`taskkill /T /F`）。
 - shellcheck 探测与 winget 安装指引；UTF-8 输出无乱码。
 - opencode 原生安装下的 `serve` 启动、agent 发现（`opencode agent list`）、结构化输出实际可用。
-- **权限确实生效**（整个安全模型的地基，必须显式验证）：在受控运行目录里让 agent 尝试执行一条无害命令、尝试写一个文件，确认结果是**被拒绝**而不是弹出 `ask` 询问导致挂起；并确认用户全局配置里把 `bash` 设为 `allow` 也覆盖不了本 agent 的 `deny`。
+- **权限确实生效**（整个安全模型的地基）：在受控运行目录里让 agent 尝试执行一条无害命令、尝试写一个文件，确认结果是**被拒绝**而不是弹出 `ask` 询问导致挂起；并确认用户全局配置里把 `bash` 设为 `allow` 也覆盖不了本 agent 的 `deny`。**规则合并这一半已在 Linux + 1.18.31 上实测通过**（见 §18 风险 6），Windows 侧复核实跑行为即可。
 - PyInstaller 产物：one-folder 目录与单文件便携 exe 双击可用；PySide6 的 Qt 插件（`platforms/`、`styles/`）被正确收集，界面能起来。
 - 中文路径与含空格路径（`C:\Users\张三\我的 方案.md`）。
 
@@ -362,7 +362,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 3. 同一会话 3 轮往返的上下文膨胀可能触发 opencode 自身压缩，导致它"忘记"模板细节 —— 缓解：每轮回灌都重新附上模板骨架与锚点清单。
 4. 长脚本走结构化输出存在截断风险：已用 64KB 上限 + schema 校验 + `StructuredOutputError` 三重兜底，仍失败则计契约失败并回灌。
 5. 用户已安装的 opencode 版本未知：自检记录版本并在 < 1.1.1 时警告。
-6. `permission: {"*": deny}` 这种**总键**写法在文档示例里出现过（与具体键并存），但源码级调研只列出了具体权限键（`read/edit/glob/grep/list/bash/task/external_directory/lsp/skill` + `todowrite/question/webfetch/websearch/doom_loop`）。因此实现时**不把安全模型只押在总键上**：要求逐键显式 `deny`，并在 M2 的 Windows 手测里实测"全局设 `bash: allow` 也覆盖不了 agent 的 `deny`"（§14）。
+6. `permission: {"*": deny}` 这种**总键**写法在文档示例里出现过（与具体键并存），但源码级调研只列出了具体权限键（`read/edit/glob/grep/list/bash/task/external_directory/lsp/skill` + `todowrite/question/webfetch/websearch/doom_loop`）。因此实现时**不把安全模型只押在总键上**：逐键显式 `deny`。**该项已在 Linux 上用真实 1.18.31 实证**：把带 `bash: deny / edit: deny / read` 白名单的 agent 定义放进运行目录后，`GET /agent` 返回的合并规则里确实出现 `bash * -> deny`、`edit * -> deny`、`read * -> deny` 与 `read <白名单> -> allow`，**agent 的 deny 覆盖了全局的 `* -> allow`**。Windows 侧只需复核同一行为。
 7. 原生 Windows 上的 opencode 全局配置目录文档未写明（只给 `~/.config/opencode/`）：本应用只用**项目级** `.opencode/agents/`，因此不依赖它；仅当将来要做全局安装时才需确认。
 8. opencode 自身在 Windows 用哪个 shell（源码里 `pwsh 优先` 与 `cmd.exe 默认` 两条路径并存）与本应用无关 —— 因为 agent 的 `bash` 权限被拒绝，执行一律由后端直接调用 Git Bash。这条只有在启用 §7.1 应急路径时才需要重新评估。
 9. **没有官方 Python SDK**：端点契约直接依赖 opencode server 的 HTTP 接口，端点漂移是真实风险（已观察到 2.x 把 API 整体搬到 `/api/*` 且规范里没有结构化输出）。缓解：自检记录 server 版本；`opencode_adapter` 是唯一接触端点的地方，漂移只需改一个模块。**1.18.31 的契约已用真实二进制核对**（请求字段 `format`、结果字段 `AssistantMessage.structured`、`StructuredOutputError`、`POST /session/{sessionID}/permissions/{permissionID}`、`GET /global/health` → `{"healthy":true,"version":"1.18.31"}`），因此 `format` vs `outputFormat` 这处文档不一致**已不再是风险**——顺带发现结果字段名与 JS SDK 文档不同，实现里两个都读。
