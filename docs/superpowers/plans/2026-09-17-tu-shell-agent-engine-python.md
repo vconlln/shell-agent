@@ -1098,12 +1098,17 @@ script.sh 在运行目录根与 attempts/<n>/ 双写；meta.json 支持增量合
 
 ```python
 # tests/test_detect.py
+import shutil
+
+import pytest
+
 from tu_shell_agent.shell_toolchain.detect import (
     DetectDeps,
     candidate_paths,
     detect_all,
     is_at_least,
     parse_version,
+    system_deps,
 )
 
 LINUX_VERSIONS = {
@@ -1196,6 +1201,16 @@ def test_is_at_least_compares_three_segments():
     assert is_at_least("1.18.31", "1.1.1") is True
     assert is_at_least("1.0.9", "1.1.1") is False
     assert is_at_least("1.1.1", "1.1.1") is True
+
+
+def test_system_deps_probes_version_in_c_locale():
+    """版本探测必须与本地化无关：中文 locale 下 `bash --version` 输出「GNU bash，版本 5.3.15」，
+    英文正则会解析出 unknown。这条在中文机器上能真实抓住该缺陷。"""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("本机没有 bash")
+    output = system_deps().run_version(bash)
+    assert parse_version("bash", output) != "unknown"
 ```
 
 - [ ] **步骤 2：运行测试验证失败**
@@ -1343,9 +1358,12 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
     """生产环境的依赖实现：走 PATH 与真实进程。"""
 
     def run_version(path: str) -> str:
+        # 版本探测必须与本地化无关：中文 locale 下 `bash --version` 会输出
+        # 「GNU bash，版本 5.3.15」，规格里的英文正则就解析不出来（返回 unknown）。
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
         try:
             completed = subprocess.run(
-                [path, "--version"], capture_output=True, text=True, timeout=20
+                [path, "--version"], capture_output=True, text=True, timeout=20, env=env
             )
             return f"{completed.stdout}\n{completed.stderr}"
         except (OSError, subprocess.SubprocessError):
