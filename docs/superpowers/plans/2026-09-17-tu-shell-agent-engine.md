@@ -765,7 +765,8 @@ import { randomBytes } from 'node:crypto'
 
 export function makeRunId(at: Date = new Date(), salt: string = randomBytes(2).toString('hex')): string {
   const pad = (n: number) => String(n).padStart(2, '0')
-  const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`
+  // 用 UTC 取值：否则同一条测试在不同时区会得到不同的 id 前缀。
+  const stamp = `${at.getUTCFullYear()}${pad(at.getUTCMonth() + 1)}${pad(at.getUTCDate())}-${pad(at.getUTCHours())}${pad(at.getUTCMinutes())}${pad(at.getUTCSeconds())}`
   return `${stamp}-${salt}`
 }
 
