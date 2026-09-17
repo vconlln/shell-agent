@@ -101,6 +101,8 @@ def run_script(
     for thread in threads:
         thread.join(timeout=5)
 
+    # 注意：signal 恒为 None，被 SIGKILL 杀死的脚本表现为 exit_code=-9。
+    # 调用方要区分「脚本自己退出」与「超时/取消被杀」，必须结合 timed_out / cancelled，不能只看 exit_code。
     return ExecuteResult(
         exit_code=process.returncode,
         signal=None,

@@ -1,5 +1,8 @@
+import os
 import threading
 import time
+
+import pytest
 
 from tu_shell_agent.shell_toolchain.execute import kill_tree, run_script
 
@@ -55,3 +58,50 @@ def test_streaming_callbacks_receive_output_in_order(tmp_path, bash_path):
 
 def test_kill_tree_on_dead_pid_is_silent():
     kill_tree(999_999)  # 不应抛异常
+
+
+def _wait_pid_gone(pid: int, timeout_s: float = 3.0) -> bool:
+    """进程消失返回 True。POSIX 用 kill(pid, 0) 探活；Windows 语义不同，调用方自行 skip。"""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.kill(pid, 0) 探活在 Windows 上语义不同；taskkill /T 由手测清单覆盖")
+def test_timeout_kills_the_whole_process_tree(tmp_path, bash_path):
+    """超时必须杀掉整棵进程树：留下孤儿进程正是这条安全边界的失效模式。
+
+    只断言 timed_out 是不够的——去掉 start_new_session 或把 killpg 换成 os.kill，
+    这样的用例照样通过，而孙子进程会逃逸。
+    """
+    marker = tmp_path / "child.pid"
+    script = tmp_path / "tree.sh"
+    script.write_text(f"sleep 300 &\necho $! > {marker}\nwait\n", encoding="utf-8")
+
+    result = run_script(bash_path, str(script), cwd=str(tmp_path), timeout_ms=800)
+
+    assert result.timed_out is True
+    child = int(marker.read_text(encoding="utf-8").strip())
+    assert _wait_pid_gone(child) is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="同 timeout 用例：Windows 由手测清单覆盖")
+def test_cancel_kills_the_whole_process_tree(tmp_path, bash_path):
+    marker = tmp_path / "child.pid"
+    script = tmp_path / "tree.sh"
+    script.write_text(f"sleep 300 &\necho $! > {marker}\nwait\n", encoding="utf-8")
+    cancel = threading.Event()
+    threading.Timer(0.4, cancel.set).start()
+
+    result = run_script(
+        bash_path, str(script), cwd=str(tmp_path), timeout_ms=30_000, cancel=cancel
+    )
+
+    assert result.cancelled is True
+    child = int(marker.read_text(encoding="utf-8").strip())
+    assert _wait_pid_gone(child) is True
