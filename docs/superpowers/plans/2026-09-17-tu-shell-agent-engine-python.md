@@ -257,7 +257,7 @@ class RunConfig:
     max_rounds: int = 3
     generate_timeout_ms: int = 300_000
     execute_timeout_ms: int = 120_000
-    blocking_level: Severity = "warning"
+    blocking_level: Severity = "info"  # 实测 SC2086 就是 info 级，用 warning 会让它"只展示不修"
     bash_path: str | None = None
     shellcheck_path: str | None = None
     opencode_path: str | None = None
@@ -2975,9 +2975,10 @@ SSE 自解析以渲染增量文本；对任何权限询问（permission.asked）
 
 ```python
 # tests/test_loop.py
+import json
 from dataclasses import dataclass, field
 
-from tu_shell_agent.orchestrator.loop import LoopInput, run_loop
+from tu_shell_agent.orchestrator.loop import LoopInput, LoopPorts, run_loop
 from tu_shell_agent.types import (
     DetectionReport,
     ExecuteResult,
@@ -3006,6 +3007,8 @@ class Harness:
     prompts: list[str] = field(default_factory=list)
     confirmed: int = 0
     events: list = field(default_factory=list)
+    attempts: list = field(default_factory=list)  # [(round, {文件名: 内容})]
+    metas: list = field(default_factory=list)  # [patch, ...]
 
 
 def make_ports(
@@ -3064,10 +3067,11 @@ def make_ports(
             return "/tmp/run/script.sh"
 
         def write_attempt(self, round_no, files):
-            return None
+            # 记录落盘副作用：四条终止路径的"写 *-error.txt"是需求的一部分，必须可断言。
+            harness.attempts.append((round_no, dict(files)))
 
         def write_meta(self, patch):
-            return None
+            harness.metas.append(dict(patch))
 
     return {
         "opencode": FakeOpencode(),
@@ -3078,10 +3082,22 @@ def make_ports(
     }, harness
 
 
+def _attempt_file(harness, name: str) -> str:
+    """按文件名取出 write_attempt 写入的**内容**（不依赖同一轮内的调用次序）。"""
+    return next(files[name] for _round, files in harness.attempts if name in files)
+
+
+def _attempt_names(harness) -> set[str]:
+    """write_attempt 一共写过的**文件名**集合（判断"某个文件被写过"时用它）。"""
+    return {name for _round, files in harness.attempts for name in files}
+
+
 CONFIG = RunConfig(run_root="/tmp/root", max_rounds=3, generate_timeout_ms=5000, execute_timeout_ms=5000)
 
 
-def run(input_ports, template=None, plan="方案"):
+def run(input_ports, template=None, plan="方案", cancel=None):
+    # make_ports 返回的是 {字段: 端口} 映射，而 LoopInput.ports 要的是 LoopPorts 对象：
+    # 在这里包一层，测试其余部分（含 make_ports 的返回形状）保持原样。
     return run_loop(
         LoopInput(
             plan=plan,
@@ -3089,7 +3105,8 @@ def run(input_ports, template=None, plan="方案"):
             values={},
             run_dir="/tmp/run",
             config=CONFIG,
-            ports=input_ports,
+            ports=LoopPorts(**input_ports),
+            cancel=cancel,
         )
     )
 
@@ -3151,10 +3168,12 @@ def test_generation_error_is_fed_back_and_next_round_succeeds():
 
 
 def test_start_failure_returns_aborted_dependency():
-    ports, _harness = make_ports([GOOD], start_error=RuntimeError("health 不通"))
+    ports, harness = make_ports([GOOD], start_error=RuntimeError("health 不通"))
     result = run(ports)
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 0
+    assert ("start-error.txt" in _attempt_names(harness)) is True
+    assert {"outcome": "aborted_dependency", "rounds": 0} in harness.metas
 
 
 def test_shellcheck_dependency_failure_aborts_without_repair_loop():
@@ -3169,6 +3188,8 @@ def test_shellcheck_dependency_failure_aborts_without_repair_loop():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
+    assert ("shellcheck-error.txt" in _attempt_names(harness)) is True
+    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
 
 
 def test_execute_dependency_failure_aborts_instead_of_raising():
@@ -3183,6 +3204,59 @@ def test_execute_dependency_failure_aborts_instead_of_raising():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
+    assert ("execute-error.txt" in _attempt_names(harness)) is True
+    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
+
+
+# ── 以下三条锁住"退出码不能单独决定成败"与取消语义（审查补充，均为回归防护）──
+
+
+def test_timeout_result_is_not_treated_as_success():
+    """SIGKILL 的脚本表现为 exit_code=-9；必须靠 timed_out 判失败，回灌提示含「超时被杀」。"""
+    ports, harness = make_ports(
+        [GOOD, GOOD],
+        execute_for=lambda _script: ExecuteResult(-9, None, True, False, 400, "", ""),
+    )
+    result = run(ports)
+    assert result.outcome != "succeeded"
+    assert result.outcome == "needs_human"
+    assert "超时被杀" in harness.prompts[1]
+
+
+def test_cancelled_result_short_circuits_without_next_round():
+    ports, harness = make_ports(
+        [GOOD],
+        execute_for=lambda _script: ExecuteResult(None, None, False, True, 120, "", ""),
+    )
+    result = run(ports)
+    assert result.outcome == "cancelled"
+    assert len(harness.prompts) == 1
+
+
+def test_execute_json_is_valid_json_even_when_cancelled():
+    """execute.json 必须始终是**合法 JSON**：取消路径 exit_code=None，手写 f-string 会写成
+    `"exit_code": None`（JSON 里应为 null），后续 json.loads 回放会直接抛 JSONDecodeError。"""
+    ports, harness = make_ports(
+        [GOOD],
+        execute_for=lambda _script: ExecuteResult(None, None, False, True, 120, "", ""),
+    )
+    run(ports)
+    payload = json.loads(_attempt_file(harness, "execute.json"))
+    assert payload["exit_code"] is None
+    assert payload["cancelled"] is True
+
+
+def test_cancel_token_stops_before_first_generation():
+    class Cancel:
+        def is_set(self):
+            return True
+
+    ports, harness = make_ports([GOOD])
+    result = run(ports, cancel=Cancel())
+    assert result.outcome == "cancelled"
+    assert result.rounds == 0
+    assert harness.prompts == []
+    assert {"outcome": "cancelled", "rounds": 0} in harness.metas
 
 
 def test_three_failing_rounds_end_as_needs_human():
@@ -3198,8 +3272,10 @@ def test_three_failing_rounds_end_as_needs_human():
 
 
 def test_user_rejection_cancels_without_next_round():
+    # 必须显式用非信任模板：信任模板会短路掉 confirm（approved = trusted or confirm(...)），
+    # 那样 confirm=False 形同虚设，且与 test_trusted_template_never_asks_for_confirmation 互斥。
     ports, harness = make_ports([GOOD], confirm=False)
-    result = run(ports)
+    result = run(ports, template=FakeTemplate(trusted=False))
     assert result.outcome == "cancelled"
     assert len(harness.prompts) == 1
 
@@ -3212,11 +3288,28 @@ def test_missing_anchor_reports_contract_failure_into_next_prompt():
     assert "@@TU:BODY@@" in harness.prompts[1]
 
 
-def test_info_level_findings_do_not_block():
+def test_style_level_findings_do_not_block():
     ports, _harness = make_ports(
-        [GOOD], shellcheck_for=lambda _s: [ShellcheckFinding("SC2006", 1, 1, "info", "use $()")]
+        [GOOD], shellcheck_for=lambda _s: [ShellcheckFinding("SC2006", 1, 1, "style", "use $()")]
     )
     assert run(ports).outcome == "succeeded"
+
+
+def test_info_level_findings_block_at_the_default_level():
+    """默认阻断级别是 info（实测 SC2086 就是 info 级），所以 info 必须触发回灌修复。"""
+    broken = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho $f\n", notes="", assumptions=()
+    )
+    ports, harness = make_ports(
+        [broken, GOOD],
+        shellcheck_for=lambda s: (
+            [ShellcheckFinding("SC2086", 3, 6, "info", "quote it")] if "echo $f" in s else []
+        ),
+    )
+    result = run(ports)
+    assert result.outcome == "succeeded"
+    assert result.rounds == 2
+    assert "SC2086" in harness.prompts[1]
 
 
 def test_trusted_template_never_asks_for_confirmation():
@@ -3248,6 +3341,7 @@ def test_untrusted_template_asks_once():
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -3358,6 +3452,9 @@ def run_loop(input_: LoopInput) -> LoopResult:
 
     for round_no in range(1, config.max_rounds + 1):
         if _cancelled(input_.cancel):
+            # 与另两处取消路径（用户拒绝、执行取消）保持一致：终态要落盘，
+            # 否则运行目录里没有 meta.json，Plan 2 的历史列表读不到"这次已被取消"。
+            ports.store.write_meta({"outcome": "cancelled", "rounds": round_no - 1})
             return LoopResult("cancelled", round_no - 1, last_findings=last_findings)
 
         started = time.monotonic()
@@ -3482,10 +3579,18 @@ def run_loop(input_: LoopInput) -> LoopResult:
             {
                 "stdout.txt": result.stdout,
                 "stderr.txt": result.stderr,
-                "execute.json": (
-                    f'{{"exit_code": {result.exit_code}, "timed_out": {str(result.timed_out).lower()}, '
-                    f'"cancelled": {str(result.cancelled).lower()}, "duration_ms": {result.duration_ms}}}\n'
-                ),
+                # 必须用 json.dumps：手写 f-string 在 exit_code 为 None（取消路径）时会写出
+                # `"exit_code": None` —— 那不是合法 JSON，Plan 2 回放时 json.loads 会炸。
+                "execute.json": json.dumps(
+                    {
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                        "cancelled": result.cancelled,
+                        "duration_ms": result.duration_ms,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
             },
         )
         emit(RunEvent("execute", round_no, {"result": result}))
@@ -3525,7 +3630,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_loop.py -q`
-预期：PASS（11 passed）
+预期：PASS（13 passed）
 
 - [ ] **步骤 5：Commit**
 
@@ -3565,13 +3670,17 @@ from tu_shell_agent.types import (
 
 from tu_shell_agent.shell_toolchain.execute import run_script
 
+# 夹具设计依据（实测 shellcheck 0.11.0 的级别，不要随手改）：
+#   for f in $(ls)     → SC2045 error   ← 在任何阻断阈值下都会拦下，与默认值解耦，故用它做阻断点
+#   echo $f（未加引号）→ SC2086 info    ← 默认阻断级别 warning 拦不住，不能当阻断点
+#   echo done          → SC1010 warning ← 对字面量词的误报，修好的脚本里必须避免（改 echo "done"）
 BROKEN = (
     "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\n"
-    'files="a b"\nfor f in $files; do echo $f; done\necho done\n'
+    'for f in $(ls); do echo $f; done\necho "done"\n'
 )
 FIXED = (
     "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\n"
-    'files="a b"\nfor f in $files; do echo "$f"; done\necho done\n'
+    'for f in *; do echo "$f"; done\necho "done"\n'
 )
 
 
@@ -3640,8 +3749,13 @@ def test_broken_script_is_caught_then_fixed_and_executed(tmp_path, shellcheck_pa
     assert result.outcome == "succeeded"
     assert result.rounds == 2
     attempt_one = tmp_path / "r1" / "attempts" / "1"
-    assert "SC2086" in (attempt_one / "shellcheck.json").read_text(encoding="utf-8")
-    assert "a" in (tmp_path / "r1" / "attempts" / "2" / "stdout.txt").read_text(encoding="utf-8")
+    assert "SC2045" in (attempt_one / "shellcheck.json").read_text(encoding="utf-8")
+    attempt_two_stdout = (tmp_path / "r1" / "attempts" / "2" / "stdout.txt").read_text(
+        encoding="utf-8"
+    )
+    # 运行目录里必然有 script.sh，被 `for f in *` 列出来 —— 用它做确定性断言，别依赖目录内容
+    assert "script.sh" in attempt_two_stdout
+    assert "done" in attempt_two_stdout
     assert '"succeeded"' in (tmp_path / "r1" / "meta.json").read_text(encoding="utf-8")
 ```
 
@@ -3804,7 +3918,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    report = detect_all(system_deps(_path_overrides(args)))
+    overrides = _path_overrides(args)
+    report = detect_all(system_deps(overrides))
     print("环境自检：", report, flush=True)
     if report.problems:
         print("自检未通过：\n" + "\n".join(report.problems), file=sys.stderr)
@@ -3863,7 +3978,10 @@ def main(argv: list[str] | None = None) -> int:
 
     ports = LoopPorts(
         opencode=adapter,
-        toolchain=ShellToolchain(report.bash.path, report.shellcheck.path),
+        # 必须把同一组 override 一起传进 facade：run_loop 会再调一次 toolchain.detect()，
+        # 少了 override 就会在"shellcheck 不在 PATH"的机器上把已解析出的路径又判成缺失 →
+        # 循环内预检失败 → aborted_dependency（CLI 自己的自检却通过了，现象很迷惑）。
+        toolchain=ShellToolchain(report.bash.path, report.shellcheck.path, overrides),
         confirm=type("CliConfirm", (), {"confirm": staticmethod(confirm)})(),
         store=run_store,
         emit=emit,
@@ -3935,7 +4053,7 @@ tu-shell-agent = "tu_shell_agent.cli:main"
 先跑离线全链路（确定性，不需要 opencode）：
 
 运行：`.venv/bin/python -m pytest tests/test_e2e_offline.py -q`
-预期：PASS，且 `attempts/1/shellcheck.json` 含 SC2086、`attempts/2/stdout.txt` 有输出、`meta.json` 的 outcome 为 `succeeded`
+预期：PASS，且 `attempts/1/shellcheck.json` 含 SC2045、`attempts/2/stdout.txt` 有输出（含 `script.sh`）、`meta.json` 的 outcome 为 `succeeded`
 
 再跑全部单测：
 

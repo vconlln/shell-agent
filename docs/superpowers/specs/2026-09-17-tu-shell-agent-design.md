@@ -265,7 +265,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 - 环境变量中**删除 `SHELLCHECK_OPTS`**，否则用户环境的默认 flag 会污染结果。
 - 不加 `--severity`：拿全量报告，阻断判定在应用内做。
 - 退出码处理：`0` 无问题；`1` 有问题（读 `json1` 报告）；`2` 文件无法处理 → 依赖错误；`3`/`4` → 我们的调用 bug，报错并附完整命令。
-- 阻断级别默认 `warning`（error 与 warning 触发回灌修复），`info`/`style` 只展示；可配。
+- 阻断级别默认 `info`（error/warning/info 触发回灌修复），`style` 只展示；可配。**为什么不是 `warning`**（实测）：最常见的 SC2086（变量未加引号）在 shellcheck 里是 **info** 级，用 `warning` 当默认会让这类真实隐患「只展示、不修」，脚本带着隐患去执行——那正是本应用要消除的失败方式；而 `style` 才是真正的吹毛求疵层。
 
 **执行**
 
@@ -342,7 +342,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 1. **产出契约变更**：由"opencode 用 edit 工具把脚本写到 `script.sh`"改为"结构化输出返回脚本文本，后端自己写盘"。权限随之从 `edit: allow` 收紧到 `edit: deny`（`bash: deny` 不变）。理由：契约可校验、消除"没写出文件"的失败类别、opencode 连写盘权都不需要。
 2. **传输确定为 serve + SDK**（原为"倾向 (b)，待调研定稿"）：结构化输出只有 server/SDK 提供。
 3. **新增 `external_directory: deny`**：其默认 `ask` 会让运行静默挂住。
-4. **shellcheck 调用参数固定**（`--norc -s bash -f json1`，清理 `SHELLCHECK_OPTS`），阻断级别默认 `warning`。
+4. **shellcheck 调用参数固定**（`--norc -s bash -f json1`，清理 `SHELLCHECK_OPTS`），阻断级别默认 `info`（理由见 §11）。
 5. **明确要求 Windows 原生 opencode**，不做 WSL 路径映射。
 6. **技术栈整体修订为「全 Python」**（用户于 2026-09-17 裁定，见 §19）：Electron / TypeScript / React / vitest / electron-builder 全部替换为 PySide6 / httpx / pytest / PyInstaller；opencode 接入从官方 JS SDK 改为直打 HTTP/SSE。§5–§13 的架构（分层、端口、状态机、契约、权限模型）不受影响。
 
