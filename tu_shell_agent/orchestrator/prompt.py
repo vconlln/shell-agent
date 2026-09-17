@@ -24,15 +24,8 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-SYSTEM_RULES = """你是一个 shell 脚本生成器。用户会给你一份模板骨架和一份方案文档，你把方案实现进骨架。
-
-硬规则：
-1. 保留模板里的全部锚点注释（形如 # @@TU:NAME@@），一个都不能少、不能改名。
-2. 保持模板的整体结构（shebang、set 选项、函数骨架、trap、参数解析）。
-3. 不要引入网络下载、提权（sudo）、curl | bash、交互式命令。
-4. 换行必须是 LF。
-5. 只在返回 JSON 的 script 字段里给出完整脚本，不要额外解释。
-6. 方案含糊时选择保守实现，并把假设写进 assumptions，不要静默猜测。"""
+# SYSTEM_RULES 已移出本模块：它只被 opencode_adapter/agent_file.py 消费（agent 定义正文），
+# 留在这里会让 adapter 反向 import orchestrator，违反单向分层。见 opencode_adapter/agent_file.py。
 
 
 def build_first_message(*, skeleton: str, anchors: tuple[str, ...], plan: str, run_dir: str) -> str:

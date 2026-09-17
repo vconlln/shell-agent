@@ -32,6 +32,7 @@ class Harness:
     events: list = field(default_factory=list)
     attempts: list = field(default_factory=list)
     metas: list = field(default_factory=list)
+    inputs: list = field(default_factory=list)
 
 
 def make_ports(
@@ -89,6 +90,10 @@ def make_ports(
             harness.written.append(f"{round_no}:{script}")
             return "/tmp/run/script.sh"
 
+        def write_inputs(self, files):
+            harness.inputs.append(dict(files))
+            return None
+
         def write_attempt(self, round_no, files):
             harness.attempts.append((round_no, dict(files)))
             return None
@@ -124,6 +129,13 @@ def run(input_ports, template=None, plan="方案", cancel=None):
             cancel=cancel,
         )
     )
+
+
+def contains_meta(harness, expected: dict) -> bool:
+    """meta.json 现在是"超集"（含 runId/sessionId/config/detection 快照），
+    所以断言要按子集匹配，不能再要求整字典相等。"""
+    return any(all(patch.get(key) == value for key, value in expected.items())
+               for patch in harness.metas)
 
 
 def _attempt_file(harness, name: str) -> str:
@@ -203,7 +215,7 @@ def test_start_failure_returns_aborted_dependency():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 0
     assert ("start-error.txt" in _attempt_names(harness)) is True
-    assert {"outcome": "aborted_dependency", "rounds": 0} in harness.metas
+    assert contains_meta(harness, {"outcome": "aborted_dependency", "rounds": 0})
 
 
 def test_shellcheck_dependency_failure_aborts_without_repair_loop():
@@ -219,7 +231,7 @@ def test_shellcheck_dependency_failure_aborts_without_repair_loop():
     assert result.rounds == 1
     assert len(harness.prompts) == 1
     assert ("shellcheck-error.txt" in _attempt_names(harness)) is True
-    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
+    assert contains_meta(harness, {"outcome": "aborted_dependency", "rounds": 1})
 
 
 def test_execute_dependency_failure_aborts_instead_of_raising():
@@ -235,7 +247,7 @@ def test_execute_dependency_failure_aborts_instead_of_raising():
     assert result.rounds == 1
     assert len(harness.prompts) == 1
     assert ("execute-error.txt" in _attempt_names(harness)) is True
-    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
+    assert contains_meta(harness, {"outcome": "aborted_dependency", "rounds": 1})
 
 
 def test_three_failing_rounds_end_as_needs_human():
@@ -335,7 +347,7 @@ def test_cancel_token_stops_before_first_generation():
     assert result.outcome == "cancelled"
     assert result.rounds == 0
     assert harness.prompts == []
-    assert {"outcome": "cancelled", "rounds": 0} in harness.metas
+    assert contains_meta(harness, {"outcome": "cancelled", "rounds": 0})
 
 
 def test_execute_json_is_valid_json_even_when_cancelled():
@@ -349,3 +361,100 @@ def test_execute_json_is_valid_json_even_when_cancelled():
     payload = json.loads(_attempt_file(harness, "execute.json"))
     assert payload["exit_code"] is None
     assert payload["cancelled"] is True
+
+
+# ── F3：输入落盘 + meta.json 快照（规格 §10）────────────────────────────────
+
+
+def test_inputs_and_meta_snapshot_are_written():
+    """预检通过后写 plan.md / template.sh；meta.json 含 sessionId / 配置快照 / 自检结果。"""
+    ports, harness = make_ports([GOOD])
+    run(ports, plan="把日志按时间倒序列出")
+
+    assert harness.inputs, "必须调用 write_inputs"
+    files = harness.inputs[0]
+    assert set(files) == {"plan.md", "template.sh"}
+    assert files["plan.md"] == "把日志按时间倒序列出"  # 方案全文原样落盘
+    assert "@@TU:BODY@@" in files["template.sh"]  # 渲染后的骨架
+
+    meta = harness.metas[-1]
+    assert meta["outcome"] == "succeeded"
+    assert meta["sessionId"] == "ses_1"
+    assert meta["runId"] == "run"  # 由 run_dir 的 basename 推出
+    assert meta["config"]["max_rounds"] == 3  # 配置快照是 dict，不是 dataclass 对象
+    assert isinstance(meta["detection"], dict) and "problems" in meta["detection"]
+    # 整份 meta 必须真的能序列化（塞 dataclass 对象会在 json.dumps 处 TypeError）
+    assert json.dumps(meta, ensure_ascii=False)
+
+
+# ── F2：生成阶段取消不是"生成失败"──────────────────────────────────────────
+
+
+class _Token:
+    def __init__(self) -> None:
+        self._set = False
+
+    def set(self) -> None:
+        self._set = True
+
+    def is_set(self) -> bool:
+        return self._set
+
+
+def test_cancel_during_generation_returns_cancelled_without_burning_a_round():
+    """生成期间取消 → outcome=cancelled，不能计一次契约失败白烧轮次。"""
+    ports, harness = make_ports([GOOD])
+    token = _Token()
+
+    def generate_that_cancels(session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+        harness.prompts.append(message)
+        token.set()  # 用户在生成期间按了取消
+        raise RuntimeError("已取消")
+
+    ports["opencode"].generate = generate_that_cancels
+    result = run(ports, cancel=token)
+
+    assert result.outcome == "cancelled"
+    assert result.rounds == 0  # 这一轮没被算进去
+    assert len(harness.prompts) == 1  # 没有第二轮
+    assert "generation-error.txt" not in _attempt_names(harness)  # 不留"生成失败"证据
+    assert harness.metas[-1]["outcome"] == "cancelled"
+
+
+def test_generation_failure_without_cancel_still_burns_a_round():
+    """反向对照：没有取消令牌时，生成异常仍按契约失败回灌（防止把失败都当取消）。"""
+    ports, harness = make_ports([GOOD])
+    calls = {"n": 0}
+
+    def flaky(session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+        calls["n"] += 1
+        harness.prompts.append(message)
+        if calls["n"] == 1:
+            raise RuntimeError("结构化输出失败")
+        return GOOD
+
+    ports["opencode"].generate = flaky
+    result = run(ports)
+    assert result.outcome == "succeeded"
+    assert result.rounds == 2
+    assert "generation-error.txt" in _attempt_names(harness)
+
+
+# ── F7：detect 端口异常不得穿出编排层 ──────────────────────────────────────
+
+
+def test_detect_failure_aborts_instead_of_raising():
+    """detect 是唯一没有兜底的端口调用：抛异常要变成 aborted_dependency。"""
+    ports, harness = make_ports([GOOD])
+
+    def detect_that_raises():
+        raise OSError("探测子进程崩了")
+
+    ports["toolchain"].detect = detect_that_raises
+    result = run(ports)  # 不得抛异常
+
+    assert result.outcome == "aborted_dependency"
+    assert result.rounds == 0
+    assert harness.prompts == []  # 没进生成
+    assert "detect-error.txt" in _attempt_names(harness)
+    assert any(patch.get("outcome") == "aborted_dependency" for patch in harness.metas)

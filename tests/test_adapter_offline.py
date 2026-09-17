@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 import pytest
 
 import tu_shell_agent.opencode_adapter as adapter_mod
@@ -78,7 +79,12 @@ class StubServe:
         self.requests: list[tuple[str, str, str]] = []
         self.unauthorized_paths: list[str] = []
         self.message_response: dict = {"info": {"structured": _structured()}}
+        # 建会话的响应可替换：用来测 start() 失败时是否自我收尸（默认保持原行为）。
+        self.session_response: tuple[int, Any] = (200, {"id": SESSION_ID, "title": None})
         self.on_message: Callable[[], None] | None = None
+        # abort 到达时的钩子：真实 serve 收到 abort 会结束这次生成并返回响应，
+        # 用它让被挂起的 POST 也能返回，从而测出"abort 真的缩短了等待"。
+        self.on_abort: Callable[[], None] | None = None
         self._frames: list[str] = []
         self._cond = threading.Condition()
         self._stopping = False
@@ -153,7 +159,8 @@ class StubServe:
                     return
                 if self.path == "/session":
                     stub.session_bodies.append(body)
-                    self._send_json(200, {"id": stub.session_id, "title": body.get("title")})
+                    code, payload = stub.session_response
+                    self._send_json(code, payload)
                     return
                 if "/permissions/" in self.path:
                     stub.rejects.append((self.path, body))
@@ -161,6 +168,9 @@ class StubServe:
                     return
                 if self.path.endswith("/abort"):
                     stub.aborts.append(self.path)
+                    hook = stub.on_abort
+                    if hook is not None:
+                        hook()
                     self._send_json(200, True)
                     return
                 if self.path.endswith("/message"):
@@ -370,3 +380,101 @@ def test_permission_ask_is_auto_rejected(adapter, stub, notes, tmp_path: Path):
         (f"/session/{session_id}/permissions/per_2", {"response": "reject"}),
     ]
     assert any("per_1" in note for note in notes) and any("per_2" in note for note in notes)
+
+
+class _Cancel:
+    """最小取消令牌（与 CLI/UI 传进来的 threading.Event 同形：只有 is_set）。"""
+
+    def __init__(self) -> None:
+        self._set = False
+
+    def set(self) -> None:
+        self._set = True
+
+    def is_set(self) -> bool:
+        return self._set
+
+
+def test_generate_aborts_when_cancelled_before_sending(adapter, stub, tmp_path: Path):
+    """规格 §7.6：生成前已取消 → 不发请求，但仍要 abort 会话。"""
+    session_id = adapter.start(str(tmp_path / "run"))
+    token = _Cancel()
+    token.set()
+
+    with pytest.raises(RuntimeError, match="已取消"):
+        adapter.generate(session_id, "msg", SCHEMA, timeout_ms=5_000, cancel=token)
+
+    assert stub.aborts == [f"/session/{session_id}/abort"]
+    assert stub.message_bodies == []  # 请求根本没发出去
+
+
+def test_generate_watchdog_aborts_session_mid_flight(adapter, stub, tmp_path: Path):
+    """取消发生在请求在飞期间：看门线程必须发 abort，让在飞的 POST 尽早返回。
+
+    这是"生成阶段（最长 300s）不可取消"这个缺口的回归测试。关键在**时序**：
+    stub 收到 POST 后故意迟迟不响应（模拟一次长生成），只有看门线程能在飞期间发 abort；
+    而"请求返回后才发现令牌置位"那条兜底路径要等 POST 自己返回，救不了这个场景。
+    所以断言 elapsed 远小于 stub 的保持时间，否则该用例在去掉看门线程后仍会通过。
+    """
+    session_id = adapter.start(str(tmp_path / "run"))
+    token = _Cancel()
+    entered = threading.Event()  # stub 已收到 POST
+    aborted = threading.Event()  # stub 收到了 abort
+    HOLD_S = 3.0
+
+    def slow_message() -> None:
+        entered.set()
+        token.set()  # 用户在生成期间按了取消
+        # 模拟 serve 侧的一次长生成：只有 abort 到达才提前结束（否则挂满 HOLD_S）。
+        aborted.wait(timeout=HOLD_S)
+
+    stub.on_message = slow_message
+    stub.on_abort = aborted.set  # 真实 serve 语义：abort → 结束生成、POST 返回
+    stub.message_response = {"info": {}}  # 被打断的响应：没有结构化输出
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError):
+            adapter.generate(session_id, "msg", SCHEMA, timeout_ms=10_000, cancel=token)
+        elapsed = time.monotonic() - started
+    finally:
+        aborted.set()  # 无论成败都放行 handler 线程
+
+    assert entered.is_set(), "stub 必须真的收到过 POST"
+    # 只有看门线程能在飞期间发 abort；"请求返回后才发现令牌置位"的兜底救不了这个场景。
+    assert elapsed < HOLD_S / 2, f"POST 没有被 abort 打断，耗时 {elapsed:.2f}s"
+    # abort 与 POST 是两条独立连接，到账有先后：等它落地再断言。
+    # 只允许一条：看门线程发过之后，返回后的兜底不该重复发。
+    assert wait_until(lambda: stub.aborts == [f"/session/{session_id}/abort"]), stub.aborts
+    time.sleep(0.3)  # 给"重复发 abort"留出暴露窗口
+    assert stub.aborts == [f"/session/{session_id}/abort"], "不能重复发 abort"
+
+
+def test_start_failure_stops_serve_and_does_not_leak(monkeypatch, stub, notes, tmp_path: Path):
+    """建会话失败时 start() 必须自己收尸：否则 serve 子进程与 SSE 线程泄漏。
+
+    CLI 的 finally 会调 dispose()，恰好掩盖了这一点；这里直接作为库使用来验。
+    """
+    stopped: list[int] = []
+
+    def fake_start_serve(*_args, **_kwargs):
+        handle = stub.handle
+        original_stop = handle.stop
+
+        def stop_and_record() -> None:
+            stopped.append(1)
+            original_stop()
+
+        handle.stop = stop_and_record  # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(adapter_mod, "start_serve", fake_start_serve)
+    stub.session_response = (500, {"error": "boom"})
+
+    instance = OpencodeAdapter("stub-opencode-not-spawned", note=notes.append)
+    with pytest.raises(httpx.HTTPStatusError):
+        instance.start(str(tmp_path / "run"))
+
+    assert stopped == [1]  # serve 句柄被停掉
+    assert instance._serve is None and instance._client is None  # 状态被复位
+    assert instance._events_thread is None

@@ -29,20 +29,31 @@ class OpencodeAdapter:
     def start(self, run_dir: str, agent_name: str = AGENT_NAME, model: str | None = None) -> str:
         write_agent_file(run_dir, model)
         self._serve = start_serve(self._opencode_path, run_dir)
-        self._auth = basic_auth_header(self._serve.password)
-        self._client = httpx.Client(
-            base_url=self._serve.base_url,
-            headers={"authorization": self._auth},
-            timeout=httpx.Timeout(300.0, connect=10.0),
-            **LOOPBACK_OPTIONS,
-        )
-        self._stop_events.clear()
-        self._events_thread = threading.Thread(target=self._consume_events, daemon=True)
-        self._events_thread.start()
+        try:
+            self._auth = basic_auth_header(self._serve.password)
+            self._client = httpx.Client(
+                base_url=self._serve.base_url,
+                headers={"authorization": self._auth},
+                timeout=httpx.Timeout(300.0, connect=10.0),
+                **LOOPBACK_OPTIONS,
+            )
+            self._stop_events.clear()
+            self._events_thread = threading.Thread(target=self._consume_events, daemon=True)
+            self._events_thread.start()
 
-        response = self._client.post("/session", json={"title": f"tu-shell-agent {run_dir}"})
-        response.raise_for_status()
-        return str(response.json()["id"])
+            response = self._client.post("/session", json={"title": f"tu-shell-agent {run_dir}"})
+            response.raise_for_status()
+            return str(response.json()["id"])
+        except BaseException:
+            # 到这里 serve 已经起来了、SSE 线程也已经在了；异常上抛前必须自己收尸，
+            # 否则 serve 子进程与订阅线程都会泄漏。CLI 的 finally 会调 dispose()，
+            # 恰好掩盖了这一点 —— 作为库使用或 Plan 2 复用时就会漏。
+            self.dispose()
+            self._serve = None
+            self._client = None
+            self._events_thread = None
+            self._auth = ""
+            raise
 
     def dispose(self) -> None:
         self._stop_events.set()
@@ -95,6 +106,17 @@ class OpencodeAdapter:
         self._note(f"已自动拒绝 opencode 的权限请求 {permission_id}")
 
     # ── 生成 ────────────────────────────────────────────────────────────
+    def _cancel_requested(self, cancel: Any) -> bool:
+        is_set = getattr(cancel, "is_set", None)
+        return bool(callable(is_set) and is_set())
+
+    def _abort_quietly(self, session_id: str) -> None:
+        """abort 本身失败不该盖住真正的失败原因（取消/超时）。"""
+        try:
+            self.abort(session_id)
+        except Exception as error:  # noqa: BLE001
+            self._note(f"session.abort 失败：{error}")
+
     def generate(
         self,
         session_id: str,
@@ -106,19 +128,51 @@ class OpencodeAdapter:
     ) -> GeneratedScript:
         if self._client is None:
             raise RuntimeError("适配器未启动")
+        if self._cancel_requested(cancel):
+            # 规格 §7.6：在飞之前就取消 → 不发出请求，但要 abort 掉会话。
+            self._abort_quietly(session_id)
+            raise RuntimeError("已取消")
+
         self._on_delta = on_delta
         self._saw_delta = False
+        stop_watcher = threading.Event()
+        # 看门线程与"返回后才发现已取消"的兜底都会想发 abort；用集合记下已经发过的，
+        # 避免同一次 generate 连发两条 abort（幂等，但白费一次请求）。
+        aborted_by_watchdog: set[str] = set()
+        # 生成最长可到 generate_timeout_ms（默认 300s），是整个流程里最长的阻塞点。
+        # POST 一旦发出就无法从外部打断，所以用一个轻量看门线程在令牌置位时调 abort，
+        # 让 serve 侧尽快结束这次生成，POST 随之返回。
+        watcher = threading.Thread(
+            target=self._watch_cancel,
+            args=(session_id, cancel, stop_watcher, aborted_by_watchdog),
+            daemon=True,
+        )
+        if cancel is not None:
+            watcher.start()
+
         try:
-            response = self._client.post(
-                f"/session/{session_id}/message",
-                json={
-                    "agent": AGENT_NAME,
-                    "parts": [{"type": "text", "text": message}],
-                    "format": {"type": "json_schema", "schema": schema, "retryCount": 2},
-                },
-                timeout=timeout_ms / 1000.0,
-            )
+            try:
+                response = self._client.post(
+                    f"/session/{session_id}/message",
+                    json={
+                        "agent": AGENT_NAME,
+                        "parts": [{"type": "text", "text": message}],
+                        "format": {"type": "json_schema", "schema": schema, "retryCount": 2},
+                    },
+                    timeout=timeout_ms / 1000.0,
+                )
+            except httpx.TimeoutException:
+                # 规格 §7.6：超时 → session.abort()，否则 serve 侧还在后台生成。
+                self._abort_quietly(session_id)
+                raise
             response.raise_for_status()
+            if self._cancel_requested(cancel):
+                # 请求在取消之后才返回：这一轮的产出不可信，按取消处理。
+                # 看门线程通常已经发过 abort 了（那次 abort 正是 POST 能返回的原因），
+                # 别重复发。
+                if session_id not in aborted_by_watchdog:
+                    self._abort_quietly(session_id)
+                raise RuntimeError("已取消")
             payload = response.json()
             info = payload.get("info") or {}
             error = info.get("error")
@@ -145,6 +199,19 @@ class OpencodeAdapter:
             )
         finally:
             self._on_delta = None
+            stop_watcher.set()
+            if cancel is not None:
+                watcher.join(timeout=1.0)
+
+    def _watch_cancel(
+        self, session_id: str, cancel: Any, stop: threading.Event, aborted: set[str]
+    ) -> None:
+        """取消看门线程：令牌置位就 abort 会话，让在飞的 POST 尽快返回。"""
+        while not stop.wait(0.2):
+            if self._cancel_requested(cancel):
+                aborted.add(session_id)
+                self._abort_quietly(session_id)
+                return
 
     def abort(self, session_id: str) -> None:
         if self._client is not None:

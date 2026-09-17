@@ -26,6 +26,14 @@ class RunStore:
         root_path.write_text(text, encoding="utf-8")
         return str(root_path)
 
+    def write_inputs(self, files: dict[str, str]) -> None:
+        """运行目录根的输入快照（plan.md / template.sh）：让运行目录自包含可回放。"""
+        # 与 write_script / write_meta 保持一致的自我修复：不假定调用方先调过 init()。
+        target = Path(self.run_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            (target / name).write_text(content, encoding="utf-8")
+
     def write_attempt(self, round_no: int, files: dict[str, str]) -> None:
         target = Path(attempt_dir(self.run_dir, round_no))
         target.mkdir(parents=True, exist_ok=True)

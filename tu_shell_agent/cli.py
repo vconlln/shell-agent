@@ -29,13 +29,16 @@ def _path_overrides(args: argparse.Namespace) -> dict[str, str]:
     execute.run_script 也用 cwd=run_dir 执行脚本，**相对路径会在新 cwd 下解析不到**。
     实测：`--opencode-path tools/opencode` → `[Errno 2] No such file or directory: 'tools/opencode'`
     → aborted_dependency(0 轮)，而 CLI 自己的自检却是通过的（现象很迷惑）。
+
+    expanduser() 也不能少：`--opencode-path '~/tools/opencode'` 不展开的话会 resolve 成
+    字面 `cwd/~/tools/opencode`，探测失败后**静默回退 PATH** —— 用户以为覆盖生效了，其实没有。
     """
     pairs = (
         ("opencode", args.opencode_path),
         ("bash", args.bash_path),
         ("shellcheck", args.shellcheck_path),
     )
-    return {tool: str(Path(path).resolve()) for tool, path in pairs if path}
+    return {tool: str(Path(path).expanduser().resolve()) for tool, path in pairs if path}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

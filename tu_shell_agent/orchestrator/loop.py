@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from ..ports import ConfirmPort, OpencodePort, RunStorePort, ToolchainPort
@@ -84,6 +85,24 @@ def render_findings(findings: list[ShellcheckFinding] | tuple[ShellcheckFinding,
     )
 
 
+def _jsonable(value: Any) -> Any:
+    """把 dataclass 递归转成**安全可序列化**的结构。
+
+    不能直接塞 dataclass 对象进 meta.json（json.dumps 会 TypeError），也不能盲目
+    `asdict` 后原样落盘：调用方传进来的 dataclass 可能含非 JSON 值。这里逐层过滤，
+    只保留 json.dumps 真正认得的类型。
+    """
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def run_loop(input_: LoopInput) -> LoopResult:
     ports = input_.ports
     config = input_.config
@@ -97,10 +116,23 @@ def run_loop(input_: LoopInput) -> LoopResult:
     )
 
     emit(RunEvent("phase", 0, {"phase": "precheck"}))
-    detection = ports.toolchain.detect()
+    try:
+        detection = ports.toolchain.detect()
+    except Exception as error:  # noqa: BLE001
+        # detect 是最后一个裸调的端口。与 shellcheck/execute/start 三条路径保持同一不变量：
+        # 端口抛异常不得穿出编排层，一律终止为 aborted_dependency（规格 §6、§13）。
+        message = f"环境探测失败：{error}"
+        emit(RunEvent("note", 0, {"message": message}))
+        ports.store.write_attempt(0, {"detect-error.txt": message + "\n"})
+        ports.store.write_meta({"outcome": "aborted_dependency", "rounds": 0})
+        return LoopResult("aborted_dependency", 0)
     if detection.problems:
         emit(RunEvent("note", 0, {"message": "\n".join(detection.problems)}))
         return LoopResult("aborted_dependency", 0)
+
+    # 规格 §10：运行目录要自包含可回放 —— 输入（方案全文、渲染后的骨架）必须落盘，
+    # 否则事后无法判断"当时到底让它实现什么"。
+    ports.store.write_inputs({"plan.md": input_.plan, "template.sh": skeleton})
 
     try:
         session_id = ports.opencode.start(input_.run_dir, input_.agent_name, config.model)
@@ -115,11 +147,24 @@ def run_loop(input_: LoopInput) -> LoopResult:
     last_findings: tuple[ShellcheckFinding, ...] = ()
     last_execute: ExecuteResult | None = None
 
+    # 规格 §10：meta.json 要含「输入摘要、配置快照、自检结果、轮次结论、sessionId」。
+    # 在 start() 成功之后统一包一层，避免 8 处 write_meta 各写一遍。
+    def write_meta(patch: dict[str, Any]) -> None:
+        ports.store.write_meta(
+            {
+                "runId": Path(input_.run_dir).name,
+                "sessionId": session_id,
+                "config": _jsonable(config),
+                "detection": _jsonable(detection),
+                **patch,
+            }
+        )
+
     for round_no in range(1, config.max_rounds + 1):
         if _cancelled(input_.cancel):
             # 与另两处取消路径（用户拒绝、执行取消）保持一致：终态要落盘，
             # 否则运行目录里没有 meta.json，Plan 2 的历史列表读不到"这次已被取消"。
-            ports.store.write_meta({"outcome": "cancelled", "rounds": round_no - 1})
+            write_meta({"outcome": "cancelled", "rounds": round_no - 1})
             return LoopResult("cancelled", round_no - 1, last_findings=last_findings)
 
         started = time.monotonic()
@@ -144,6 +189,13 @@ def run_loop(input_: LoopInput) -> LoopResult:
             )
         except Exception as error:  # noqa: BLE001 - 结构化输出失败计一次契约失败
             failure = str(error)
+            if _cancelled(input_.cancel):
+                # 生成阶段（最长 generate_timeout_ms）是用户最可能按取消的地方。
+                # 取消不是"生成失败"：白烧一轮契约失败会让用户看到 needs_human 之类的假象，
+                # 所以必须先判取消，按取消终态落盘并返回（规格 §6 的 cancelled 分支）。
+                emit(RunEvent("note", round_no, {"message": "已取消"}))
+                write_meta({"outcome": "cancelled", "rounds": round_no - 1})
+                return LoopResult("cancelled", round_no - 1, last_findings=last_findings)
             evidence = FailureEvidence(
                 round=round_no,
                 stage="contract",
@@ -192,7 +244,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
             message = f"shellcheck 调用失败：{error}"
             emit(RunEvent("note", round_no, {"message": message}))
             ports.store.write_attempt(round_no, {"shellcheck-error.txt": message + "\n"})
-            ports.store.write_meta({"outcome": "aborted_dependency", "rounds": round_no})
+            write_meta({"outcome": "aborted_dependency", "rounds": round_no})
             return LoopResult(
                 "aborted_dependency", round_no, script_path, last_findings, last_execute
             )
@@ -215,7 +267,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
             round_no, script_path, script, input_.template.trusted
         )
         if not approved:
-            ports.store.write_meta({"outcome": "cancelled", "rounds": round_no})
+            write_meta({"outcome": "cancelled", "rounds": round_no})
             return LoopResult(
                 "cancelled", round_no, script_path, last_findings, last_execute
             )
@@ -234,7 +286,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
             message = f"执行失败（依赖问题）：{error}"
             emit(RunEvent("note", round_no, {"message": message}))
             ports.store.write_attempt(round_no, {"execute-error.txt": message + "\n"})
-            ports.store.write_meta({"outcome": "aborted_dependency", "rounds": round_no})
+            write_meta({"outcome": "aborted_dependency", "rounds": round_no})
             return LoopResult(
                 "aborted_dependency", round_no, script_path, last_findings, last_execute
             )
@@ -261,7 +313,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
         emit(RunEvent("execute", round_no, {"result": result}))
 
         if result.exit_code == 0 and not result.timed_out and not result.cancelled:
-            ports.store.write_meta(
+            write_meta(
                 {
                     "outcome": "succeeded",
                     "rounds": round_no,
@@ -272,7 +324,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
             return LoopResult("succeeded", round_no, script_path, last_findings, result)
 
         if result.cancelled:
-            ports.store.write_meta({"outcome": "cancelled", "rounds": round_no})
+            write_meta({"outcome": "cancelled", "rounds": round_no})
             return LoopResult("cancelled", round_no, script_path, last_findings, result)
 
         evidence = FailureEvidence(
@@ -287,6 +339,6 @@ def run_loop(input_: LoopInput) -> LoopResult:
             ),
         )
 
-    ports.store.write_meta({"outcome": "needs_human", "rounds": config.max_rounds})
+    write_meta({"outcome": "needs_human", "rounds": config.max_rounds})
     emit(RunEvent("phase", config.max_rounds, {"phase": "settled"}))
     return LoopResult("needs_human", config.max_rounds, None, last_findings, last_execute)
