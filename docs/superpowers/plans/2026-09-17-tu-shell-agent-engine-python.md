@@ -588,6 +588,18 @@ def test_set_trusted_persists(tmp_path):
     store = TemplateStore(str(tmp_path))
     store.set_trusted("single", True)
     assert TemplateStore(str(tmp_path)).get("single").trusted is True
+
+
+def test_save_on_fresh_store_still_seeds_builtins(tmp_path):
+    store = TemplateStore(str(tmp_path))
+    store.save(
+        TemplateInput(
+            id="mine", name="我的", description="", trusted=False,
+            placeholders=[], body="# @@TU:BODY@@\n",
+        )
+    )
+    ids = {meta.id for meta in store.list()}
+    assert {"single", "args-batch", "logged-errors"} <= ids
 ```
 
 - [ ] **步骤 2：运行测试验证失败**
@@ -861,7 +873,7 @@ class TemplateStore:
             placeholders=item.placeholders,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-        metas = [m for m in self._read_index() if m.id != item.id]
+        metas = [m for m in self.list() if m.id != item.id]
         metas.append(meta)
         self._write_index(metas)
         return meta
@@ -871,7 +883,8 @@ class TemplateStore:
         self._write_index([m for m in self._read_index() if m.id != template_id])
 
     def set_trusted(self, template_id: str, trusted: bool) -> None:
-        metas = self._read_index()
+        # 必须走 list()：index.json 是惰性创建的，_read_index() 在全新 store 上必然为空。
+        metas = self.list()
         for meta in metas:
             if meta.id == template_id:
                 meta.trusted = trusted
