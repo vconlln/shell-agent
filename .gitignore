@@ -1,9 +1,18 @@
-node_modules/
-dist/
-out/
-release/
-*.log
-.DS_Store
-.npm-cache/
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 本机联调用的工具与隔离家目录（不入库）
 tools/
 .toolhome/
+
+# 引擎默认输出目录（可用 --run-root/--templates-dir 改到别处）
+.tu-runs/
+.tu-templates/
+
+# PyInstaller（Plan 2）
+build/
+dist/
+*.spec

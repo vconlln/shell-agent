@@ -1,6 +1,6 @@
 # tu-shell-agent 设计规格
 
-- 状态：待用户审查
+- 状态：设计已批准；**技术栈已于 2026-09-17 修订为「全 Python」（见 §4 与 §19）**
 - 日期：2026-09-17
 - 目标平台：Windows（打包为本地 exe），开发/单测在 Arch Linux 上进行
 
@@ -32,8 +32,8 @@
 
 - CLI 非交互运行：`opencode run [message..]`，支持 `--agent`、`--dir`（指定运行目录）、`--session/-s`（续跑会话）、`--continue`、`--format json`（原始 JSON 事件）、`--auto`（自动批准未被显式拒绝的权限）、`--attach <url>`（复用已运行的 server）。[CLI 文档](https://opencode.ai/docs/cli/)
 - 常驻 server：`opencode serve`（默认 `127.0.0.1:4096`），可用 `OPENCODE_SERVER_PASSWORD` + `OPENCODE_SERVER_USERNAME`（默认 `opencode`）启用 HTTP Basic 认证；暴露 OpenAPI 3.1（`GET /doc`）、健康检查 `GET /global/health`（返回 `{healthy, version}`）、SSE 事件流 `GET /event`。[Server 文档](https://opencode.ai/docs/server/)
-- JS/TS SDK：`@opencode-ai/sdk`，`createOpencode()` 起 server+client，或 `createOpencodeClient({baseUrl})` 接已有 server；`session.create/prompt/abort/messages` 等。[SDK 文档](https://opencode.ai/docs/sdk/)
-- **结构化输出**：`session.prompt` 的 body 可带 `format: {type:'json_schema', schema, retryCount?}`，模型通过内部 `StructuredOutput` 工具返回**经 schema 校验的 JSON**（结果在 `info.structured_output`）；失败抛出 `StructuredOutputError`（含 `retries`）。这是只有 server/SDK 才有的能力，CLI 没有对应 flag。[SDK 文档](https://opencode.ai/docs/sdk/#structured-output)
+- **官方 SDK 只有 JS/TS**（`@opencode-ai/sdk`，`createOpencode()` / `createOpencodeClient({baseUrl})`）。**Python 没有官方 SDK** → 本应用直接打 server 的 HTTP/SSE 接口，端点契约以 server 暴露的 OpenAPI 3.1（`GET /doc`）为准。[SDK 文档](https://opencode.ai/docs/sdk/)
+- **结构化输出**：发消息的 body 可带 `format: {type:'json_schema', schema, retryCount?}`（HTTP 上是 `POST /session/:id/message`；JS SDK 里是 `session.prompt` 的 `format`），模型通过内部 `StructuredOutput` 工具返回**经 schema 校验的 JSON**，结果在响应的 `info.structured_output`；失败时 `info.error.name === 'StructuredOutputError'`（含 `retries`）。只有 server 提供该能力，CLI 没有对应 flag。[SDK 文档](https://opencode.ai/docs/sdk/#structured-output)
 - Agent 定义：markdown + frontmatter 放在全局 `~/.config/opencode/agents/` 或项目级 `.opencode/agents/`，**文件名即 agent 名**；也可写在 `opencode.json` 的 `agent` 键下。frontmatter 支持 `description`（必填）、`mode: primary|subagent|all`、`model`、`temperature`、`permission`、`steps`、`disable`、`hidden` 等。[Agents 文档](https://opencode.ai/docs/agents/)
 - 非交互生成 agent：`opencode agent create --path <dir> --description <d> --mode <m> --permissions <list> [--model]`，四个参数齐全即不进入交互；`--permissions` 可取值 `bash,read,edit,glob,grep,webfetch,task,todowrite,websearch,lsp,skill`，**未列出的权限一律拒绝**。[CLI 文档](https://opencode.ai/docs/cli/#create)
 - 权限模型：取值 `allow | ask | deny`；支持对象式细粒度规则（按输入匹配，`*`/`?` 通配，**最后一条匹配的规则生效**）；键包括 `read, edit, glob, grep, bash, task, skill, lsp, question, webfetch, websearch, external_directory, doom_loop`；默认大多为 `allow`，`doom_loop` 与 `external_directory` 默认 `ask`，`.env` 默认拒绝。**agent 的权限与全局配置合并，且 agent 规则优先**。[Permissions 文档](https://opencode.ai/docs/permissions/)
@@ -57,29 +57,39 @@
 
 | 项 | 选择 | 理由 |
 | --- | --- | --- |
-| 外壳 | Electron | 用户机器上 DSH Desktop 就是 Electron 2.0.2，Windows 打包链路已熟悉；后端就是 Node，spawn opencode / Git Bash / shellcheck 最直接 |
-| 语言 | TypeScript | 事件与状态机需要类型约束 |
-| 渲染层 | React + Vite | 三区布局 + 事件流驱动，组件化收益明确 |
-| 打包 | electron-builder，NSIS 安装包 + 便携 exe | 覆盖"双击即用" |
-| 测试 | vitest | 与 Vite 同栈 |
-| opencode 接入 | `@opencode-ai/sdk` + 自管 `opencode serve` | 见 §7.1 |
+| 语言 | Python 3.14（最低 3.10） | 用户裁定的技术栈；PySide6 的 abi3 轮子覆盖 3.10+，本机 3.14.7 实测可解析 |
+| 界面 | PySide6 6.11（Qt 6） | 原生桌面控件；一套栈直接打 exe，不引入 Node；引擎跑在 `QThread`，用 Qt 信号驱动 |
+| opencode 接入 | 自管 `opencode serve` + `httpx` 直打 HTTP/SSE | 官方无 Python SDK（§3），端点以 OpenAPI 为准；见 §7.1 |
+| 子进程 | `subprocess`（POSIX 用进程组、Windows 用 `taskkill /T /F` 杀树） | 执行脚本、杀进程树、起停 server |
+| 打包 | PyInstaller 6.x（one-folder + 单文件便携 exe） | Windows 双击即用；PySide6 有官方 hook |
+| 测试 | pytest 9 + pytest-qt 4.5 | 引擎纯 pytest；界面用 pytest-qt |
+| 数据与类型 | 冻结 `dataclass` + `typing.Protocol`（不引入 pydantic） | 端口用 Protocol，数据用 dataclass，YAGNI |
 | 模板引擎 | 自实现简单替换（`{{name}}`） | 见 §8，YAGNI |
 
 ## 5. 架构与组件
 
-单向依赖：`renderer → (IPC) → main → orchestrator → {opencode-adapter, shell-toolchain, stores}`。orchestrator 与 stores **不 import 任何 Electron 或 child_process**，因此可在 Linux 上纯单测。
+单向依赖：`ui → orchestrator → {opencode_adapter, shell_toolchain, template_store, run_store}`。**`orchestrator` 与两个 store 是纯 Python：不 import PySide6、不 import `subprocess`**，外部世界一律通过 §5.1 的端口注入——因此它们能在没有界面、没有 Windows 的机器上纯单测。
 
 | 组件 | 职责 | 依赖 |
 | --- | --- | --- |
-| `main` | 窗口、IPC 路由、生命周期、退出时清理子进程 | Electron |
-| `orchestrator` | 运行状态机（§6）。输入=方案+模板+配置，输出=事件流；唯一"知道流程"的地方 | 下面几个的接口 |
-| `opencode-adapter` | 唯一与 opencode 通信处。对外：`startRun({runDir, agentName, model?})` → `{sessionId}`；`generate({sessionId, prompt, schema})` → `{structured, events}`；`abort()`；`dispose()` | `@opencode-ai/sdk`、child_process |
-| `shell-toolchain` | `detect()` 环境自检；`shellcheck(path, opts)` → 归一化报告；`execute(path, opts)` → 流式输出 + 退出码；`killTree(pid)` | child_process |
-| `template-store` | 模板 CRUD、占位符元数据、`trusted` 标记、持久化 | fs |
-| `run-store` | 运行目录布局、每轮落盘、历史索引与回放 | fs |
-| `renderer` | 只发命令、只渲染事件；不含业务判断 | IPC |
+| `ui`（PySide6） | 主窗口、三区视图、设置页、环境自检页；只发命令、只渲染事件，不含业务判断 | PySide6、`orchestrator` |
+| `orchestrator` | 运行状态机（§6）。输入=方案+模板+配置，输出=事件流；唯一"知道流程"的地方 | 仅 §5.1 的端口 |
+| `opencode_adapter` | 唯一与 opencode 通信处。对外：`start(run_dir, agent_name, model)` → `session_id`；`generate(session_id, message, schema, ...)` → `GeneratedScript`；`abort()`；`dispose()` | `httpx`、`subprocess` |
+| `shell_toolchain` | `detect()` 环境自检；`shellcheck(path)` → 归一化报告；`execute(path, ...)` → 流式输出 + 退出码；`kill_tree(pid)` | `subprocess` |
+| `template_store` | 模板 CRUD、占位符元数据、`trusted` 标记、持久化 | `pathlib`、`json` |
+| `run_store` | 运行目录布局、每轮落盘、历史索引与回放 | `pathlib`、`json` |
+| `cli.py` | 无界面的开发驱动：跑完整流程并打印时间线（Plan 1 的端到端入口） | 以上全部 |
 
-`opencode-adapter` 的接口刻意与传输方式解耦：v1 用 SDK 实现，若在 Windows 实测 server 起不来，可换成 CLI 实现（§7.1 应急路径）而不动 orchestrator。
+### 5.1 端口（`ports.py`）
+
+四个 `typing.Protocol` 是引擎与外界唯一的缝：
+
+- `ToolchainPort`：`detect()`、`shellcheck(path)`、`execute(path, cwd, timeout_ms, signal, on_stdout, on_stderr)`
+- `OpencodePort`：`start(run_dir, agent_name, model)`、`generate(session_id, message, schema, timeout_ms, on_delta, signal)`、`abort(session_id)`、`dispose()`
+- `ConfirmPort`：`confirm(round, script_path, script, trusted) -> bool`
+- `RunStorePort`：`run_dir`、`write_script(round, script)`、`write_attempt(round, files)`、`write_meta(patch)`
+
+所有跨模块数据在 `types.py` 里以冻结 `dataclass` 定义（`ShellcheckFinding`、`ExecuteResult`、`ContractResult`、`FailureEvidence`、`RunConfig`、`RunEvent`…）：`types.py` 是类型的唯一来源。`opencode_adapter` 的接口刻意与传输方式解耦，端点在 1.x/2.x 之间漂移时只需改这一个模块（§18 风险 9）。
 
 ## 6. 状态机与数据流
 
@@ -109,11 +119,12 @@ idle
 
 **v1 主路径**：每次运行启动一个独占的 `opencode serve`
 - `cwd = 本次运行目录`（§10），随机空闲端口，随机 `OPENCODE_SERVER_PASSWORD`，`--hostname 127.0.0.1`。
-- 由本应用 spawn（而非 SDK 的 `createOpencode()` 自动拉起），以便把 server 的 stdout/stderr 收进 `server.log` 并在自检页展示。
-- 客户端：`createOpencodeClient({baseUrl})` + Basic 认证头。
+- 由本应用用 `subprocess.Popen` 拉起（cwd = 运行目录），把 server 的 stdout/stderr 收进 `server.log` 并在自检页展示。
+- 客户端：`httpx` + Basic 认证头（用户名 `opencode`，密码 = 我们自己指定的 `OPENCODE_SERVER_PASSWORD`）。
+- 用到的端点（Python 无官方 SDK，直接打 HTTP）：`GET /global/health`（就绪判定）、`POST /session`（建会话）、`POST /session/:id/message`（发消息 + `format` 结构化输出）、`GET /event`（SSE）、`POST /session/:id/abort`、`POST /session/:id/permissions/:permissionID`（自动拒绝）。
 - 运行结束（含取消/崩溃）必须 `dispose()` 并杀掉 server 进程树。
 
-**为什么不是"CLI 优先"**：结构化输出（§7.3）只有 server/SDK 有，而它正是产出契约可靠性的来源；SDK 也是官方给出的集成面。
+**为什么不是"CLI 优先"**：结构化输出（§7.3）只有 server 提供，而它正是产出契约可靠性的来源——`opencode run` 从不发送 `format`（源码确认）。
 
 **应急路径**（仅当 Windows 实测 `serve` 不可用时启用，不在首次交付范围）：改用 `opencode run --dir <runDir> --agent <name> --format json -s <sessionId>`，产出契约退化为"文件契约"（agent 获得 `edit` 权限，直接把 `script.sh` 写到运行目录，权限仍保持 `bash: deny`）。切换成本被限制在 `opencode-adapter` 一个模块内。
 
@@ -143,7 +154,7 @@ permission:
 
 ### 7.3 产出契约（结构化输出）
 
-`session.prompt` 带 JSON schema：
+发消息时带 JSON schema（HTTP：`POST /session/:id/message` 的 body 里带 `format`）：
 
 ```js
 {
@@ -270,7 +281,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 
 ## 12. UI 规格
 
-单窗口，三区 + 底栏 + 两个独立页（环境自检、设置）。
+单窗口，三区 + 底栏 + 两个独立页（环境自检、设置）。PySide6 落点：`QMainWindow` + `QSplitter`（三栏）、`QPlainTextEdit`（脚本与日志）、`QTreeWidget`（shellcheck 按 SC 编号分组）、`QListWidget`（轮次时间线与历史）、`QTabWidget`（设置页、自检页）。**引擎跑在 `QThread` 里，通过 Qt 信号把 `RunEvent` 投递到主线程**；引擎自身不认识 Qt，因此可用纯 pytest 测。
 
 - **左栏**：方案（选文件/拖入 + 文本预览 + 摘要）；模板库（列表 + 编辑器 + 占位符表单 + `trusted` 开关）；本次运行参数（运行根目录、阻断级别、轮次上限、两个超时）。全局项不在此处：**组件路径（opencode/Git Bash/shellcheck 的 exe 位置）只出现在"设置"页**，避免两处可改。
 - **中栏**：本轮脚本全文（行号 + 与上一轮 diff 切换）；轮次时间线（每轮：阶段、结论、耗时）。
@@ -296,11 +307,11 @@ shellcheck --norc -s bash -f json1 -- <script>
 
 **Linux 上可跑（CI 等价）**
 
-- `orchestrator`：注入 fake `opencode-adapter` 与 fake `shell-toolchain`，覆盖三条主路径（一次通过 / 第 2 轮修好 / 3 轮转人工）、取消、超时、契约失败、shellcheck 退出码 2/3/4。
-- `template-store`：占位符渲染、未声明占位符报错、`trusted`、CRLF 归一化。
-- `run-store`：目录布局、每轮落盘、索引重建、回放。
-- `shell-toolchain`：本机真实 bash + 已安装的 shellcheck（Arch 上 `pacman -S shellcheck`），验证 `json1` 解析、退出码映射、`SHELLCHECK_OPTS` 清理、超时与进程树终止。
-- `renderer`：三区渲染与事件驱动更新（组件级）。
+- `orchestrator`：注入 fake `OpencodePort` 与 fake `ToolchainPort`，覆盖三条主路径（一次通过 / 第 2 轮修好 / 3 轮转人工）、取消、超时、契约失败、shellcheck 退出码 2/3/4、server 启动失败。
+- `template_store`：占位符渲染、未声明占位符报错、`trusted`、CRLF 归一化。
+- `run_store`：目录布局、每轮落盘、索引重建、回放。
+- `shell_toolchain`：真实 bash + 项目内 `tools/shellcheck`（0.11.0 静态二进制），验证 `json1` 解析、退出码映射、`SHELLCHECK_OPTS` 清理、超时与进程树终止（POSIX 进程组 / Windows `taskkill`）。
+- `ui`：三区渲染与事件驱动更新（pytest-qt，Plan 2）。
 
 **端到端夹具**（两个，必须真实跑）
 
@@ -313,7 +324,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 - shellcheck 探测与 winget 安装指引；UTF-8 输出无乱码。
 - opencode 原生安装下的 `serve` 启动、agent 发现（`opencode agent list`）、结构化输出实际可用。
 - **权限确实生效**（整个安全模型的地基，必须显式验证）：在受控运行目录里让 agent 尝试执行一条无害命令、尝试写一个文件，确认结果是**被拒绝**而不是弹出 `ask` 询问导致挂起；并确认用户全局配置里把 `bash` 设为 `allow` 也覆盖不了本 agent 的 `deny`。
-- `electron-builder` 产物：NSIS 安装包 + 便携 exe 双击可用。
+- PyInstaller 产物：one-folder 目录与单文件便携 exe 双击可用；PySide6 的 Qt 插件（`platforms/`、`styles/`）被正确收集，界面能起来。
 - 中文路径与含空格路径（`C:\Users\张三\我的 方案.md`）。
 
 ## 15. 验收标准
@@ -333,6 +344,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 3. **新增 `external_directory: deny`**：其默认 `ask` 会让运行静默挂住。
 4. **shellcheck 调用参数固定**（`--norc -s bash -f json1`，清理 `SHELLCHECK_OPTS`），阻断级别默认 `warning`。
 5. **明确要求 Windows 原生 opencode**，不做 WSL 路径映射。
+6. **技术栈整体修订为「全 Python」**（用户于 2026-09-17 裁定，见 §19）：Electron / TypeScript / React / vitest / electron-builder 全部替换为 PySide6 / httpx / pytest / PyInstaller；opencode 接入从官方 JS SDK 改为直打 HTTP/SSE。§5–§13 的架构（分层、端口、状态机、契约、权限模型）不受影响。
 
 ## 17. 建议实施分期
 
@@ -341,7 +353,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 1. **M1 工具链**：`shell-toolchain`（探测 + shellcheck + 执行 + 杀进程树）+ 设置页 + 环境自检页。此时可在本机 Linux 上真实跑通 shellcheck 与执行。
 2. **M2 opencode 接入**：`opencode-adapter` + agent 定义生成 + 结构化输出 + 会话续跑；用手指夹具脚本替代 UI 验证生成与修复闭环。
 3. **M3 编排与界面**：`orchestrator` 状态机 + `template-store` + `run-store` + 三区 UI + 历史回放。
-4. **M4 打包与 Windows 验收**：electron-builder 出 NSIS/便携 exe，执行 §14 的 Windows 手测清单与 §15 验收标准。
+4. **M4 打包与 Windows 验收**：PyInstaller 出 one-folder 与单文件便携 exe，执行 §14 的 Windows 手测清单与 §15 验收标准。
 
 ## 18. 未决风险
 
@@ -353,3 +365,17 @@ shellcheck --norc -s bash -f json1 -- <script>
 6. `permission: {"*": deny}` 这种**总键**写法在文档示例里出现过（与具体键并存），但源码级调研只列出了具体权限键（`read/edit/glob/grep/list/bash/task/external_directory/lsp/skill` + `todowrite/question/webfetch/websearch/doom_loop`）。因此实现时**不把安全模型只押在总键上**：要求逐键显式 `deny`，并在 M2 的 Windows 手测里实测"全局设 `bash: allow` 也覆盖不了 agent 的 `deny`"（§14）。
 7. 原生 Windows 上的 opencode 全局配置目录文档未写明（只给 `~/.config/opencode/`）：本应用只用**项目级** `.opencode/agents/`，因此不依赖它；仅当将来要做全局安装时才需确认。
 8. opencode 自身在 Windows 用哪个 shell（源码里 `pwsh 优先` 与 `cmd.exe 默认` 两条路径并存）与本应用无关 —— 因为 agent 的 `bash` 权限被拒绝，执行一律由后端直接调用 Git Bash。这条只有在启用 §7.1 应急路径时才需要重新评估。
+9. **没有官方 Python SDK**：端点契约直接依赖 opencode server 的 HTTP 接口，端点漂移是真实风险（已观察到 2.x 把 API 整体搬到 `/api/*` 并去掉结构化输出）。缓解：自检记录 server 版本；`opencode_adapter` 是唯一接触端点的地方，漂移只需改一个模块；M2 的真实冒烟必须验证 `format` 与结构化输出确实返回。
+10. PySide6 + PyInstaller 在 Windows 上的产物体积约 150–250MB（Qt 运行时），且首次打包可能需要补 hook —— M4 的 Windows 手测包含"干净机器双击可用"。
+
+## 19. 技术栈修订记录（2026-09-17）
+
+用户在实现阶段裁定：**全 Python（PySide6 桌面界面 + Python 后端）**，取代原先的 Electron + TypeScript + React。
+
+**为什么改**：用户明确要以 Python 开发这个 agent。原技术栈是我在"交付形态=独立桌面应用"这个答复之上自行选定的，用户未反对但也没有选定语言；一旦明确，越早改越便宜。
+
+**受影响**：语言与运行时（Node → Python 3.10+）、界面（Electron/React → PySide6）、opencode 接入（官方 JS SDK → `httpx` 直打 HTTP/SSE）、测试（vitest → pytest / pytest-qt）、打包（electron-builder → PyInstaller）。
+
+**不受影响**（这是架构与语言解耦的收益）：§5 的分层与端口、§6 状态机、§7 的 agent 定义/产出契约/失败回灌/自动拒绝权限、§8 模板系统、§9 环境自检、§10 磁盘布局、§11 执行与校验、§13 错误处理、§15 验收标准。
+
+**已验证的可行性**（本机 Arch + Python 3.14.7）：PySide6 6.11.2（cp310-abi3 轮子）、pytest 9.1.1、pytest-qt 4.5.0、PyInstaller 6.22.3 均可解析安装；`httpx` 系统已装。
