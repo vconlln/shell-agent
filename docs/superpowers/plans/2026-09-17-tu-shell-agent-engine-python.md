@@ -1197,6 +1197,22 @@ def test_parse_version_extracts_semver():
     assert parse_version("bash", "GNU bash, version 5.2.37(1)-release (x86_64)") == "5.2.37"
 
 
+def test_unparseable_opencode_version_is_reported_honestly_not_as_too_old():
+    """装了但版本解析不出来时，不能误报成「版本过低」，也不能静默放行。"""
+    report = detect_all(
+        DetectDeps(
+            platform="linux",
+            exists=lambda path: True,
+            which=lambda name: f"/usr/bin/{name}",
+            run_version=lambda path: "not-a-version" if "opencode" in path else "ShellCheck\nversion: 0.11.0",
+        )
+    )
+    joined = "\n".join(report.problems)
+    assert "版本过低" not in joined
+    assert "无法识别" in joined
+    assert report.opencode is not None and report.opencode.version == "unknown"
+
+
 def test_is_at_least_compares_three_segments():
     assert is_at_least("1.18.31", "1.1.1") is True
     assert is_at_least("1.0.9", "1.1.1") is False
@@ -1337,6 +1353,13 @@ def detect_all(deps: DetectDeps) -> DetectionReport:
     problems: list[str] = []
     if opencode is None:
         problems.append(_INSTALL_HINTS["opencode"])
+    elif opencode.version == "unknown":
+        # 不能落进「版本过低」分支：那是「装了但版本解析不出来」，误报会让用户去升级一个没问题的安装。
+        # 同时也不静默放行——版本未知就无法确认它支持 permission 配置，而那是安全模型的前提。
+        problems.append(
+            f"无法识别 opencode 版本（--version 输出解析不出）：无法确认它支持 permission 配置，"
+            f"请确认版本 >= {MIN_OPENCODE_VERSION}"
+        )
     elif not is_at_least(opencode.version, MIN_OPENCODE_VERSION):
         problems.append(
             f"opencode 版本过低（{opencode.version}）：需要 >= {MIN_OPENCODE_VERSION} 才有 permission 配置"
@@ -1381,7 +1404,7 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_detect.py -q`
-预期：PASS（8 passed）
+预期：PASS（10 passed）
 
 - [ ] **步骤 5：Commit**
 
