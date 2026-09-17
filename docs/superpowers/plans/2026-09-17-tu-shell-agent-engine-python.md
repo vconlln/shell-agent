@@ -212,13 +212,29 @@ class GeneratedScript:
 
 
 @dataclass(frozen=True, slots=True)
+class ContractEvidence:
+    reason: ContractFailure
+    missing_anchors: tuple[str, ...] = ()
+    # message 用于「这一轮根本没产出脚本」（结构化输出失败/超时），此时 reason 记 empty
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecuteEvidence:
+    exit_code: int | None
+    timed_out: bool
+    stdout_tail: str
+    stderr_tail: str
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class FailureEvidence:
     round: int
     stage: Stage
-    # message 用于「这一轮根本没产出脚本」（结构化输出失败/超时），此时 reason 记 empty
-    contract: dict[str, Any] | None = None
+    contract: ContractEvidence | None = None
     shellcheck: tuple[ShellcheckFinding, ...] = ()
-    execute: dict[str, Any] | None = None
+    execute: ExecuteEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1837,7 +1853,12 @@ from tu_shell_agent.orchestrator.prompt import (
     build_repair_message,
     shellcheck_summary,
 )
-from tu_shell_agent.types import FailureEvidence, ShellcheckFinding
+from tu_shell_agent.types import (
+    ContractEvidence,
+    ExecuteEvidence,
+    FailureEvidence,
+    ShellcheckFinding,
+)
 
 
 def test_output_schema_requires_three_fields():
@@ -1880,10 +1901,10 @@ def test_repair_message_carries_execute_evidence():
     evidence = FailureEvidence(
         round=2,
         stage="execute",
-        execute={
-            "exit_code": 1, "timed_out": False, "duration_ms": 12,
-            "stdout_tail": "", "stderr_tail": "no such file",
-        },
+        execute=ExecuteEvidence(
+            exit_code=1, timed_out=False, duration_ms=12,
+            stdout_tail="", stderr_tail="no such file",
+        ),
     )
     message = build_repair_message(evidence=evidence, anchors=(), skeleton="")
     assert "退出码 1" in message
@@ -1894,7 +1915,7 @@ def test_repair_message_carries_generation_error_text():
     evidence = FailureEvidence(
         round=1,
         stage="contract",
-        contract={"reason": "empty", "missing_anchors": (), "message": "StructuredOutputError"},
+        contract=ContractEvidence(reason="empty", message="StructuredOutputError"),
     )
     message = build_repair_message(evidence=evidence, anchors=(), skeleton="")
     assert "StructuredOutputError" in message
@@ -2043,15 +2064,14 @@ def build_repair_message(
     lines: list[str] = [f"## 第 {evidence.round} 轮失败反馈（阶段：{evidence.stage}）", ""]
 
     if evidence.contract is not None:
-        message = evidence.contract.get("message")
-        if message:
-            lines.append(f"上一轮没有产出可用脚本：{message}")
+        contract = evidence.contract
+        if contract.message:
+            lines.append(f"上一轮没有产出可用脚本：{contract.message}")
             lines.append("请重新返回符合 schema 的 JSON（script 字段必须是完整脚本）。")
         else:
-            lines.append(f"契约校验未通过：{evidence.contract.get('reason')}")
-            missing = evidence.contract.get("missing_anchors") or ()
-            if missing:
-                lines.append(f"缺失的锚点：{'、'.join(missing)}")
+            lines.append(f"契约校验未通过：{contract.reason}")
+            if contract.missing_anchors:
+                lines.append(f"缺失的锚点：{'、'.join(contract.missing_anchors)}")
         lines.append("")
 
     if evidence.shellcheck:
@@ -2065,14 +2085,13 @@ def build_repair_message(
 
     if evidence.execute is not None:
         exec_info = evidence.execute
-        suffix = "（超时被杀）" if exec_info.get("timed_out") else ""
+        suffix = "（超时被杀）" if exec_info.timed_out else ""
         lines.append(
-            f"执行失败：退出码 {exec_info.get('exit_code')}{suffix}，"
-            f"耗时 {exec_info.get('duration_ms')}ms"
+            f"执行失败：退出码 {exec_info.exit_code}{suffix}，耗时 {exec_info.duration_ms}ms"
         )
         lines.append("")
-        stderr_tail = (exec_info.get("stderr_tail") or "").rstrip()
-        stdout_tail = (exec_info.get("stdout_tail") or "").rstrip()
+        stderr_tail = exec_info.stderr_tail.rstrip()
+        stdout_tail = exec_info.stdout_tail.rstrip()
         if stderr_tail:
             lines.extend(["stderr 尾部：", "```", stderr_tail, "```", ""])
         if stdout_tail:
@@ -2678,13 +2697,18 @@ class OpencodeAdapter:
             response.raise_for_status()
             payload = response.json()
             info = payload.get("info") or {}
-            structured = info.get("structured_output")
+            error = info.get("error")
+            if isinstance(error, dict) and error.get("name"):
+                detail = (error.get("data") or {}).get("message", "")
+                raise RuntimeError(f"opencode 返回错误 {error['name']}：{detail}")
+            # 真实 1.18.31 的 OpenAPI 把结构化结果放在 AssistantMessage.structured；
+            # JS SDK 文档写的是 structured_output —— 两个都认，避免版本漂移。
+            structured = info.get("structured")
             if not isinstance(structured, dict):
-                error = info.get("error") or {}
+                structured = info.get("structured_output")
+            if not isinstance(structured, dict):
                 raise RuntimeError(
-                    "opencode 未返回 structured_output"
-                    f"（error={error.get('name', 'none')}）；若服务端把字段改名为 outputFormat，"
-                    "改这一处即可——文档在 format 与 outputFormat 两处不一致"
+                    "opencode 未返回结构化输出（已查 info.structured 与 info.structured_output）"
                 )
             script = structured.get("script")
             if not isinstance(script, str) or not script.strip():
@@ -2706,7 +2730,13 @@ class OpencodeAdapter:
 __all__ = ["OpencodeAdapter", "AGENT_NAME"]
 ```
 
-> **实现者注意：** `format` 字段名有文档不一致（规格 §18 风险 9 记录了这一点）。若真实冒烟时服务端不认这个字段，只改 `generate()` 里这一处并更新任务 12 的 `test_e2e_live.py`，不要扩大改动范围。
+> **已核对（控制者用真实 opencode 1.18.31 的 OpenAPI 验证，不是猜的）：**
+> - 请求字段就是 `format`（`POST /session/{sessionID}/message` 的 body，指向 `OutputFormat = TextOutputFormat | OutputFormatJsonSchema`）；`outputFormat` 在规范里零命中。
+> - 结构化结果落在响应 `info.structured`；`info.error` 失败时是 `StructuredOutputError{message, retries}`。
+> - body 只有 `parts` 必填，`agent` / `model` / `system` / `tools` 均可选。
+> - `GET /global/health` 返回 `{"healthy": true, "version": "1.18.31"}`；权限应答端点是 `POST /session/{sessionID}/permissions/{permissionID}`。
+>
+> 上面代码里"两个字段都读"是为兼容 JS SDK 文档的写法，不要删。
 
 - [ ] **步骤 4：运行测试验证通过**
 
