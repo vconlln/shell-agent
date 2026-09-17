@@ -246,7 +246,7 @@ agent 正文（system）要点：
   plan.md                            # 方案副本（冻结本次输入）
   template.sh                        # 渲染后的骨架（只读参考）
   script.sh                          # 当前脚本（LF）
-  attempts\1\{script.sh, shellcheck.json, shellcheck.txt, stdout.txt, stderr.txt, evidence.json}
+  attempts\1\{script.sh, notes.md, contract.json, shellcheck.json, shellcheck.txt, stdout.txt, stderr.txt, execute.json}
   attempts\2\...
   server.log                         # opencode serve 的 stdout/stderr
   meta.json                          # 输入摘要、配置快照、自检结果、轮次结论、sessionId
