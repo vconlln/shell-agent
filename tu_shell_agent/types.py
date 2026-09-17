@@ -101,7 +101,7 @@ class RunConfig:
     max_rounds: int = 3
     generate_timeout_ms: int = 300_000
     execute_timeout_ms: int = 120_000
-    blocking_level: Severity = "warning"
+    blocking_level: Severity = "info"  # 实测 SC2086 就是 info 级，用 warning 会让它"只展示不修"
     bash_path: str | None = None
     shellcheck_path: str | None = None
     opencode_path: str | None = None

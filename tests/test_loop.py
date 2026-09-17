@@ -126,6 +126,21 @@ def run(input_ports, template=None, plan="方案", cancel=None):
     )
 
 
+def _attempt_file(harness, name: str) -> str:
+    """按文件名取出 write_attempt 写入的内容（不依赖同一轮内的调用次序）。"""
+    return next(files[name] for _round, files in harness.attempts if name in files)
+
+
+def _attempt_names(harness) -> set[str]:
+    """write_attempt 写过的全部文件名（不依赖同一轮内的调用次序）。
+
+    注意与 _attempt_file 的区别：后者返回**文件内容**，所以「文件名是否被写入过」
+    必须查这个集合，写成 `name in _attempt_file(harness, name)` 是在内容里找文件名，
+    恒为 False。
+    """
+    return {name for _round, files in harness.attempts for name in files}
+
+
 def test_first_round_pass_succeeds_and_writes_once():
     ports, harness = make_ports([GOOD])
     result = run(ports)
@@ -187,7 +202,7 @@ def test_start_failure_returns_aborted_dependency():
     result = run(ports)
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 0
-    assert "start-error.txt" in harness.attempts[0][1]
+    assert ("start-error.txt" in _attempt_names(harness)) is True
     assert {"outcome": "aborted_dependency", "rounds": 0} in harness.metas
 
 
@@ -203,7 +218,7 @@ def test_shellcheck_dependency_failure_aborts_without_repair_loop():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
-    assert "shellcheck-error.txt" in harness.attempts[-1][1]
+    assert ("shellcheck-error.txt" in _attempt_names(harness)) is True
     assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
 
 
@@ -219,7 +234,7 @@ def test_execute_dependency_failure_aborts_instead_of_raising():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
-    assert "execute-error.txt" in harness.attempts[-1][1]
+    assert ("execute-error.txt" in _attempt_names(harness)) is True
     assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
 
 
@@ -252,11 +267,28 @@ def test_missing_anchor_reports_contract_failure_into_next_prompt():
     assert "@@TU:BODY@@" in harness.prompts[1]
 
 
-def test_info_level_findings_do_not_block():
+def test_style_level_findings_do_not_block():
     ports, _harness = make_ports(
-        [GOOD], shellcheck_for=lambda _s: [ShellcheckFinding("SC2006", 1, 1, "info", "use $()")]
+        [GOOD], shellcheck_for=lambda _s: [ShellcheckFinding("SC2006", 1, 1, "style", "use $()")]
     )
     assert run(ports).outcome == "succeeded"
+
+
+def test_info_level_findings_block_at_the_default_level():
+    """默认阻断级别是 info（实测 SC2086 就是 info 级），所以 info 必须触发回灌修复。"""
+    broken = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho $f\n", notes="", assumptions=()
+    )
+    ports, harness = make_ports(
+        [broken, GOOD],
+        shellcheck_for=lambda s: (
+            [ShellcheckFinding("SC2086", 3, 6, "info", "quote it")] if "echo $f" in s else []
+        ),
+    )
+    result = run(ports)
+    assert result.outcome == "succeeded"
+    assert result.rounds == 2
+    assert "SC2086" in harness.prompts[1]
 
 
 def test_trusted_template_never_asks_for_confirmation():
@@ -314,8 +346,6 @@ def test_execute_json_is_valid_json_even_when_cancelled():
         execute_for=lambda _script: ExecuteResult(None, None, False, True, 120, "", ""),
     )
     run(ports)
-    # 一轮里 write_attempt 的次序是 notes.md → shellcheck.* → execute.*，execute.json 在最后一次；
-    # 取 [-1] 而非 [0]（[0] 是 notes.md，会 KeyError）。
-    payload = json.loads(harness.attempts[-1][1]["execute.json"])
+    payload = json.loads(_attempt_file(harness, "execute.json"))
     assert payload["exit_code"] is None
     assert payload["cancelled"] is True
