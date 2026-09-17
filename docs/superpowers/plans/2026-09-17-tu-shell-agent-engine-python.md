@@ -3749,7 +3749,8 @@ def test_broken_script_is_caught_then_fixed_and_executed(tmp_path, shellcheck_pa
     assert result.outcome == "succeeded"
     assert result.rounds == 2
     attempt_one = tmp_path / "r1" / "attempts" / "1"
-    assert "SC2045" in (attempt_one / "shellcheck.json").read_text(encoding="utf-8")
+    # 原始 json1 里 code 是裸数字（"code":2045），带 SC 前缀的形态只出现在渲染后的 shellcheck.txt 里
+    assert "SC2045" in (attempt_one / "shellcheck.txt").read_text(encoding="utf-8")
     attempt_two_stdout = (tmp_path / "r1" / "attempts" / "2" / "stdout.txt").read_text(
         encoding="utf-8"
     )
@@ -3804,7 +3805,7 @@ def test_live_generation_returns_structured_output(tmp_path):
 - [ ] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_e2e_offline.py -q`
-预期：FAIL，`ModuleNotFoundError: No module named 'tu_shell_agent.cli'` 或 `ModuleNotFoundError: No module named 'tu_shell_agent.shell_toolchain.facade'`
+预期：FAIL，真实红态落在 **SC2045 断言**上（`test_e2e_offline.py` 自带内联的假 Toolchain，不 import `cli`/`facade`，因此不会出现 `ModuleNotFoundError`）。
 
 - [ ] **步骤 3：写最小实现**
 
@@ -3886,13 +3887,19 @@ from .types import RunConfig, RunEvent
 
 
 def _path_overrides(args: argparse.Namespace) -> dict[str, str]:
-    """把 CLI 的 --*-path 覆盖转成 detect_all 认的 {tool: path} 映射。"""
+    """把 CLI 的 --*-path 覆盖转成 detect_all 认的 {tool: path} 映射。
+
+    必须 resolve() 成绝对路径：server.start_serve 用 cwd=run_dir 起 serve 子进程、
+    execute.run_script 也用 cwd=run_dir 执行脚本，**相对路径会在新 cwd 下解析不到**。
+    实测：`--opencode-path tools/opencode` → `[Errno 2] No such file or directory: 'tools/opencode'`
+    → aborted_dependency(0 轮)，而 CLI 自己的自检却是通过的（现象很迷惑）。
+    """
     pairs = (
         ("opencode", args.opencode_path),
         ("bash", args.bash_path),
         ("shellcheck", args.shellcheck_path),
     )
-    return {tool: path for tool, path in pairs if path}
+    return {tool: str(Path(path).resolve()) for tool, path in pairs if path}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -4067,6 +4074,10 @@ tu-shell-agent = "tu_shell_agent.cli:main"
 **结论取决于本机 opencode 是否已登录供应商**：未登录时 `serve` 能起来但模型调用会失败 → 三轮契约失败 → `结论：needs_human`（这是设计中的失败路径，不是 bug）；只有已登录且模型可用时才是 `结论：succeeded`。
 不依赖 opencode 的确定性闭环由 `tests/test_e2e_offline.py` 覆盖（真实 shellcheck + 真实 bash + 假适配器），那条必须 PASS。
 （`--yes` 是必需的：非交互环境下没有 TTY 可确认，CLI 会按规格 §11 默认拒绝执行，结果会是 `cancelled`。）
+
+**手工验证时要留意的两件事：**
+- **`succeeded` 不等于"方案被正确实现"**。实测教训：用本计划的 `plan-simple.md`（要求"按 mtime 倒序列出 logs/ 下的 .log 并打印总数、目录不存在则非零退出"）跑 CLI 时，模型是靠**放宽方案约束**（目录不存在就报 0 个文件、退出 0）通过的，而运行目录里根本没有 `logs/`。所以这条冒烟只验证了"链路通"，没有验证"约束被满足"。**Windows 手测请用一份带真实目标目录的方案**，并人工核对脚本行为是否符合方案。
+- **工具路径会被 `resolve()` 成绝对路径**（见 `_path_overrides`），所以 `tools/shellcheck` 这种相对写法现在是可用的；但如果你在别处直接调 `start_serve`/`run_script`，记得相对路径会以 `cwd=run_dir` 解析。
 
 - [ ] **步骤 5：Commit**
 
