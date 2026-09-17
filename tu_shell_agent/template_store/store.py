@@ -158,7 +158,7 @@ class TemplateStore:
             placeholders=item.placeholders,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-        metas = [m for m in self._read_index() if m.id != item.id]
+        metas = [m for m in self.list() if m.id != item.id]
         metas.append(meta)
         self._write_index(metas)
         return meta

@@ -70,3 +70,15 @@ def test_set_trusted_persists(tmp_path):
     store = TemplateStore(str(tmp_path))
     store.set_trusted("single", True)
     assert TemplateStore(str(tmp_path)).get("single").trusted is True
+
+
+def test_save_on_fresh_store_still_seeds_builtins(tmp_path):
+    store = TemplateStore(str(tmp_path))
+    store.save(
+        TemplateInput(
+            id="mine", name="我的", description="", trusted=False,
+            placeholders=[], body="# @@TU:BODY@@\n",
+        )
+    )
+    ids = {meta.id for meta in store.list()}
+    assert {"single", "args-batch", "logged-errors"} <= ids
