@@ -970,6 +970,14 @@ def test_write_meta_merges_patches(tmp_path):
     assert meta == {"runId": "r1", "outcome": "succeeded", "rounds": 2}
 
 
+def test_write_meta_creates_run_dir_when_called_first(tmp_path):
+    run_dir = tmp_path / "fresh"
+    store = RunStore(str(run_dir))
+    store.write_meta({"outcome": "aborted_dependency", "rounds": 0})
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["outcome"] == "aborted_dependency"
+
+
 def test_init_creates_agent_directory(tmp_path):
     store = RunStore(str(tmp_path / "r1"))
     store.init()
@@ -1053,6 +1061,8 @@ class RunStore:
 
     def write_meta(self, patch: dict[str, Any]) -> None:
         path = Path(self.run_dir) / "meta.json"
+        # 与 write_script / write_attempt 保持一致的自我修复：三者都不该假定调用方先调过 init()。
+        path.parent.mkdir(parents=True, exist_ok=True)
         current: dict[str, Any] = {}
         if path.exists():
             current = json.loads(path.read_text(encoding="utf-8"))
@@ -3575,12 +3585,25 @@ from .template_store.store import TemplateStore
 from .types import RunConfig, RunEvent
 
 
+def _path_overrides(args: argparse.Namespace) -> dict[str, str]:
+    """把 CLI 的 --*-path 覆盖转成 detect_all 认的 {tool: path} 映射。"""
+    pairs = (
+        ("opencode", args.opencode_path),
+        ("bash", args.bash_path),
+        ("shellcheck", args.shellcheck_path),
+    )
+    return {tool: path for tool, path in pairs if path}
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="tu_shell_agent.cli", description="方案 → shell 脚本 → 执行 → 校验")
     parser.add_argument("--plan", required=True, help="方案文档路径")
     parser.add_argument("--template", default="single", help="模板 id（默认 single）")
     parser.add_argument("--run-root", default=str(Path.cwd() / ".tu-runs"))
     parser.add_argument("--templates-dir", default=str(Path.cwd() / ".tu-templates"))
+    parser.add_argument("--opencode-path", default=None, help="覆盖 opencode 可执行文件路径（默认自动探测）")
+    parser.add_argument("--bash-path", default=None, help="覆盖 bash 可执行文件路径（默认自动探测）")
+    parser.add_argument("--shellcheck-path", default=None, help="覆盖 shellcheck 可执行文件路径（默认自动探测）")
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument("--generate-timeout-ms", type=int, default=300_000)
     parser.add_argument("--execute-timeout-ms", type=int, default=120_000)
@@ -3595,7 +3618,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    report = detect_all(system_deps())
+    report = detect_all(system_deps(_path_overrides(args)))
     print("环境自检：", report, flush=True)
     if report.problems:
         print("自检未通过：\n" + "\n".join(report.problems), file=sys.stderr)
@@ -3733,10 +3756,12 @@ tu-shell-agent = "tu_shell_agent.cli:main"
 运行：`.venv/bin/python -m pytest -q`
 预期：全部 PASS（真实 opencode 冒烟被 skip）
 
-最后跑一次 CLI（真实端到端，需要本机有可用 opencode 1.x；没有 opencode 时自检会拦下并返回 2）：
+最后跑一次 CLI（真实端到端）。注意本机 shellcheck 与 opencode 都装在项目内 `tools/`、**不在 PATH**，所以必须显式指路；bash 走 PATH 即可：
 
-运行：`.venv/bin/python -m tu_shell_agent.cli --plan test_fixtures/plan-simple.md --template single --run-root /tmp/tu-runs --yes`
-预期：打印自检结果、每轮阶段、shellcheck 计数、执行输出，最后 `结论：succeeded`。
+运行：`.venv/bin/python -m tu_shell_agent.cli --plan test_fixtures/plan-simple.md --template single --run-root /tmp/tu-runs --shellcheck-path tools/shellcheck --opencode-path tools/opencode --yes`
+预期：自检通过并打印三个组件的版本与路径；随后打印每轮阶段、shellcheck 计数、执行输出。
+**结论取决于本机 opencode 是否已登录供应商**：未登录时 `serve` 能起来但模型调用会失败 → 三轮契约失败 → `结论：needs_human`（这是设计中的失败路径，不是 bug）；只有已登录且模型可用时才是 `结论：succeeded`。
+不依赖 opencode 的确定性闭环由 `tests/test_e2e_offline.py` 覆盖（真实 shellcheck + 真实 bash + 假适配器），那条必须 PASS。
 （`--yes` 是必需的：非交互环境下没有 TTY 可确认，CLI 会按规格 §11 默认拒绝执行，结果会是 `cancelled`。）
 
 - [ ] **步骤 5：Commit**
