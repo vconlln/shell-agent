@@ -34,6 +34,8 @@ class RunStore:
 
     def write_meta(self, patch: dict[str, Any]) -> None:
         path = Path(self.run_dir) / "meta.json"
+        # 与 write_script / write_attempt 保持一致的自我修复：三者都不该假定调用方先调过 init()。
+        path.parent.mkdir(parents=True, exist_ok=True)
         current: dict[str, Any] = {}
         if path.exists():
             current = json.loads(path.read_text(encoding="utf-8"))

@@ -53,3 +53,11 @@ def test_init_creates_agent_directory(tmp_path):
     store = RunStore(str(tmp_path / "r1"))
     store.init()
     assert (tmp_path / "r1" / ".opencode" / "agents").is_dir()
+
+
+def test_write_meta_creates_run_dir_when_called_first(tmp_path):
+    run_dir = tmp_path / "fresh"
+    store = RunStore(str(run_dir))
+    store.write_meta({"outcome": "aborted_dependency", "rounds": 0})
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["outcome"] == "aborted_dependency"
