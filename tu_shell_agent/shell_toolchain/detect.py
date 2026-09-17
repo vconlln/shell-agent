@@ -109,6 +109,13 @@ def detect_all(deps: DetectDeps) -> DetectionReport:
     problems: list[str] = []
     if opencode is None:
         problems.append(_INSTALL_HINTS["opencode"])
+    elif opencode.version == "unknown":
+        # 不能落进「版本过低」分支：那是「装了但版本解析不出来」，误报会让用户去升级一个没问题的安装。
+        # 同时也不静默放行——版本未知就无法确认它支持 permission 配置，而那是安全模型的前提。
+        problems.append(
+            f"无法识别 opencode 版本（--version 输出解析不出）：无法确认它支持 permission 配置，"
+            f"请确认版本 >= {MIN_OPENCODE_VERSION}"
+        )
     elif not is_at_least(opencode.version, MIN_OPENCODE_VERSION):
         problems.append(
             f"opencode 版本过低（{opencode.version}）：需要 >= {MIN_OPENCODE_VERSION} 才有 permission 配置"

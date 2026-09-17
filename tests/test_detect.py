@@ -111,3 +111,19 @@ def test_system_deps_probes_version_in_c_locale():
         pytest.skip("本机没有 bash")
     output = system_deps().run_version(bash)
     assert parse_version("bash", output) != "unknown"
+
+
+def test_unparseable_opencode_version_is_reported_honestly_not_as_too_old():
+    """装了但版本解析不出来时，不能误报成「版本过低」，也不能静默放行。"""
+    report = detect_all(
+        DetectDeps(
+            platform="linux",
+            exists=lambda path: True,
+            which=lambda name: f"/usr/bin/{name}",
+            run_version=lambda path: "not-a-version" if "opencode" in path else "ShellCheck\nversion: 0.11.0",
+        )
+    )
+    joined = "\n".join(report.problems)
+    assert "版本过低" not in joined
+    assert "无法识别" in joined
+    assert report.opencode is not None and report.opencode.version == "unknown"
