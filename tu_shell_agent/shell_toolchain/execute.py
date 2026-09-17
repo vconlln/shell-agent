@@ -52,6 +52,8 @@ def run_script(
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
+        # start_new_session 是必需的：少了它，os.getpgid(bash) 返回的就是调用方自己的进程组，
+        # 超时/取消触发的 killpg 会把 CLI/应用自己一起 SIGKILL（实测变异验证：pytest 自身被 137 杀掉）。
         popen_kwargs["start_new_session"] = True
 
     process = subprocess.Popen([bash_path, "--noprofile", "--norc", script_path], **popen_kwargs)

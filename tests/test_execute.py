@@ -76,8 +76,10 @@ def _wait_pid_gone(pid: int, timeout_s: float = 3.0) -> bool:
 def test_timeout_kills_the_whole_process_tree(tmp_path, bash_path):
     """超时必须杀掉整棵进程树：留下孤儿进程正是这条安全边界的失效模式。
 
-    只断言 timed_out 是不够的——去掉 start_new_session 或把 killpg 换成 os.kill，
-    这样的用例照样通过，而孙子进程会逃逸。
+    只断言 timed_out / cancelled 远远不够（实测变异结果）：把 killpg 换成 os.kill 后，
+    取消路径的旧用例**完全通过**、孤儿逃逸无人发现；超时路径的旧用例虽会失败，
+    却是撞在那条 5 秒耗时限上（孤儿仍持有 stdout 管道写端，两个泵线程各空等
+    join(timeout=5)），与进程树毫无关系。
     """
     marker = tmp_path / "child.pid"
     script = tmp_path / "tree.sh"
