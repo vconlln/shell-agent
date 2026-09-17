@@ -2415,7 +2415,7 @@ git commit -m "feat(adapter): 生成项目级 agent 定义
 ### 任务 10：opencode server 与 HTTP/SSE 客户端
 
 **文件：**
-- 创建：`tu_shell_agent/opencode_adapter/server.py`、`tu_shell_agent/opencode_adapter/events.py`、`tests/test_events.py`、`tests/test_server.py`
+- 创建：`tu_shell_agent/opencode_adapter/server.py`、`tu_shell_agent/opencode_adapter/events.py`、`tests/test_events.py`、`tests/test_server.py`、`tests/test_adapter_offline.py`
 - 修改：`tu_shell_agent/opencode_adapter/__init__.py`（加 `OpencodeAdapter`）
 
 - [ ] **步骤 1：写失败的测试**
@@ -2931,7 +2931,7 @@ __all__ = ["OpencodeAdapter", "AGENT_NAME"]
 
 > **已核对（控制者用真实 opencode 1.18.31 的 OpenAPI 验证，不是猜的）：**
 > - 请求字段就是 `format`（`POST /session/{sessionID}/message` 的 body，指向 `OutputFormat = TextOutputFormat | OutputFormatJsonSchema`）；`outputFormat` 在规范里零命中。
-> - 结构化结果落在响应 `info.structured`；`info.error` 失败时是 `StructuredOutputError{message, retries}`。
+> - 结构化结果落在响应 `info.structured`；失败时 `info.error` 的**确切形状**是 `{"name": "StructuredOutputError", "data": {"message": ..., "retries": ...}}`（`name` 与 `data` 都是 required；`message` 嵌在 `data` 里，不在顶层）。
 > - body 只有 `parts` 必填，`agent` / `model` / `system` / `tools` 均可选。
 > - `GET /global/health` 返回 `{"healthy": true, "version": "1.18.31"}`；权限应答端点是 `POST /session/{sessionID}/permissions/{permissionID}`。
 > - **事件名**：权限询问是 `permission.asked`（不是旧文档的 `permission.updated`）；增量文本是 `message.part.delta`（`field == "text"`），`message.part.updated` 带的是整个 part。
@@ -2941,7 +2941,17 @@ __all__ = ["OpencodeAdapter", "AGENT_NAME"]
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_events.py tests/test_server.py -q`
-预期：PASS（15 passed：events 10 + server 5）
+预期：PASS（events 10 + server 5 + adapter 离线 5 = 20 passed）
+
+**`tests/test_adapter_offline.py` 必须覆盖适配器层最容易写错、且上面两个文件测不到的五件事**（用本地 stub HTTP 服务器驱动**真实的 `OpencodeAdapter`**，不碰真 opencode）：
+
+1. `start()` 会 `POST /session` 并返回 stub 给的 session id（同时确认请求带 Basic 认证头）。
+2. `generate()` 发出的 body 含 `agent`、必填 `parts`，且结构化字段名是 `format`（`type == "json_schema"`、带 `retryCount`）——用一个记录请求体的 stub 断言。
+3. `info.structured` 被正确映射成 `GeneratedScript`（`script`/`notes`/`assumptions`），并能回退读 `info.structured_output`。
+4. `info.error` 存在时**如实报错**：按真实形状 `{"name": "StructuredOutputError", "data": {"message": "...", "retries": 2}}` 构造响应，断言异常文案里同时出现该 `name` 与该 `message`。
+5. 权限自动拒绝：往事件流推一帧 `permission.asked`（`properties.id` + `properties.sessionID`），断言 stub 收到了 `POST /session/{sid}/permissions/{pid}` 且 body 恰为 `{"response": "reject"}`。
+
+（`_saw_delta` 去重与 `dispose()` 杀 serve 属进程/线程行为，若难以在离线 stub 下稳定断言，可在报告里说明并在 Windows 手测清单里覆盖；不要为此引入脆弱时序断言。）
 
 - [ ] **步骤 5：Commit**
 
@@ -3245,6 +3255,8 @@ from typing import Any, Callable
 from ..ports import ConfirmPort, OpencodePort, RunStorePort, ToolchainPort
 from ..template_store.render import PlaceholderSpec, render_template
 from ..types import (
+    ContractEvidence,
+    ExecuteEvidence,
     ExecuteResult,
     FailureEvidence,
     RunConfig,
@@ -3373,7 +3385,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
             evidence = FailureEvidence(
                 round=round_no,
                 stage="contract",
-                contract={"reason": "empty", "missing_anchors": (), "message": failure},
+                contract=ContractEvidence(reason="empty", message=failure),
             )
             ports.store.write_attempt(round_no, {"generation-error.txt": failure + "\n"})
             emit(RunEvent("note", round_no, {"message": f"第 {round_no} 轮生成失败：{failure}"}))
@@ -3397,10 +3409,10 @@ def run_loop(input_: LoopInput) -> LoopResult:
             evidence = FailureEvidence(
                 round=round_no,
                 stage="contract",
-                contract={
-                    "reason": contract.reason,
-                    "missing_anchors": contract.missing_anchors,
-                },
+                contract=ContractEvidence(
+                    reason=contract.reason or "empty",
+                    missing_anchors=contract.missing_anchors,
+                ),
             )
             ports.store.write_attempt(
                 round_no, {"contract.json": f"{contract}\n"}
@@ -3496,13 +3508,13 @@ def run_loop(input_: LoopInput) -> LoopResult:
         evidence = FailureEvidence(
             round=round_no,
             stage="execute",
-            execute={
-                "exit_code": result.exit_code,
-                "timed_out": result.timed_out,
-                "stdout_tail": _tail(result.stdout),
-                "stderr_tail": _tail(result.stderr),
-                "duration_ms": result.duration_ms,
-            },
+            execute=ExecuteEvidence(
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                stdout_tail=_tail(result.stdout),
+                stderr_tail=_tail(result.stderr),
+                duration_ms=result.duration_ms,
+            ),
         )
 
     ports.store.write_meta({"outcome": "needs_human", "rounds": config.max_rounds})
