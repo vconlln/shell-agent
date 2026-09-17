@@ -29,6 +29,8 @@ class Harness:
     prompts: list[str] = field(default_factory=list)
     confirmed: int = 0
     events: list = field(default_factory=list)
+    attempts: list = field(default_factory=list)
+    metas: list = field(default_factory=list)
 
 
 def make_ports(
@@ -87,9 +89,11 @@ def make_ports(
             return "/tmp/run/script.sh"
 
         def write_attempt(self, round_no, files):
+            harness.attempts.append((round_no, dict(files)))
             return None
 
         def write_meta(self, patch):
+            harness.metas.append(dict(patch))
             return None
 
     return {
@@ -104,7 +108,7 @@ def make_ports(
 CONFIG = RunConfig(run_root="/tmp/root", max_rounds=3, generate_timeout_ms=5000, execute_timeout_ms=5000)
 
 
-def run(input_ports, template=None, plan="方案"):
+def run(input_ports, template=None, plan="方案", cancel=None):
     return run_loop(
         LoopInput(
             plan=plan,
@@ -116,6 +120,7 @@ def run(input_ports, template=None, plan="方案"):
             # LoopPorts 一一对应）；LoopInput.ports 的类型就是 LoopPorts，这里显式组装，
             # 让编排层只做属性访问，不必为映射兜底。
             ports=LoopPorts(**input_ports),
+            cancel=cancel,
         )
     )
 
@@ -177,10 +182,12 @@ def test_generation_error_is_fed_back_and_next_round_succeeds():
 
 
 def test_start_failure_returns_aborted_dependency():
-    ports, _harness = make_ports([GOOD], start_error=RuntimeError("health 不通"))
+    ports, harness = make_ports([GOOD], start_error=RuntimeError("health 不通"))
     result = run(ports)
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 0
+    assert "start-error.txt" in harness.attempts[0][1]
+    assert {"outcome": "aborted_dependency", "rounds": 0} in harness.metas
 
 
 def test_shellcheck_dependency_failure_aborts_without_repair_loop():
@@ -195,6 +202,8 @@ def test_shellcheck_dependency_failure_aborts_without_repair_loop():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
+    assert "shellcheck-error.txt" in harness.attempts[-1][1]
+    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
 
 
 def test_execute_dependency_failure_aborts_instead_of_raising():
@@ -209,6 +218,8 @@ def test_execute_dependency_failure_aborts_instead_of_raising():
     assert result.outcome == "aborted_dependency"
     assert result.rounds == 1
     assert len(harness.prompts) == 1
+    assert "execute-error.txt" in harness.attempts[-1][1]
+    assert {"outcome": "aborted_dependency", "rounds": 1} in harness.metas
 
 
 def test_three_failing_rounds_end_as_needs_human():
@@ -257,3 +268,38 @@ def test_untrusted_template_asks_once():
     ports, harness = make_ports([GOOD])
     run(ports, template=FakeTemplate(trusted=False))
     assert harness.confirmed == 1
+
+
+def test_timeout_result_is_not_treated_as_success():
+    """SIGKILL 的脚本表现为 exit_code=-9；必须靠 timed_out 判失败，回灌提示含「超时被杀」。"""
+    ports, harness = make_ports(
+        [GOOD, GOOD],
+        execute_for=lambda _script: ExecuteResult(-9, None, True, False, 400, "", ""),
+    )
+    result = run(ports)
+    assert result.outcome != "succeeded"
+    assert result.outcome == "needs_human"
+    assert "超时被杀" in harness.prompts[1]
+
+
+def test_cancelled_result_short_circuits_without_next_round():
+    ports, harness = make_ports(
+        [GOOD],
+        execute_for=lambda _script: ExecuteResult(None, None, False, True, 120, "", ""),
+    )
+    result = run(ports)
+    assert result.outcome == "cancelled"
+    assert len(harness.prompts) == 1
+
+
+def test_cancel_token_stops_before_first_generation():
+    class Cancel:
+        def is_set(self):
+            return True
+
+    ports, harness = make_ports([GOOD])
+    result = run(ports, cancel=Cancel())
+    assert result.outcome == "cancelled"
+    assert result.rounds == 0
+    assert harness.prompts == []
+    assert {"outcome": "cancelled", "rounds": 0} in harness.metas

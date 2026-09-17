@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -116,6 +117,9 @@ def run_loop(input_: LoopInput) -> LoopResult:
 
     for round_no in range(1, config.max_rounds + 1):
         if _cancelled(input_.cancel):
+            # 与另两处取消路径（用户拒绝、执行取消）保持一致：终态要落盘，
+            # 否则运行目录里没有 meta.json，Plan 2 的历史列表读不到"这次已被取消"。
+            ports.store.write_meta({"outcome": "cancelled", "rounds": round_no - 1})
             return LoopResult("cancelled", round_no - 1, last_findings=last_findings)
 
         started = time.monotonic()
@@ -240,10 +244,18 @@ def run_loop(input_: LoopInput) -> LoopResult:
             {
                 "stdout.txt": result.stdout,
                 "stderr.txt": result.stderr,
-                "execute.json": (
-                    f'{{"exit_code": {result.exit_code}, "timed_out": {str(result.timed_out).lower()}, '
-                    f'"cancelled": {str(result.cancelled).lower()}, "duration_ms": {result.duration_ms}}}\n'
-                ),
+                # 必须用 json.dumps：手写 f-string 在 exit_code 为 None（取消路径）时会写出
+                # `"exit_code": None` —— 那不是合法 JSON，Plan 2 回放时 json.loads 会炸。
+                "execute.json": json.dumps(
+                    {
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                        "cancelled": result.cancelled,
+                        "duration_ms": result.duration_ms,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
             },
         )
         emit(RunEvent("execute", round_no, {"result": result}))
