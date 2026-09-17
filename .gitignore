@@ -4,3 +4,5 @@ out/
 release/
 *.log
 .DS_Store
+.npm-cache/
+tools/

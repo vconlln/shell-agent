@@ -129,7 +129,7 @@ describe('严重级别', () => {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^5.0.1"
   }
 }
 ```
@@ -2821,6 +2821,7 @@ async function main(): Promise<void> {
   const runRoot = arg('run-root', join(process.cwd(), '.tu-runs'))
   const templatesDir = arg('templates-dir', join(process.cwd(), '.tu-templates'))
   const maxRounds = Number(arg('max-rounds', '3'))
+  const assumeYes = process.argv.includes('--yes')
 
   const report = await detectAll(systemDetectDeps())
   console.log('环境自检：', JSON.stringify(report, null, 2))
@@ -2859,10 +2860,15 @@ async function main(): Promise<void> {
       shellcheck: (p) => runShellcheck(report.shellcheck!.path, p),
       execute: (p, o) => runScript(report.bash!.path, p, o),
     },
-    // CLI 模式：非交互，打印脚本后继续（trusted=false 时由 TTY 询问）
+    // 规格 §11：默认每次执行前确认。非交互环境没有"人"可确认 → 默认拒绝，
+    // 必须显式传 --yes 才放行，避免在脚本/CI 里静默执行生成的脚本。
     confirm: async ({ script }) => {
       console.log('\n===== 即将执行 =====\n' + script)
-      if (process.stdin.isTTY !== true) return true
+      if (assumeYes) return true
+      if (process.stdin.isTTY !== true) {
+        console.error('非交互环境：默认不执行。确认要执行请加 --yes。')
+        return false
+      }
       return await new Promise<boolean>((resolve) => {
         process.stdout.write('执行？[y/N] ')
         process.stdin.once('data', (d) => resolve(d.toString().trim().toLowerCase() === 'y'))
@@ -2913,8 +2919,9 @@ await main()
 
 再跑一次 CLI（真实端到端）：
 
-运行：`npx tsx src/engine/cli.ts --plan test/fixtures/plan-simple.md --template single --run-root /tmp/tu-runs`
-预期：打印自检结果、每轮阶段、shellcheck 计数、执行输出，最后 `结论：succeeded`
+运行：`npx tsx src/engine/cli.ts --plan test/fixtures/plan-simple.md --template single --run-root /tmp/tu-runs --yes`
+预期：打印自检结果、每轮阶段、shellcheck 计数、执行输出，最后 `结论：succeeded`。
+（`--yes` 是必需的：非交互环境下没有 TTY 可确认，CLI 会按规格 §11 默认拒绝执行，结果会是 `cancelled`。）
 
 - [ ] **步骤 5：Commit**
 
