@@ -3066,6 +3066,20 @@ def test_start_failure_returns_aborted_dependency():
     assert result.rounds == 0
 
 
+def test_shellcheck_dependency_failure_aborts_without_repair_loop():
+    """shellcheck 自己坏了（文件读不了/参数错）→ aborted_dependency，不烧修复轮次。"""
+    ports, harness = make_ports([GOOD])
+
+    def shellcheck_that_raises(_script_path):
+        raise RuntimeError("shellcheck 调用失败（退出码 2，文件无法处理）")
+
+    ports["toolchain"].shellcheck = shellcheck_that_raises
+    result = run(ports)
+    assert result.outcome == "aborted_dependency"
+    assert result.rounds == 1
+    assert len(harness.prompts) == 1
+
+
 def test_three_failing_rounds_end_as_needs_human():
     broken = GeneratedScript(script="#!/usr/bin/env bash\n# @@TU:BODY@@\nls $f\n", notes="", assumptions=())
     ports, harness = make_ports(
@@ -3299,7 +3313,20 @@ def run_loop(input_: LoopInput) -> LoopResult:
             emit(RunEvent("note", round_no, {"message": f"第 {round_no} 轮契约失败：{contract.reason}"}))
             continue
 
-        findings, _exit_code, raw = ports.toolchain.shellcheck(script_path)
+        try:
+            findings, _exit_code, raw = ports.toolchain.shellcheck(script_path)
+        except Exception as error:  # noqa: BLE001
+            # shellcheck 自身故障（文件读不了、参数错）不是脚本的问题，也不该带崩编排：
+            # 按规格 §13 直接终止为依赖错误，不进入修复循环。
+            # 注意实证事实：退出码 2 时 shellcheck 的 stdout 仍是合法空 JSON，
+            # 所以判空必须靠异常，不能靠 stdout。
+            message = f"shellcheck 调用失败：{error}"
+            emit(RunEvent("note", round_no, {"message": message}))
+            ports.store.write_attempt(round_no, {"shellcheck-error.txt": message + "\n"})
+            ports.store.write_meta({"outcome": "aborted_dependency", "rounds": round_no})
+            return LoopResult(
+                "aborted_dependency", round_no, script_path, last_findings, last_execute
+            )
         last_findings = tuple(findings)
         ports.store.write_attempt(
             round_no,
