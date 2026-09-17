@@ -2300,6 +2300,14 @@ def test_write_agent_file_lands_in_the_run_directory(tmp_path):
     path = write_agent_file(str(tmp_path))
     assert path == str(tmp_path / ".opencode" / "agents" / f"{AGENT_NAME}.md")
     assert Path(path).is_file()
+
+
+def test_empty_run_dir_is_rejected_instead_of_allowlisting_root():
+    """空 run_dir 会退化成 "/**": allow（比 "*": deny 更具体 → 覆盖拒绝 → 整盘可读），必须报错而非放行。"""
+    with pytest.raises(ValueError, match="run_dir"):
+        render_agent_file(run_dir="")
+    with pytest.raises(ValueError, match="run_dir"):
+        write_agent_file("")
 ```
 
 - [ ] **步骤 2：运行测试验证失败**
@@ -2352,6 +2360,10 @@ def _to_posix(path: str) -> str:
 
 def render_agent_file(run_dir: str, model: str | None = None) -> str:
     run = _to_posix(run_dir)
+    if not run:
+        # 不能静默生成：空 run_dir 会让 read 白名单退化成 "/**": allow，
+        # 而它比 "*": deny 更具体 → 覆盖默认拒绝 → 整盘可读。宁可报错，不能放行。
+        raise ValueError(f"run_dir 不能为空：否则 read 白名单会退化成 /**（整盘可读）")
     lines = [
         "---",
         "description: 把方案文档实现进给定的 shell 模板骨架；只读运行目录，不写文件、不执行命令。",
@@ -2376,9 +2388,10 @@ def render_agent_file(run_dir: str, model: str | None = None) -> str:
 
 
 def write_agent_file(run_dir: str, model: str | None = None) -> str:
+    content = render_agent_file(run_dir, model)  # 先渲染：空 run_dir 要在落盘/建目录之前就抛错
     path = Path(run_dir, ".opencode", "agents", f"{AGENT_NAME}.md")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_agent_file(run_dir, model), encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     return str(path)
 ```
 
