@@ -56,13 +56,29 @@ class GeneratedScript:
 
 
 @dataclass(frozen=True, slots=True)
+class ContractEvidence:
+    reason: ContractFailure
+    missing_anchors: tuple[str, ...] = ()
+    # message 用于「这一轮根本没产出脚本」（结构化输出失败/超时），此时 reason 记 empty
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecuteEvidence:
+    exit_code: int | None
+    timed_out: bool
+    stdout_tail: str
+    stderr_tail: str
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class FailureEvidence:
     round: int
     stage: Stage
-    # message 用于「这一轮根本没产出脚本」（结构化输出失败/超时），此时 reason 记 empty
-    contract: dict[str, Any] | None = None
+    contract: ContractEvidence | None = None
     shellcheck: tuple[ShellcheckFinding, ...] = ()
-    execute: dict[str, Any] | None = None
+    execute: ExecuteEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
