@@ -37,7 +37,12 @@
 - Agent 定义：markdown + frontmatter 放在全局 `~/.config/opencode/agents/` 或项目级 `.opencode/agents/`，**文件名即 agent 名**；也可写在 `opencode.json` 的 `agent` 键下。frontmatter 支持 `description`（必填）、`mode: primary|subagent|all`、`model`、`temperature`、`permission`、`steps`、`disable`、`hidden` 等。[Agents 文档](https://opencode.ai/docs/agents/)
 - 非交互生成 agent：`opencode agent create --path <dir> --description <d> --mode <m> --permissions <list> [--model]`，四个参数齐全即不进入交互；`--permissions` 可取值 `bash,read,edit,glob,grep,webfetch,task,todowrite,websearch,lsp,skill`，**未列出的权限一律拒绝**。[CLI 文档](https://opencode.ai/docs/cli/#create)
 - 权限模型：取值 `allow | ask | deny`；支持对象式细粒度规则（按输入匹配，`*`/`?` 通配，**最后一条匹配的规则生效**）；键包括 `read, edit, glob, grep, bash, task, skill, lsp, question, webfetch, websearch, external_directory, doom_loop`；默认大多为 `allow`，`doom_loop` 与 `external_directory` 默认 `ask`，`.env` 默认拒绝。**agent 的权限与全局配置合并，且 agent 规则优先**。[Permissions 文档](https://opencode.ai/docs/permissions/)
-- Windows：官方明确 **"While OpenCode can run directly on Windows, we recommend using WSL"**，Windows 页主要讲 WSL 接法。[Windows 文档](https://opencode.ai/docs/windows-wsl/) → 见 §11 风险与 §9 自检。
+- 事件流是 **SSE**：`GET /event`（首事件 `server.connected`）与 `GET /global/event`；信封为 `{type, properties}`，事件类型里 `message.part.updated` 提供**增量**的助手文本与工具调用部件（`ToolState = pending | running | completed | error`）。→ §12 的真流式有据可依。
+- 权限询问**可以编程回答**：`POST /session/:id/permissions/:permissionID`，body `{response: 'once' | 'always' | 'reject'}`；配合 `permission.updated` 事件可在 UI 侧接管。→ 见 §7.2 的自动拒绝安全网。
+- `opencode run` **从不发送**结构化输出所需的 `format`（源码确认），所以 schema 强制只能走 server/SDK。另外 `run` 的退出码只有 `1` 且官方未文档化 → 适配器**不得用退出码判断成败**，一律以事件与 health 为准。
+- Agent 发现：每个配置目录下按 `{agent,agents}/**/*.md` 递归查找，项目级 `.opencode/agents/`（推荐，复数）与 `.opencode/agent/`（单数，向后兼容）都可用；文件名即 agent 名。
+- 版本与安装：当前为 `opencode-ai@1.18.31`（npm 与 GitHub release 同版本号）；官方列出的 Windows 安装方式为 `choco install opencode`、`scoop install opencode`、`npm i -g opencode-ai`、`mise`（**官方未列 winget**），release 另附 `opencode-windows-x64.zip` 独立包。
+- Windows：官方明确 **"While OpenCode can run directly on Windows, we recommend using WSL"**，Windows 页主要讲 WSL 接法。[Windows 文档](https://opencode.ai/docs/windows-wsl/) → 见 §18 风险与 §9 自检。
 
 **shellcheck**
 
@@ -131,7 +136,7 @@ permission:
 ```
 
 - 权限语义直接利用官方规则：**`"*": deny` 打底 + agent 规则优先于全局**，因此用户全局即使设了 `bash: allow` 也覆盖不了本 agent；`edit`/`bash`/`webfetch`/`websearch`/`task` 全部落进 `deny`。
-- `external_directory: deny` 是必需的：它默认为 `ask`，而本应用不会替 opencode 回答权限询问，保留 `ask` 会让运行静默挂住。
+- `external_directory: deny` 是必需的：它默认为 `ask`。而"不问"这件事不能只靠配置正确 —— 适配器必须订阅事件流，**对任何 `permission.updated` 一律回 `reject`**（`POST /session/:id/permissions/:permissionID`，body `{response:'reject'}`），并在 UI 上标注"已自动拒绝"。这样即使规则写漏，运行也只会被拒绝，不会静默挂住。
 - 绝对路径（`<runDir>`）在生成时填入，所以 `read` 被锁死在本次运行目录内。
 - **不写 `model` 字段**：按官方语义，未指定时 primary agent 使用用户全局配置的模型，这样应用不硬编码也不覆盖用户的供应商设置；设置页可选地固定 `provider/model`，取值来自 `opencode models` 校验。
 - 运行前用 `opencode agent list`（cwd = runDir）**验证该 agent 已被发现**；未发现则判 `aborted_dependency` 并展示目录内容与命令输出，不做静默回退。
@@ -210,7 +215,7 @@ agent 正文（system）要点：
 
 | 项 | 探测顺序 | 失败指引 |
 | --- | --- | --- |
-| opencode | 设置项 → `where opencode` → `where opencode.cmd` → `%APPDATA%\npm\opencode.cmd` → 用户手动指定；再 `opencode --version` 与 `GET /global/health` 的 `version` 交叉确认；要求 ≥ 1.1.1（`permission` 取代旧 `tools` 的版本），低于则警告 | 提示安装/升级；明确告知本应用要求 **Windows 原生** opencode，若只在 WSL 内检测到则给出说明 |
+| opencode | 设置项 → `where opencode` → `where opencode.cmd` → `%APPDATA%\npm\opencode.cmd` → 用户手动指定；再 `opencode --version` 与 `GET /global/health` 的 `version` 交叉确认；要求 ≥ 1.1.1（`permission` 取代旧 `tools` 的版本），低于则警告 | 提示安装/升级，给出官方 Windows 方式：`choco install opencode` / `scoop install opencode` / `npm i -g opencode-ai`（官方未列 winget），或 release 的 `opencode-windows-x64.zip`；明确告知本应用要求 **Windows 原生** opencode，若只在 WSL 内检测到则给出说明 |
 | agent 可见性 | cwd=runDir 执行 `opencode agent list`，确认 `tu-shell-writer` 在列 | 展示命令原始输出与 `.opencode/agents` 目录内容 |
 | Git Bash | 设置项 → `%ProgramFiles%\Git\bin\bash.exe` → `%ProgramFiles(x86)%\Git\bin\bash.exe` → `where bash`；记录 `bash --version` | 指向 Git for Windows 安装 |
 | shellcheck | 设置项 → `where shellcheck` → 常见安装位置；记录 `shellcheck --version` | `winget install --id koalaman.shellcheck`，或官方 GitHub release zip；允许手动指定 exe 路径 |
@@ -271,7 +276,7 @@ shellcheck --norc -s bash -f json1 -- <script>
 - **中栏**：本轮脚本全文（行号 + 与上一轮 diff 切换）；轮次时间线（每轮：阶段、结论、耗时）。
 - **右栏**：shellcheck 报告（按 SC 编号分组，点行号跳到中栏对应行，显示 level/说明）；执行输出（stdout/stderr 分色、退出码、耗时、超时/取消标记）。
 - **底栏**：开始 / 取消 / 继续修复 / 打开运行目录 / 历史列表。
-- 事件流驱动更新；"生成中"使用流式正文（若 SDK 事件流未提供增量，退化为阶段级进度提示，不出现空白等待）。
+- 事件流驱动更新：订阅 SSE，用 `message.part.updated` 渲染**增量**的助手文本与工具调用部件（`pending/running/completed/error` 四态分别有视觉区分），因此"生成中"是真流式而非空白等待；若某版本未发出增量事件，退化为阶段级进度提示（兜底，不阻塞验收）。
 
 ## 13. 错误处理与边界
 
@@ -341,7 +346,10 @@ shellcheck --norc -s bash -f json1 -- <script>
 ## 18. 未决风险
 
 1. opencode 在 Windows 原生运行是官方不推荐路径（官方推荐 WSL）；若实测问题严重，应急路径（§7.1）或"改为要求 WSL"会浮上台面。
-2. SDK 事件流的增量粒度未知：若只有阶段级事件，UI 的"生成中"降级为阶段提示（已在 §12 写明，不阻塞验收）。
+2. ~~SDK 事件流的增量粒度未知~~ —— **已由源码调研消除**：`message.part.updated` 提供增量部件，真流式可实现；§12 的降级仅为兜底。
 3. 同一会话 3 轮往返的上下文膨胀可能触发 opencode 自身压缩，导致它"忘记"模板细节 —— 缓解：每轮回灌都重新附上模板骨架与锚点清单。
 4. 长脚本走结构化输出存在截断风险：已用 64KB 上限 + schema 校验 + `StructuredOutputError` 三重兜底，仍失败则计契约失败并回灌。
 5. 用户已安装的 opencode 版本未知：自检记录版本并在 < 1.1.1 时警告。
+6. `permission: {"*": deny}` 这种**总键**写法在文档示例里出现过（与具体键并存），但源码级调研只列出了具体权限键（`read/edit/glob/grep/list/bash/task/external_directory/lsp/skill` + `todowrite/question/webfetch/websearch/doom_loop`）。因此实现时**不把安全模型只押在总键上**：要求逐键显式 `deny`，并在 M2 的 Windows 手测里实测"全局设 `bash: allow` 也覆盖不了 agent 的 `deny`"（§14）。
+7. 原生 Windows 上的 opencode 全局配置目录文档未写明（只给 `~/.config/opencode/`）：本应用只用**项目级** `.opencode/agents/`，因此不依赖它；仅当将来要做全局安装时才需确认。
+8. opencode 自身在 Windows 用哪个 shell（源码里 `pwsh 优先` 与 `cmd.exe 默认` 两条路径并存）与本应用无关 —— 因为 agent 的 `bash` 权限被拒绝，执行一律由后端直接调用 Git Bash。这条只有在启用 §7.1 应急路径时才需要重新评估。
