@@ -130,9 +130,12 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
     """生产环境的依赖实现：走 PATH 与真实进程。"""
 
     def run_version(path: str) -> str:
+        # 版本探测必须与本地化无关：中文 locale 下 `bash --version` 会输出
+        # 「GNU bash，版本 5.3.15」，规格里的英文正则就解析不出来（返回 unknown）。
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
         try:
             completed = subprocess.run(
-                [path, "--version"], capture_output=True, text=True, timeout=20
+                [path, "--version"], capture_output=True, text=True, timeout=20, env=env
             )
             return f"{completed.stdout}\n{completed.stderr}"
         except (OSError, subprocess.SubprocessError):

@@ -1,9 +1,14 @@
+import shutil
+
+import pytest
+
 from tu_shell_agent.shell_toolchain.detect import (
     DetectDeps,
     candidate_paths,
     detect_all,
     is_at_least,
     parse_version,
+    system_deps,
 )
 
 LINUX_VERSIONS = {
@@ -96,3 +101,13 @@ def test_is_at_least_compares_three_segments():
     assert is_at_least("1.18.31", "1.1.1") is True
     assert is_at_least("1.0.9", "1.1.1") is False
     assert is_at_least("1.1.1", "1.1.1") is True
+
+
+def test_system_deps_probes_version_in_c_locale():
+    """版本探测必须与本地化无关：中文 locale 下 `bash --version` 输出「GNU bash，版本 5.3.15」，
+    英文正则会解析出 unknown。这条在中文机器上能真实抓住该缺陷。"""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("本机没有 bash")
+    output = system_deps().run_version(bash)
+    assert parse_version("bash", output) != "unknown"
