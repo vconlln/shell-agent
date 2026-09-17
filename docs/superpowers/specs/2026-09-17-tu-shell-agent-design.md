@@ -37,8 +37,8 @@
 - Agent 定义：markdown + frontmatter 放在全局 `~/.config/opencode/agents/` 或项目级 `.opencode/agents/`，**文件名即 agent 名**；也可写在 `opencode.json` 的 `agent` 键下。frontmatter 支持 `description`（必填）、`mode: primary|subagent|all`、`model`、`temperature`、`permission`、`steps`、`disable`、`hidden` 等。[Agents 文档](https://opencode.ai/docs/agents/)
 - 非交互生成 agent：`opencode agent create --path <dir> --description <d> --mode <m> --permissions <list> [--model]`，四个参数齐全即不进入交互；`--permissions` 可取值 `bash,read,edit,glob,grep,webfetch,task,todowrite,websearch,lsp,skill`，**未列出的权限一律拒绝**。[CLI 文档](https://opencode.ai/docs/cli/#create)
 - 权限模型：取值 `allow | ask | deny`；支持对象式细粒度规则（按输入匹配，`*`/`?` 通配，**最后一条匹配的规则生效**）；键包括 `read, edit, glob, grep, bash, task, skill, lsp, question, webfetch, websearch, external_directory, doom_loop`；默认大多为 `allow`，`doom_loop` 与 `external_directory` 默认 `ask`，`.env` 默认拒绝。**agent 的权限与全局配置合并，且 agent 规则优先**。[Permissions 文档](https://opencode.ai/docs/permissions/)
-- 事件流是 **SSE**：`GET /event`（首事件 `server.connected`）与 `GET /global/event`；信封为 `{type, properties}`，事件类型里 `message.part.updated` 提供**增量**的助手文本与工具调用部件（`ToolState = pending | running | completed | error`）。→ §12 的真流式有据可依。
-- 权限询问**可以编程回答**：`POST /session/:id/permissions/:permissionID`，body `{response: 'once' | 'always' | 'reject'}`；配合 `permission.updated` 事件可在 UI 侧接管。→ 见 §7.2 的自动拒绝安全网。
+- 事件流是 **SSE**：`GET /event`（首个事件 `server.connected`）与 `GET /global/event`；信封为 `{id, type, properties}`。**事件名已用 1.18.31 的 OpenAPI 核对**：增量文本走 **`message.part.delta`**（`properties = {sessionID, messageID, partID, field, delta}`，只认 `field == "text"`），而 `message.part.updated` 带的是**整个** `part`（累计文本，只能当不支持 delta 的版本的回退，混用会重复）；权限询问是 **`permission.asked`**（`properties = {id, sessionID, permission, patterns, metadata, always, tool?}`）——**旧文档写的 `permission.updated` 在 1.18.31 的事件联合里根本不存在**。→ §12 的真流式有据可依。
+- 权限询问**可以编程回答**：`POST /session/{sessionID}/permissions/{permissionID}`，body `{response: 'once' | 'always' | 'reject'}`；配合 `permission.asked` 事件可在 UI 侧接管。→ 见 §7.2 的自动拒绝安全网。
 - `opencode run` **从不发送**结构化输出所需的 `format`（源码确认），所以 schema 强制只能走 server/SDK。另外 `run` 的退出码只有 `1` 且官方未文档化 → 适配器**不得用退出码判断成败**，一律以事件与 health 为准。
 - Agent 发现：每个配置目录下按 `{agent,agents}/**/*.md` 递归查找，项目级 `.opencode/agents/`（推荐，复数）与 `.opencode/agent/`（单数，向后兼容）都可用；文件名即 agent 名。
 - 版本与安装：当前为 `opencode-ai@1.18.31`（npm 与 GitHub release 同版本号）；官方列出的 Windows 安装方式为 `choco install opencode`、`scoop install opencode`、`npm i -g opencode-ai`、`mise`（**官方未列 winget**），release 另附 `opencode-windows-x64.zip` 独立包。
@@ -147,7 +147,7 @@ permission:
 ```
 
 - 权限语义直接利用官方规则：**`"*": deny` 打底 + agent 规则优先于全局**，因此用户全局即使设了 `bash: allow` 也覆盖不了本 agent；`edit`/`bash`/`webfetch`/`websearch`/`task` 全部落进 `deny`。
-- `external_directory: deny` 是必需的：它默认为 `ask`。而"不问"这件事不能只靠配置正确 —— 适配器必须订阅事件流，**对任何 `permission.updated` 一律回 `reject`**（`POST /session/:id/permissions/:permissionID`，body `{response:'reject'}`），并在 UI 上标注"已自动拒绝"。这样即使规则写漏，运行也只会被拒绝，不会静默挂住。
+- `external_directory: deny` 是必需的：它默认为 `ask`。而"不问"这件事不能只靠配置正确 —— 适配器必须订阅事件流，**对任何权限询问（1.18.31 的事件名是 `permission.asked`，同时兼容旧名 `permission.updated`）一律回 `reject`**（`POST /session/{sessionID}/permissions/{permissionID}`，body `{response:'reject'}`），并在 UI 上标注"已自动拒绝"。这样即使规则写漏，运行也只会被拒绝，不会静默挂住。
 - 绝对路径（`<runDir>`）在生成时填入，所以 `read` 被锁死在本次运行目录内。
 - **不写 `model` 字段**：按官方语义，未指定时 primary agent 使用用户全局配置的模型，这样应用不硬编码也不覆盖用户的供应商设置；设置页可选地固定 `provider/model`，取值来自 `opencode models` 校验。
 - 运行前用 `opencode agent list`（cwd = runDir）**验证该 agent 已被发现**；未发现则判 `aborted_dependency` 并展示目录内容与命令输出，不做静默回退。

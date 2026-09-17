@@ -2291,7 +2291,12 @@ git commit -m "feat(adapter): 生成项目级 agent 定义
 
 ```python
 # tests/test_events.py
-from tu_shell_agent.opencode_adapter.events import SseParser, event_text, is_permission_ask
+from tu_shell_agent.opencode_adapter.events import (
+    SseParser,
+    delta_text,
+    event_text,
+    is_permission_ask,
+)
 
 
 def test_parser_emits_single_line_event_immediately():
@@ -2311,7 +2316,7 @@ def test_parser_ignores_comments_and_blank_lines():
     assert parser.push(": keep-alive\n\n") == []
 
 
-def test_event_text_extracts_assistant_delta():
+def test_event_text_extracts_whole_part_text():
     event = {"type": "message.part.updated", "properties": {"part": {"type": "text", "text": "你好"}}}
     assert event_text(event) == "你好"
 
@@ -2321,9 +2326,30 @@ def test_event_text_returns_none_for_non_text_parts():
     assert event_text(event) is None
 
 
-def test_is_permission_ask_recognizes_permission_updated():
-    event = {"type": "permission.updated", "properties": {"id": "per_1", "sessionID": "ses_1"}}
+def test_delta_text_extracts_incremental_text():
+    event = {
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "ses_1", "messageID": "msg_1", "partID": "prt_1",
+            "field": "text", "delta": "你好",
+        },
+    }
+    assert delta_text(event) == "你好"
+
+
+def test_delta_text_ignores_non_text_fields():
+    event = {"type": "message.part.delta", "properties": {"field": "reasoning", "delta": "x"}}
+    assert delta_text(event) is None
+
+
+def test_is_permission_ask_recognizes_real_event_name():
+    event = {"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "ses_1"}}
     assert is_permission_ask(event) == ("ses_1", "per_1")
+
+
+def test_is_permission_ask_also_accepts_legacy_event_name():
+    event = {"type": "permission.updated", "properties": {"id": "per_2", "sessionID": "ses_2"}}
+    assert is_permission_ask(event) == ("ses_2", "per_2")
 
 
 def test_is_permission_ask_ignores_other_events():
@@ -2455,9 +2481,29 @@ def event_text(event: Event) -> str | None:
     return None
 
 
+def delta_text(event: Event) -> str | None:
+    """message.part.delta 的增量文本（1.18.31 的流式通道）。
+
+    properties = {sessionID, messageID, partID, field, delta}；只认 field == "text"。
+    与 message.part.updated 的区别：后者带的是**整个** part（累计文本），混用会重复。
+    """
+    if event.get("type") != "message.part.delta":
+        return None
+    properties = event.get("properties") or {}
+    if properties.get("field") != "text":
+        return None
+    delta = properties.get("delta")
+    return delta if isinstance(delta, str) else None
+
+
+# 1.18.31 的真实事件名是 permission.asked（EventPermissionAsked）；
+# permission.updated 是旧文档里的写法，一并认下来以防版本差异。
+_PERMISSION_EVENTS = ("permission.asked", "permission.updated")
+
+
 def is_permission_ask(event: Event) -> tuple[str, str] | None:
     """返回 (session_id, permission_id)，不是权限询问则 None。"""
-    if event.get("type") != "permission.updated":
+    if event.get("type") not in _PERMISSION_EVENTS:
         return None
     properties = event.get("properties") or {}
     permission_id = properties.get("id")
@@ -2595,7 +2641,7 @@ import httpx
 
 from ..types import GeneratedScript
 from .agent_file import AGENT_NAME, write_agent_file
-from .events import SseParser, event_text, is_permission_ask
+from .events import SseParser, delta_text, event_text, is_permission_ask
 from .server import ServeHandle, basic_auth_header, start_serve
 
 
@@ -2609,6 +2655,7 @@ class OpencodeAdapter:
         self._stop_events = threading.Event()
         self._events_thread: threading.Thread | None = None
         self._on_delta: Callable[[str], None] | None = None
+        self._saw_delta = False
 
     # ── 生命周期 ────────────────────────────────────────────────────────
     def start(self, run_dir: str, agent_name: str = AGENT_NAME, model: str | None = None) -> str:
@@ -2655,7 +2702,13 @@ class OpencodeAdapter:
                         ask = is_permission_ask(event)
                         if ask is not None:
                             self._reject_permission(*ask)
-                        text = event_text(event)
+                        # 1.18.31 的增量文本走 message.part.delta；message.part.updated
+                        # 带的是整个 part（累计文本）。一旦见过 delta 就不再回退，避免重复。
+                        text = delta_text(event)
+                        if text is not None:
+                            self._saw_delta = True
+                        elif not self._saw_delta:
+                            text = event_text(event)
                         if text and self._on_delta is not None:
                             self._on_delta(text)
         except Exception as error:  # noqa: BLE001 - 事件流断了不应带崩主流程
@@ -2684,6 +2737,7 @@ class OpencodeAdapter:
         if self._client is None:
             raise RuntimeError("适配器未启动")
         self._on_delta = on_delta
+        self._saw_delta = False
         try:
             response = self._client.post(
                 f"/session/{session_id}/message",
@@ -2712,7 +2766,7 @@ class OpencodeAdapter:
                 )
             script = structured.get("script")
             if not isinstance(script, str) or not script.strip():
-                raise RuntimeError("structured_output.script 为空")
+                raise RuntimeError("结构化输出缺少 script 字段（或 script 为空）")
             assumptions = structured.get("assumptions") or []
             return GeneratedScript(
                 script=script,
@@ -2735,13 +2789,14 @@ __all__ = ["OpencodeAdapter", "AGENT_NAME"]
 > - 结构化结果落在响应 `info.structured`；`info.error` 失败时是 `StructuredOutputError{message, retries}`。
 > - body 只有 `parts` 必填，`agent` / `model` / `system` / `tools` 均可选。
 > - `GET /global/health` 返回 `{"healthy": true, "version": "1.18.31"}`；权限应答端点是 `POST /session/{sessionID}/permissions/{permissionID}`。
+> - **事件名**：权限询问是 `permission.asked`（不是旧文档的 `permission.updated`）；增量文本是 `message.part.delta`（`field == "text"`），`message.part.updated` 带的是整个 part。
 >
 > 上面代码里"两个字段都读"是为兼容 JS SDK 文档的写法，不要删。
 
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_events.py tests/test_server.py -q`
-预期：PASS（9 passed）
+预期：PASS（15 passed：events 10 + server 5）
 
 - [ ] **步骤 5：Commit**
 
@@ -2750,8 +2805,8 @@ git add tu_shell_agent/opencode_adapter/ tests/test_events.py tests/test_server.
 git commit -m "feat(adapter): opencode serve 生命周期、SSE 订阅与结构化输出
 
 独占 serve（随机端口 + 随机密码 + server.log）并轮询 health 就绪；
-SSE 自解析以渲染增量文本；对任何 permission.updated 一律 reject 作为
-安全网；structured_output 缺失时明确报错而不是交回空脚本。"
+SSE 自解析以渲染增量文本；对任何权限询问（permission.asked）一律 reject 作为
+安全网；结构化输出缺失时明确报错而不是交回空脚本。"
 ```
 
 ---
