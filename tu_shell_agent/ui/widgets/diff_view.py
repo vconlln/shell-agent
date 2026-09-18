@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import difflib
 from html import escape
+from ..theme import DIFF_ADDED_BG, DIFF_ADDED_FG, DIFF_GUTTER_FG, DIFF_REMOVED_BG, DIFF_REMOVED_FG
 
 # diff-added / diff-removed 是界面测试与后续样式表共用的契约类名，不要改名。
 # 颜色写成行内样式而不是 <style> 里的类选择器：Qt 只支持 CSS 2.1 的一个子集，
 # 实测行内 white-space:pre 能保住缩进，而只靠 class 时 Qt 会吞掉前导空格。
-_STYLE_ADDED = "background-color:#e6ffed;color:#033a16;white-space:pre;"
-_STYLE_REMOVED = "background-color:#ffeef0;color:#82071e;white-space:pre;"
+# 深色底上的 diff 配色：浅绿/浅粉底在 #181818 上是刺眼的色块，改用低饱和深底 + 亮前景
+_STYLE_ADDED = f"background-color:{DIFF_ADDED_BG};color:{DIFF_ADDED_FG};white-space:pre;"
+_STYLE_REMOVED = f"background-color:{DIFF_REMOVED_BG};color:{DIFF_REMOVED_FG};white-space:pre;"
 _STYLE_EQUAL = "white-space:pre;"  # 上下文行不加底色，跟随主题颜色
-_STYLE_GUTTER = "color:#8c959f;"
+_STYLE_GUTTER = f"color:{DIFF_GUTTER_FG};"
 _STYLE_SUMMARY = "margin-bottom:6px;"
 
 _BLANK_NUMBER = "    "  # 无行号的列（新增没有旧行号）用空格撑住，否则两列会串位

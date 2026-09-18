@@ -27,6 +27,7 @@ class SelfCheckPage(QWidget):
 
         self.hint = QLabel("三件套缺一不可：opencode / Git Bash / shellcheck（规格 §9）")
         self.hint.setWordWrap(True)
+        self.hint.setProperty("role", "hint")
         self.recheck_button = QPushButton("重新检测")
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)             # 自检结果是"呈堂证供"，不允许用户改

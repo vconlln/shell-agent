@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
 from .settings import APP_NAME
+from .theme import apply_theme
 
 # 自己建过的 QApplication 在这里持一份强引用：Qt 单例被垃圾回收之后再建第二个，
 # 进程会崩在退出路径上（测试里连着调两次 main() 就会走到这一步）。
@@ -30,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
         app = QApplication([sys.argv[0], *[a for a in args if a != "--self-test"]])
     _APP = app
     app.setApplicationName(APP_NAME)
+    # 主题在**建窗口之前**装：控件构造时就会读调色板，晚了会出现"先按原生样式画一遍
+    # 再被刷掉"的闪动，而且自绘控件（行号槽）会拿着旧调色板。
+    apply_theme(app)
 
     window = MainWindow()
     window.show()

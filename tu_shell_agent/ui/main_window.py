@@ -25,6 +25,19 @@ from .settings import AppSettings, default_settings_path, default_templates_dir
 from ..template_store.store import TemplateStore
 
 
+def _titled(widget: QWidget, title: str) -> QWidget:
+    """给一个控件加一行栏头，返回包好的容器（栏头文字是次级色小标题）。"""
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    header = QLabel(title)
+    header.setObjectName("paneHeader")
+    layout.addWidget(header)
+    layout.addWidget(widget, 1)
+    return container
+
+
 class MainWindow(QMainWindow):
     """三区（方案/脚本/校验）+ 底栏（历史 + 两个独立页）+ 按钮条。
 
@@ -55,6 +68,9 @@ class MainWindow(QMainWindow):
         self.right_pane = RightPane()
         self.right_pane.setObjectName("rightPane")
 
+        # 每栏顶部一行小标题（Codex 的分区感来自"小号、次级色、字距略宽"的栏头）。
+        # 用包装控件而不是往各 pane 里塞标签：pane 的布局归 pane 自己管，
+        # 而且骨架测试是按 objectName 找 pane 的，包一层不影响 findChild。
         left_column = QSplitter(Qt.Orientation.Vertical)
         left_column.addWidget(self.left_pane)
         left_column.addWidget(self.templates_pane)
@@ -62,9 +78,9 @@ class MainWindow(QMainWindow):
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")   # 测试契约
-        self.splitter.addWidget(left_column)
-        self.splitter.addWidget(self.center_pane)
-        self.splitter.addWidget(self.right_pane)
+        self.splitter.addWidget(_titled(left_column, "方案与模板"))
+        self.splitter.addWidget(_titled(self.center_pane, "脚本与轮次"))
+        self.splitter.addWidget(_titled(self.right_pane, "校验与输出"))
         self.splitter.setSizes([360, 620, 460])
 
         # 底栏左边是历史运行（列表 + 回放），右边是两个独立页。
@@ -80,6 +96,8 @@ class MainWindow(QMainWindow):
         self.side_pages.addTab(self.settings_page, "设置")
 
         self.start_button = QPushButton("开始")
+        # 主操作用白底黑字（Codex 的主按钮就这样），其余按钮是"白 5% 叠加 + 1px 边框"
+        self.start_button.setObjectName("primaryButton")
         self.cancel_button = QPushButton("取消")
         self.continue_button = QPushButton("继续修复")
         self.verify_button = QPushButton("改后重跑")

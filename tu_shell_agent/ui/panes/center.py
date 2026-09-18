@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from ..widgets.diff_view import render_diff_html
 from ..widgets.script_view import ScriptView
+from ..theme import DIFF_GUTTER_FG
 
 _CURRENT_TAB = 0
 _COMPARE_TAB = 1
@@ -161,4 +162,5 @@ class CenterPane(QWidget):
 
 
 def _placeholder(message: str) -> str:
-    return f'<div class="diff-placeholder" style="color:#8c959f">{message}</div>'
+    # 占位文字用主题的三级色：写死的 #8c959f 是浅色底时代的值，深色底上太亮
+    return f'<div class="diff-placeholder" style="color:{DIFF_GUTTER_FG}">{message}</div>'

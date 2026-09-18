@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, blocks_run
+from ..theme import BLOCKING_COLOR, NON_BLOCKING_COLOR, STDERR_COLOR
 
 # 级别由重到轻：与 types.SEVERITY_RANK、左栏阻断级别下拉框同源
 _LEVELS_BY_WEIGHT: tuple[Severity, ...] = ("error", "warning", "info", "style")
@@ -38,10 +39,18 @@ def blocking_rule(level: Severity) -> str:
     tail = f"{'/'.join(rest)} 只展示" if rest else "其余级别不存在"
     return f"严重度 ≥ {level} 的（{blocking_text}）会阻断并回灌修复，{tail}"
 
-# stderr 是"出问题了"的那条流，跟 stdout 混在一起时人得逐行找，用颜色分开
-_STDERR_COLOR = "#b00020"
-_BLOCKING_COLOR = "#b00020"
-_NON_BLOCKING_COLOR = "#7f8c8d"
+# stderr 是"出问题了"的那条流，跟 stdout 混在一起时人得逐行找，用颜色分开。
+# 颜色从主题取（theme.STDERR_COLOR 等）：写死会让深色主题下出现浅色底才配的红。
+_STDERR_COLOR = STDERR_COLOR
+_BLOCKING_COLOR = BLOCKING_COLOR
+_NON_BLOCKING_COLOR = NON_BLOCKING_COLOR
+
+def _section(text: str) -> QLabel:
+    """分组小标题（样式由 QSS 按 role=section 统一）。"""
+    label = QLabel(text)
+    label.setProperty("role", "section")
+    return label
+
 
 _NOTES_TITLE = "模型取舍说明与假设（与中栏脚本正文并排核对）"
 _NOTES_WARNING = (
@@ -67,7 +76,7 @@ class RightPane(QWidget):
         # 与 RunConfig 默认一致（实测 SC2086 是 info 级）；接线方在运行参数变化时覆盖
         self._blocking_level: Severity = "info"
 
-        self.findings_header = QLabel("校验报告（按 SC 编号分组；双击条目跳到中栏对应行）")
+        self.findings_header = _section("校验报告（按 SC 编号分组；双击条目跳到中栏对应行）")
         self.findings_header.setWordWrap(True)
 
         self.findings_summary = QLabel()
@@ -103,7 +112,7 @@ class RightPane(QWidget):
         layout.addWidget(self.findings_header)
         layout.addWidget(self.findings_summary)
         layout.addWidget(self.findings_tree, 3)
-        layout.addWidget(QLabel("执行输出（stdout / stderr，stderr 标红）"))
+        layout.addWidget(_section("执行输出（stdout / stderr，stderr 标红）"))
         layout.addWidget(self.execute_summary)
         layout.addWidget(self.output_view, 3)
         layout.addWidget(self.notes_header)

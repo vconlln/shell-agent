@@ -25,6 +25,13 @@ BLOCKING_LEVELS: tuple[Severity, ...] = ("error", "warning", "info", "style")
 _PREVIEW_IDLE = "（尚未选择方案文档）"
 
 
+def _section(text: str) -> QLabel:
+    """分组小标题：QSS 按 role 属性统一成"小号大写次级色"，语义写在属性上而不是各写样式。"""
+    label = QLabel(text)
+    label.setProperty("role", "section")
+    return label
+
+
 def _absolute_run_root(text: str) -> str:
     """运行根一律展开 `~` 并绝对化。
 
@@ -103,10 +110,10 @@ class LeftPane(QWidget):
         run_form.addRow("执行超时", self.execute_timeout_spin)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("方案文档"))
+        layout.addWidget(_section("方案文档"))
         layout.addLayout(plan_row)
         layout.addWidget(self.plan_preview, 1)
-        layout.addWidget(QLabel("运行参数（仅本次）"))
+        layout.addWidget(_section("运行参数（仅本次）"))
         layout.addLayout(run_form)
         # 组件路径（opencode / Git Bash / shellcheck）只在设置页改，这里只读不自检
 

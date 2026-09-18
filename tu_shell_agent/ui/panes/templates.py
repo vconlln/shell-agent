@@ -42,6 +42,13 @@ from ...template_store.store import TemplateInput, TemplateStore
 
 # 与 CLI 的 --templates-dir 默认值保持一致：同一条命令行的两种入口（CLI/界面）
 # 默认看到同一份模板库，否则「命令行跑得好好的、界面里却没有这个模板」。
+def _section(text: str) -> QLabel:
+    """分组小标题（样式由 QSS 按 role=section 统一）。"""
+    label = QLabel(text)
+    label.setProperty("role", "section")
+    return label
+
+
 DEFAULT_TEMPLATES_DIR = ".tu-templates"
 
 # 模板 id 的合法字符（与 TemplateStore._ID_OK 一致），导入时用它清洗文件名。
@@ -113,12 +120,12 @@ class TemplatesPane(QWidget):
 
         editor = QWidget()
         editor_layout = QVBoxLayout(editor)
-        editor_layout.addWidget(QLabel("正文"))
+        editor_layout.addWidget(_section("正文"))
         editor_layout.addWidget(self.body_edit, 3)
-        editor_layout.addWidget(QLabel("占位符"))
+        editor_layout.addWidget(_section("占位符"))
         editor_layout.addWidget(placeholder_scroll, 2)
         editor_layout.addWidget(self.trusted_check)
-        editor_layout.addWidget(QLabel("渲染预览"))
+        editor_layout.addWidget(_section("渲染预览"))
         editor_layout.addWidget(self.preview, 3)
         editor_layout.addLayout(buttons)
 
