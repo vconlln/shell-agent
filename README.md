@@ -53,18 +53,17 @@ Windows 上的 exe：把仓库拷过去，双击 `packaging\windows\build.bat`�
 
 | 环境 | 结果 | 说明 |
 | --- | --- | --- |
-| 装了 shellcheck | 211 passed, 1 skipped | 本机（把 shellcheck 放进 `tools/` 或 PATH） |
-| 干净克隆、没装 shellcheck | 205 passed, 7 skipped | 6 条 shellcheck 用例自报"找不到 shellcheck"后跳过，不造假 |
+| 装了 shellcheck | 223 passed, 1 skipped | 本机（把 shellcheck 放进 `tools/` 或 PATH） |
+| 干净克隆、没装 shellcheck | 217 passed, 7 skipped | 6 条 shellcheck 用例自报"找不到 shellcheck"后跳过，不造假 |
 
 剩下 1 条 skip 是需要真实 opencode 与凭据的端到端用例（`TU_LIVE=1` 才跑）。
 
 ## 已知限制（如实写）
 
-- **生成需要 opencode 已登录**（`opencode auth login`）。仅靠免费额度时，上游会拒绝"把工具全部 deny 的 agent"，表现为每轮生成都失败 —— 这是安全模型的代价，不会为了跑通去放宽权限。
+- **生成需要 opencode 已登录**（`opencode auth login`）。仅靠免费额度时，上游会拒绝"把工具全部 deny 的 agent"，表现为每轮生成都失败 —— 这是安全模型的代价，不会为了跑通去放宽权限。失败时界面会把落盘的错误证据（原始报错）摊在输出区，并标明它来自哪个文件。
 - **Windows 侧的 exe 打包与手测清单尚未执行**：`packaging/build.md` 第 6 节把要验的项逐条列成了勾选表（`taskkill /T /F`、中文与含空格路径、UTF-8 输出、原生 `opencode serve`、权限 deny 实测等）。
 - 左栏的**拖入方案**与**方案摘要**没有实现（规格里有，实现里没有）。
 - 方案正文与执行输出**没有体积上限**：误选一个几 MB 的文件会卡一下界面（8MB 实测约 2 秒）。
-- 环境自检只查三件套版本，**不查 opencode 是否已登录**（于是无凭据时自检全绿、一生成就失败）。
 - "改后重跑"与引擎**共用同一轮的产物目录**，用户手改的脚本会覆盖引擎那一轮的证据（`shellcheck.json` / `stdout.txt` 等），meta 里也没有"这次是 verify"的标记。
 - 时间线不含耗时；`duration_ms` 只在 succeeded 的 meta 里写。
 

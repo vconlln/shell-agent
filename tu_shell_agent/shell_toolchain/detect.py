@@ -31,6 +31,27 @@ _INSTALL_HINTS = {
 
 MIN_OPENCODE_VERSION = "1.1.1"
 
+# `opencode auth list` 的最后一行是 "N credentials"（前面还有一行带路径的框）。
+# 输出里带 ANSI 颜色码（实测 `\x1b[0m`），所以先剥掉再匹配，别让颜色把正则挡了。
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_AUTH_COUNT = re.compile(r"(\d+)\s+credentials?\b")
+
+_AUTH_HINT = (
+    "opencode 里没有已保存的凭据（`opencode auth list` 显示 0 credentials）："
+    "如果你没有用环境变量提供 API key，生成脚本这一步会失败 —— 先跑一次 `opencode auth login`。"
+    "（仅靠免费额度时，上游会拒绝「把工具全部 deny 的 agent」，而禁用工具正是本应用安全模型的前提）"
+)
+
+
+def parse_auth_count(output: str) -> int | None:
+    """从 `opencode auth list` 的输出里取凭据条数；判断不了就返回 None。
+
+    返回 None 与返回 0 是两件事：None 表示"输出格式不是我们认识的"（版本变了），
+    此时**不能**当成"没登录"去报警 —— 那是拿一个猜测去吓用户。
+    """
+    match = _AUTH_COUNT.search(_ANSI.sub("", output))
+    return int(match.group(1)) if match else None
+
 
 @dataclass(slots=True)
 class DetectDeps:
@@ -39,6 +60,9 @@ class DetectDeps:
     which: Callable[[str], str | None]
     run_version: Callable[[str], str]
     overrides: dict[str, str] = field(default_factory=dict)
+    # 可选：查 opencode 的凭据。没提供就不查（"没这个能力"而不是"查了没问题"），
+    # 于是所有只用 run_version 造出来的测试依赖都不受影响。
+    run_auth: Callable[[str], str] | None = None
 
 
 def candidate_paths(platform: str, tool: str) -> list[str]:
@@ -125,11 +149,19 @@ def detect_all(deps: DetectDeps) -> DetectionReport:
     if shellcheck is None:
         problems.append(_INSTALL_HINTS["shellcheck"])
 
+    warnings: list[str] = []
+    if opencode is not None and deps.run_auth is not None:
+        # 只在**明确读到 0 条凭据**时提示：读不出来（版本换了输出格式）就不说，
+        # 免得把"我不知道"说成"你没登录"。
+        if parse_auth_count(deps.run_auth(opencode.path)) == 0:
+            warnings.append(_AUTH_HINT)
+
     return DetectionReport(
         opencode=opencode,
         bash=bash,
         shellcheck=shellcheck,
         problems=tuple(problems),
+        warnings=tuple(warnings),
     )
 
 
@@ -148,10 +180,21 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
         except (OSError, subprocess.SubprocessError):
             return ""
 
+    def run_auth(path: str) -> str:
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C", "NO_COLOR": "1"}
+        try:
+            completed = subprocess.run(
+                [path, "auth", "list"], capture_output=True, text=True, timeout=20, env=env
+            )
+            return f"{completed.stdout}\n{completed.stderr}"
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
     return DetectDeps(
         platform="win32" if os.name == "nt" else "linux",
         exists=lambda path: os.path.isfile(path),
         which=lambda name: shutil.which(name),
         run_version=run_version,
         overrides=dict(overrides or {}),
+        run_auth=run_auth,
     )

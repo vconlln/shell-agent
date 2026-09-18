@@ -67,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     overrides = _path_overrides(args)
     report = detect_all(system_deps(overrides))
     print("环境自检：", report, flush=True)
+    for warning in report.warnings:
+        # 提示不阻断：它描述的是一种"大概率失败"的配置，而不是确定的故障
+        # （例如 opencode 没存凭据，但用户可能用环境变量给了 API key）。
+        print(f"提示：{warning}", file=sys.stderr, flush=True)
     if report.problems:
         print("自检未通过：\n" + "\n".join(report.problems), file=sys.stderr)
         return 2

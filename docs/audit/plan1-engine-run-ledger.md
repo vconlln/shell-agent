@@ -362,8 +362,9 @@ OpenCode's free tier can only be used from within OpenCode
    已写进计划文档的「实现完成后复核出的缺口」。
 2. **大文件没有体积上限**：8 MB 方案实测阻塞界面约 2 秒；执行输出无 `maximumBlockCount`、
    引擎侧也不截断。已写进同一处缺口清单。
-3. **`opencode auth` 未纳入自检**：detect_all 只解析三件套版本，无凭据机器上自检页三项全绿、
-   一生成就失败。这是无凭据机器上最可能的"看着正常其实跑不了"，值得下一轮补一条提示。
+3. ~~**`opencode auth` 未纳入自检**~~ **已修**（见文末"第三轮"）：`detect_all` 现在会读
+   `opencode auth list` 的凭据条数，为 0 时给出一条**提示**（不是问题）——因为用环境变量
+   提供 API key 是合法配置，报成故障会让 CLI 直接拒绝运行。读不出条数时保持沉默。
 4. **失败运行不写 `duration_ms`**（只有 succeeded 写），历史详情与时间线都看不到耗时，
    于是"三轮是十分钟烧完的还是秒退的"无从判断。
 5. **改后重跑与引擎共用 `attempts/<n>/`**：用户手改的脚本会覆盖引擎那一轮的
@@ -387,3 +388,24 @@ OpenCode's free tier can only be used from within OpenCode
 
 结论：**测试全绿不等于路径跑通**。凡是"只有生产装配才会走的参数组合"，至少要有一条
 用例把它原样走一遍；否则最后一道防线只能是端到端演示。
+
+
+## 第三轮：自检补凭据检查 + 演示暴露的两处界面缺陷（已修）
+
+界面演示（真实 opencode / shellcheck / bash）抓到的三件事，都已修并配了"撤掉修复就转红"的测试：
+
+1. **实时失败时屏幕上没有失败原因**：跑完只看到"结论：needs_human（3 轮）"——中栏空、
+   右栏"尚未校验"、输出空，而理由（例如上游那句 `OpenCode's free tier can only be used
+   from within OpenCode`）只躺在 `attempts/<n>/generation-error.txt` 里。现在收尾时会把
+   最后一个有证据的轮次的 `*-error.txt` 摊到输出区，并写明来自哪个文件。
+   （历史回放此前已修；实时路径漏了，属同一类"有数据但看不见"。）
+2. **"改后重跑"会把用户刚改的脚本从屏幕上抹掉**：开跑前统一清屏是为了不留上一次运行的
+   残留，但这次要跑的那个脚本不该一起清 —— 而 verify 路径不经过生成步骤，不会有 script
+   事件把它摆回来。现在把待校验的脚本先摆回中栏。顺带补上"续跑时显示正在修的那一份"。
+3. **`continue_repair` 从未调用 `adapter.resume()`**：之前那轮"修好了"的判断是错的 ——
+   补丁没落到调用点（`str.replace` 静默失配），于是续跑仍然在未启动的适配器上 generate，
+   第一句就是"适配器未启动"，被当成契约失败白烧轮次。现在有测试直接断言 `resume()` 被调用。
+
+自检的凭据检查：`parse_auth_count` 先剥 ANSI 再匹配 `N credentials`，**读不出来返回 None**，
+只有明确读到 0 才提示；提示进 `DetectionReport.warnings`（新增字段），与 `problems` 分开渲染，
+CLI 也只把它打到 stderr、不拒绝运行。

@@ -31,7 +31,7 @@ from ..orchestrator.loop import (
     run_loop,
     verify_and_execute,
 )
-from ..run_store.layout import make_run_id, run_dir_for
+from ..run_store.layout import attempt_dir, error_evidence, make_run_id, run_dir_for
 from ..run_store.store import RunStore
 from ..template_store.builtins import BUILTIN_TEMPLATES
 from ..template_store.render import PlaceholderSpec, declared_names, render_template
@@ -179,6 +179,9 @@ class RunController(QObject):
         self.window.selfcheck_page.render(report)
         if report.problems:
             self._status(f"环境自检有 {len(report.problems)} 个问题（见「环境自检」页）")
+        elif report.warnings:
+            # 不能只说"通过"：无凭据时三项版本全绿、一生成就失败，这条提示是唯一的线索。
+            self._status(f"环境自检通过，但有 {len(report.warnings)} 条提示（见「环境自检」页）")
         else:
             self._status("环境自检通过")
 
@@ -260,7 +263,16 @@ class RunController(QObject):
                 )
             )
 
-        self._run(entry, run_dir, config)
+        # 续跑时中栏要看得见"正在修的是哪一份"：生成下一版可能要几十秒，
+        # 中栏空着的话用户不知道自己在等什么。读盘取最后一轮落盘的脚本。
+        repairing = self._last_script_on_disk(run_dir, last_round)
+        self._run(
+            entry,
+            run_dir,
+            config,
+            resuming=True,
+            initial_script=None if repairing is None else (last_round, repairing),
+        )
 
     def verify_edited(self) -> None:
         """用户手工改过脚本后只重跑"校验 + 执行"（不生成、不烧轮次）。"""
@@ -302,7 +314,7 @@ class RunController(QObject):
                 )
             )
 
-        self._run(entry, run_dir, config)
+        self._run(entry, run_dir, config, initial_script=(round_no, script))
 
     def cancel(self) -> None:
         if self._worker is None:
@@ -326,6 +338,7 @@ class RunController(QObject):
         config: RunConfig,
         *,
         resuming: bool = False,
+        initial_script: tuple[int, str] | None = None,
     ) -> None:
         if self._busy():
             self._status("上一次运行还没结束")
@@ -345,6 +358,12 @@ class RunController(QObject):
         # 是最容易被读成"这次也成功了"的一种假象。
         self.window.center_pane.reset()
         self.window.right_pane.reset()
+        if initial_script is not None:
+            # 清屏是为了不留**上一次运行**的残留，但"这次要跑的那个脚本"必须留在屏幕上：
+            # 改后重跑与续跑都不经过生成步骤，不会有 script 事件把它重新摆上来
+            # （改后重跑尤其明显：用户刚在界面上改完脚本，一点按钮脚本就从眼前消失了）。
+            round_no, script = initial_script
+            self.window.center_pane.show_round(round_no, script)
 
         if resuming and self._adapter is not None:
             # 续跑不经过 run_loop 的 start()，所以适配器要在这里"续"起来：起 serve、
@@ -549,7 +568,9 @@ class RunController(QObject):
         self._dispose_adapter()
         self.window.history_page.reload()
         self._sync_buttons()
-        # 最后才发：调用方（测试、将来的批处理）收到这个信号时，界面与按钮状态必须已经收好。
+        if result.outcome != "succeeded":
+            self._show_error_evidence(result)
+        # 最后才发：调用方（测试、将来的批处理）收到这个信号时，界面与按钮状态已经收好。
         self.finished.emit(result)
 
     def _on_failed(self, message: str) -> None:
@@ -620,6 +641,38 @@ class RunController(QObject):
         self._status(f"回放：{meta.get('outcome') or '未知'}（{meta.get('rounds', '?')} 轮）")
 
     # ── 小工具 ────────────────────────────────────────────────────
+    def _show_error_evidence(self, result: LoopResult) -> None:
+        """把这次运行的错误证据摊在输出区。
+
+        失败时屏幕上原本只有一句"结论：needs_human"：中栏空、右栏"尚未校验"、输出空，
+        而"为什么失败"（例如上游拒绝生成的那句原话）只躺在运行目录里。用户在界面上
+        无从判断，只能去翻目录 —— 这正是实时路径与历史回放必须一致的地方。
+        """
+        evidence: list[tuple[str, str]] = []
+        for round_no in range(max(result.rounds, 1), 0, -1):
+            found = error_evidence(attempt_dir(self._run_dir, round_no))
+            if found:
+                evidence = [(f"第 {round_no} 轮 / {name}", text) for name, text in found]
+                break                      # 只看最后那个有证据的轮次，别把三轮重复的贴一遍
+        if not evidence:
+            return
+        self.window.right_pane.output_view.setPlainText(
+            "本次运行没有执行输出；以下是落盘的错误证据：\n\n"
+            + "\n\n".join(f"── {label} ──\n{text}" for label, text in evidence)
+        )
+        self._status(f"结论：{result.outcome}（{result.rounds} 轮）· 失败原因见下方输出区")
+
+    def _last_script_on_disk(self, run_dir: str, round_no: int) -> str | None:
+        """取最后一轮落盘的脚本内容（续跑时摆回中栏用）；没有就返回 None。"""
+        if round_no <= 0:
+            return None
+        path = Path(attempt_dir(run_dir, round_no)) / "script.sh"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        return text or None
+
     def _read_notes(self, round_no: int) -> tuple[str, tuple[str, ...]]:
         """读回本轮 notes.md（引擎在写脚本时一并落盘）。"""
         if not self._run_dir:

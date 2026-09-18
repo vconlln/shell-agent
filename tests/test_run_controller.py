@@ -583,3 +583,157 @@ def test_auto_confirm_without_a_preset_answer_approves(qtbot, tmp_path):
 
     assert blocker.args[0].outcome == "succeeded"
     assert window.right_pane.output_view.toPlainText().strip() == "ok"
+
+
+class _GenerateFailsOpencode(_FakeOpencode):
+    """生成阶段就失败（本机无凭据时上游拒绝生成，就是这个形态）。"""
+
+    def generate(self, session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+        raise RuntimeError("opencode 返回错误 APIError：Error from provider (Console): 没有凭据")
+
+
+def test_live_failure_shows_the_reason_on_screen(qtbot, tmp_path):
+    """实时跑失败时，屏幕上必须有失败原因，而不是只有一句结论。
+
+    原实现：失败后中栏空、右栏"尚未校验"、输出空，理由只躺在
+    `attempts/<n>/generation-error.txt` 里 —— 用户只能去翻运行目录。
+    """
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_GenerateFailsOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
+        controller.start()
+
+    assert blocker.args[0].outcome == "needs_human"
+    text = window.right_pane.output_view.toPlainText()
+    assert "错误证据" in text
+    assert "没有凭据" in text                     # 真正的失败原因
+    assert "generation-error.txt" in text         # 并且标明它来自哪个文件
+    assert "失败原因见下方输出区" in window.status_label.text()
+
+
+def test_successful_run_is_not_clobbered_by_error_evidence(qtbot, tmp_path):
+    """成功运行不许被"错误证据"覆盖输出区（只有失败才展示证据）。"""
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.start()
+
+    assert window.right_pane.output_view.toPlainText().strip() == "ok"
+    assert "执行结果：正常退出" in window.right_pane.execute_summary.text()
+
+
+def test_verify_edited_keeps_the_edited_script_on_screen(qtbot, tmp_path):
+    """改后重跑时，用户刚改的那个脚本必须留在中栏。
+
+    实时路径开跑前会清屏（避免留下上一次运行的残留），但"这次要跑的脚本"不能一起被清掉：
+    改后重跑不经过生成步骤，不会有 script 事件把它重新摆上来 —— 原实现里用户一点按钮，
+    脚本就从眼前消失了，右栏却在报这份脚本的执行结果。
+    """
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    edited = "#!/usr/bin/env bash\necho 用户手改的脚本\n"
+    controller.set_script_override(edited)
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.verify_edited()
+
+    assert "用户手改的脚本" in window.center_pane.current_text()
+    assert window.right_pane.output_view.toPlainText().strip() == "ok"
+
+
+def test_continue_repair_shows_the_script_being_repaired(qtbot, tmp_path):
+    """续跑时中栏要显示"正在修的那一份"，否则生成下一版的几十秒里用户不知道在等什么。"""
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    run_dir = tmp_path / "runs" / "20260918-100000-aaaa"
+    (run_dir / "attempts" / "2").mkdir(parents=True)
+    (run_dir / "attempts" / "2" / "script.sh").write_text(
+        "#!/usr/bin/env bash\necho 待修复的第二版\n", encoding="utf-8"
+    )
+    (run_dir / "meta.json").write_text(
+        '{"outcome": "needs_human", "rounds": 2, "sessionId": "ses_x"}', encoding="utf-8"
+    )
+    controller._run_dir = str(run_dir)
+    controller.window.left_pane.run_root_edit.setText(str(tmp_path / "runs"))
+
+    # 在**第一个事件到达时**取样：那时已经过了"开跑前摆好脚本"，而引擎的 script 事件
+    # 还没来（它要等生成完成）。看最终状态是测不出来的 —— 新版本会把它覆盖掉。
+    sampled: list[str] = []
+
+    def on_event(_event) -> None:
+        if not sampled:
+            sampled.append(window.center_pane.current_text())
+
+    controller.events.connect(on_event)
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.continue_repair()
+
+    assert sampled, "一个事件都没收到"
+    assert "待修复的第二版" in sampled[0]
+
+
+class _RecordingAdapter:
+    """记录 resume/start 是否被调用（续跑必须走 resume：不新建会话但要起 serve）。"""
+
+    def __init__(self) -> None:
+        self.resumed: list[tuple[str, object]] = []
+        self.disposed = 0
+
+    def resume(self, run_dir, model=None):        # noqa: ANN001, ANN201
+        self.resumed.append((run_dir, model))
+
+    def start(self, run_dir, agent_name=None, model=None):   # noqa: ANN001, ANN201
+        raise AssertionError("续跑不该新建会话")
+
+    def dispose(self) -> None:
+        self.disposed += 1
+
+
+def test_continue_repair_resumes_the_adapter_instead_of_starting_it(qtbot, tmp_path):
+    """续跑必须调用 `adapter.resume()`。
+
+    原实现里 `resume_repair` 不经过 `run_loop` 的 `start()`，适配器从未启动，
+    第一次 generate 就抛"适配器未启动"，被编排层当成契约失败吞掉 ——
+    "继续修复"按钮在无头替身之外其实是坏的（白烧剩余轮次后收在 needs_human）。
+    """
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    run_dir = tmp_path / "runs" / "20260918-100000-aaaa"
+    (run_dir / "attempts" / "1").mkdir(parents=True)
+    (run_dir / "attempts" / "1" / "script.sh").write_text("echo 第一版\n", encoding="utf-8")
+    (run_dir / "meta.json").write_text(
+        '{"outcome": "needs_human", "rounds": 1, "sessionId": "ses_x"}', encoding="utf-8"
+    )
+    controller._run_dir = str(run_dir)
+    adapter = _RecordingAdapter()
+    controller._adapter = adapter          # 假装生产路径已经探测并造好了适配器
+    controller._opencode = adapter
+    controller._toolchain = _FakeToolchain()
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.continue_repair()
+
+    assert adapter.resumed == [(str(run_dir), None)], "续跑没有调用 resume()"

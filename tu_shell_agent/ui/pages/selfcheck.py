@@ -52,8 +52,16 @@ class SelfCheckPage(QWidget):
         return self.text.toPlainText()
 
     def has_problems(self) -> bool:
-        """没检测过时返回 False：不能把"还不知道"谎报成"有问题"。"""
+        """没检测过时返回 False：不能把"还不知道"谎报成"有问题"。
+
+        注意只算 problems：warnings 是"提示"，不阻断运行（例如 opencode 没保存凭据，
+        但用户可能用环境变量给了 key），把它算成"有问题"会让自检常态化地报红。
+        """
         return self._report is not None and bool(self._report.problems)
+
+    def has_warnings(self) -> bool:
+        """有没有提示项（与 problems 分开，界面文案也不一样）。"""
+        return self._report is not None and bool(self._report.warnings)
 
     def _on_recheck_clicked(self) -> None:
         # 不直接连 recheck_requested.emit：clicked 带一个 bool 实参，转一道手才不会被它噎住
@@ -72,4 +80,9 @@ class SelfCheckPage(QWidget):
             lines.append("")
             lines.append("问题：")
             lines.extend(f"- {problem}" for problem in report.problems)
+        if report.warnings:
+            # 与"问题"分开写：提示不阻断运行，混在一起会让人以为自检没过。
+            lines.append("")
+            lines.append("提示（不阻断运行）：")
+            lines.extend(f"- {warning}" for warning in report.warnings)
         return "\n".join(lines)

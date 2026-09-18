@@ -93,6 +93,10 @@ class DetectionReport:
     bash: DetectedTool | None
     shellcheck: DetectedTool | None
     problems: tuple[str, ...]
+    # 提示（不是故障）：三件套都在、但某件事会让后面的运行大概率失败，而它又**不能确定**
+    # 一定失败。例如 opencode 里没保存凭据 —— 用户完全可能用环境变量提供 API key，
+    # 那就一切正常。塞进 problems 会让 CLI 直接拒绝运行（假故障），所以单独一栏。
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

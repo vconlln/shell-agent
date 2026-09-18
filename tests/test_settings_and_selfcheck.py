@@ -226,3 +226,30 @@ def test_default_settings_path_does_not_depend_on_ambient_application_name():
         assert default_settings_path() == path
     finally:
         QCoreApplication.setApplicationName(previous)
+
+
+def test_selfcheck_page_shows_warnings_separately_from_problems(qtbot):
+    """提示与问题必须分开显示，而且提示不算"自检没过"。
+
+    最容易误判的情形：opencode 没保存凭据（auth.json 是空的），但用户用环境变量给了 key
+    —— 那时生成正常，只是自检多一条提示。反过来，无凭据且没给 key 时，这一条提示就是
+    "自检全绿却一生成就失败"的唯一线索。
+    """
+    page = SelfCheckPage()
+    qtbot.addWidget(page)
+    page.render(
+        DetectionReport(
+            opencode=DetectedTool(path="/usr/bin/opencode", version="1.18.31"),
+            bash=DetectedTool(path="/usr/bin/bash", version="5.3.15"),
+            shellcheck=DetectedTool(path="/usr/bin/shellcheck", version="0.11.0"),
+            problems=(),
+            warnings=("opencode 里没有已保存的凭据 —— 先跑一次 `opencode auth login`。",),
+        )
+    )
+
+    text = page.summary_text()
+    assert "提示（不阻断运行）" in text
+    assert "opencode auth login" in text
+    assert "问题：" not in text          # 没有故障就不该出现"问题"这一节
+    assert page.has_problems() is False  # 提示不算故障
+    assert page.has_warnings() is True    # 但要说有提示
