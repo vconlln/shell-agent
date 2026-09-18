@@ -35,11 +35,23 @@ def test_settings_round_trip(tmp_path):
 
 
 def test_settings_ignores_unknown_keys_and_missing_file(tmp_path):
+    """未知键忽略（向前兼容）；文件不存在时给默认值**并且**记住路径。
+
+    第二条不是废话：界面首次运行就是这条路径（没有设置文件），此时若没记住路径，
+    用户点一次"保存"就会撞上 ValueError。
+    """
     path = tmp_path / "settings.json"
     path.write_text('{"max_rounds": 5, "未来的键": 1}', encoding="utf-8")
     settings = AppSettings.load(path)
     assert settings.max_rounds == 5
     assert not hasattr(settings, "未来的键")
+
+    missing = tmp_path / "还没写过.json"
+    fresh = AppSettings.load(missing)
+    assert fresh.max_rounds == 3            # 引擎默认值
+    assert fresh.loaded_from == missing     # 记住路径，save() 才写得回去
+    fresh.save()
+    assert missing.is_file()
 
 
 def test_selfcheck_page_renders_report_and_problems(qtbot):
@@ -165,7 +177,8 @@ def test_settings_page_survives_corrupt_file(qtbot, tmp_path, monkeypatch):
     )
     page = SettingsPage()                      # 构造不能抛异常，否则整个窗口都起不来
     qtbot.addWidget(page)
-    assert "无法读取" in page.status_label.text()
+    # 内容坏掉与读不动（权限/占用）在提示里分开：前者"保存会覆盖它"，后者"保存也会失败"
+    assert "无法解析" in page.status_label.text()
     assert page.max_rounds_spin.value() == 3
 
 
@@ -202,8 +215,8 @@ def test_default_settings_path_does_not_depend_on_ambient_application_name():
 
     path = default_settings_path()
     assert path.is_absolute()
+    # 这一条才是重点：路径必须落在以应用名命名的目录里（否则保存与读取会指向两个文件）
     assert path.parent.name == APP_NAME
-    assert path.name == "settings.json"
 
     # 换个应用名再问一次：路径必须一模一样（真应用里 app.py 设的就是 APP_NAME，
     # 但这条不变量不该依赖"谁先谁后调用了什么"）。

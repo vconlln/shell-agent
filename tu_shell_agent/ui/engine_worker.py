@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal
 
 from ..orchestrator.loop import LoopInput, LoopPorts, LoopResult, run_loop
 from ..ports import OpencodePort, RunStorePort, ToolchainPort
-from ..types import DetectionReport, RunConfig, RunEvent
+from ..types import RunConfig, RunEvent
 
 
 class EngineWorker(QThread):
@@ -24,13 +24,15 @@ class EngineWorker(QThread):
 
     def __init__(self, *, opencode: OpencodePort, toolchain: ToolchainPort,
                  store: RunStorePort | None = None, config: RunConfig,
-                 trusted: bool = False, parent: Any = None) -> None:
+                 parent: Any = None) -> None:
+        """注意：**没有** trusted 参数。要不要跳过确认是模板的属性（`TemplateSpec.trusted`），
+        由编排层判定；在线程桥上再放一个同名开关只会让人以为"传 True 就免确认了"，
+        而它根本不会被读到。"""
         super().__init__(parent)
         self._opencode = opencode
         self._toolchain = toolchain
         self._store = store
         self._config = config
-        self.trusted = trusted
         self._cancel = threading.Event()
         self._confirm_answer: bool | None = None
         self._confirm_gate = threading.Event()
@@ -79,6 +81,11 @@ class EngineWorker(QThread):
         self._confirm_gate.clear()
         self.confirm_requested.emit({"round": round_no, "script_path": script_path, "script": script})
         self._confirm_gate.wait()
+        # 放行之后再查一次取消：cancel() 会把这个关口一并打开（否则线程会一直等下去），
+        # 但如果"取消"先到、用户随后又点了确认框的"执行"，只看 _confirm_answer 就会放行 ——
+        # 于是被取消的脚本照样执行、还落成 succeeded。取消的语义是"拒绝"，以它为准。
+        if self._cancel.is_set():
+            return False
         return bool(self._confirm_answer)
 
     def _emit(self, event: RunEvent) -> None:

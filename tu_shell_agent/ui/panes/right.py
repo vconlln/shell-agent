@@ -24,8 +24,19 @@ from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, 
 # 级别由重到轻：与 types.SEVERITY_RANK、左栏阻断级别下拉框同源
 _LEVELS_BY_WEIGHT: tuple[Severity, ...] = ("error", "warning", "info", "style")
 
-# 阻断规则写成一句话跟着级别走：级别是可配的，光写"阻断级别 warning"没人知道 warning 意味着什么
-_BLOCKING_RULE = "error/warning/info 会阻断并回灌修复，style 只展示"
+
+def blocking_rule(level: Severity) -> str:
+    """把"当前级别意味着什么"如实算出来。
+
+    不能写成一句常量：级别是可配的，常量在非默认级别下会与同一屏的树自相矛盾
+    （例如级别设成 error 时它仍宣称 info 会阻断，而旁边正把某条 info 标成"仅展示"）。
+    规则与引擎同源：严重度 ≥ 当前级别的发现会阻断并回灌修复（types.blocks_run）。
+    """
+    order = [item for item in _LEVELS_BY_WEIGHT if SEVERITY_RANK[item] >= SEVERITY_RANK[level]]
+    blocking_text = "/".join(order) or "（无）"
+    rest = [item for item in _LEVELS_BY_WEIGHT if item not in order]
+    tail = f"{'/'.join(rest)} 只展示" if rest else "其余级别不存在"
+    return f"严重度 ≥ {level} 的（{blocking_text}）会阻断并回灌修复，{tail}"
 
 # stderr 是"出问题了"的那条流，跟 stdout 混在一起时人得逐行找，用颜色分开
 _STDERR_COLOR = "#b00020"
@@ -119,6 +130,18 @@ class RightPane(QWidget):
 
     # ---- 校验报告 -------------------------------------------------------------
 
+    def reset(self) -> None:
+        """回到"还没跑过校验"的初始态；历史回放换一次运行前必须先调它。
+
+        为什么要单独一个方法：`render_findings(())` 表达的是"校验过了、零发现"，
+        而回放一个**没有留下报告**的运行（第 1 轮契约失败就退出了）根本不是这个意思 ——
+        那会把"没有数据"显示成"检查过、没问题"。reset 之后 `_has_report` 回到 False，
+        摘要行如实写"报告：尚未校验"。
+        """
+        self._findings = ()
+        self._has_report = False
+        self._refresh_findings()
+
     def render_findings(self, findings: Sequence[ShellcheckFinding]) -> None:
         """重画报告：同一 SC 编号聚成一组，组内按行列排序。
 
@@ -138,7 +161,7 @@ class RightPane(QWidget):
             # 两者都不能只留一片空白：空白会被读成"检查过了、没问题"。
             head = "报告：0 处（本轮没有发现）" if self._has_report else "报告：尚未校验"
             self.findings_summary.setText(
-                f"{head}｜阻断级别 {self._blocking_level}（{_BLOCKING_RULE}）"
+                f"{head}｜阻断级别 {self._blocking_level}（{blocking_rule(self._blocking_level)}）"
             )
             return
 
@@ -179,7 +202,7 @@ class RightPane(QWidget):
                 counts[finding.level] += 1
         by_level = " · ".join(f"{level} {counts[level]}" for level in _LEVELS_BY_WEIGHT)
         self.findings_summary.setText(
-            f"报告：{len(self._findings)} 处｜阻断级别 {self._blocking_level}（{_BLOCKING_RULE}）"
+            f"报告：{len(self._findings)} 处｜阻断级别 {self._blocking_level}（{blocking_rule(self._blocking_level)}）"
             f"｜按级别：{by_level}"
         )
 
@@ -238,6 +261,11 @@ class RightPane(QWidget):
         self.output_view.clear()
         cursor = self.output_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
+        # stdout 不以换行结尾时（printf / echo -n）先补一个换行：否则 stderr 的首行会接到
+        # stdout 最后一行的行尾，拼出一条**两条流都没打印过**的行，复制出去复盘就失真了。
+        # 补的是流之间的边界，不是给输出加内容。
+        if stdout and stderr and not stdout.endswith("\n"):
+            stdout = stdout + "\n"
         for text, color in ((stdout, None), (stderr, _STDERR_COLOR)):
             if not text:
                 continue

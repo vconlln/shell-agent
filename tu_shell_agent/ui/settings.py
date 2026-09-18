@@ -101,6 +101,15 @@ class AppSettings:
         )
 
 
+def default_templates_dir() -> Path:
+    """模板库的默认位置：应用数据目录下的 templates/。
+
+    不用 CLI 那个 CWD 相对的 `.tu-templates`：打包成 exe 之后工作目录是"从哪双击就从哪"，
+    模板库会随启动位置忽有忽无。CLI 保持自己的默认值不变（它本来就从项目目录里跑）。
+    """
+    return default_settings_path().parent / "templates"
+
+
 def default_settings_path() -> Path:
     """设置的默认位置：Windows 是 %APPDATA%\\<应用名>\\settings.json，Linux 是 ~/.local/share/<应用名>/settings.json。
 

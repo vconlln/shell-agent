@@ -1,10 +1,13 @@
 """用假的 opencode/toolchain 驱动 controller，验证三区随事件更新、确认生效、取消与回放可用。"""
 
+import json
 import threading
+from pathlib import Path
 
 from tu_shell_agent.types import DetectionReport, ExecuteResult, GeneratedScript
 from tu_shell_agent.ui.main_window import MainWindow
 from tu_shell_agent.ui.run_controller import RunController
+from tu_shell_agent.ui.settings import AppSettings
 from tu_shell_agent.ui.widgets.confirm_dialog import dangerous_matches
 
 
@@ -37,14 +40,31 @@ class _FakeToolchain:
         return ExecuteResult(0, None, False, False, 1, "ok\n", "")
 
 
+def _window(qtbot, tmp_path) -> MainWindow:
+    """测试专用窗口：设置指向 tmp_path。
+
+    不显式给设置的话，MainWindow 会去读**真实用户**的设置文件（里面可能已经有
+    run_root），于是测试把运行目录写进用户的家目录 —— 测试不该碰用户的真实数据。
+    """
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(
+            run_root=str(tmp_path / "runs"),
+            templates_dir=str(tmp_path / "templates"),
+        ),
+    )
+    qtbot.addWidget(window)
+    return window
+
+
 def _controller(qtbot, tmp_path, **kwargs) -> RunController:
     controller = RunController(
         opencode=kwargs.pop("opencode", _FakeOpencode()),
         toolchain=kwargs.pop("toolchain", _FakeToolchain()),
+        window=_window(qtbot, tmp_path),
         run_root=str(tmp_path / "runs"),
         **kwargs,
     )
-    qtbot.addWidget(controller.window)
     return controller
 
 
@@ -86,8 +106,10 @@ def test_cancel_stops_a_running_generation(qtbot, tmp_path):
             gate.wait(10)
             return super().generate(session_id, message, schema, timeout_ms, on_delta, cancel)
 
-    controller = RunController(opencode=_Gated(), toolchain=_FakeToolchain(), run_root=str(tmp_path / "runs"))
-    qtbot.addWidget(controller.window)
+    controller = RunController(
+        opencode=_Gated(), toolchain=_FakeToolchain(), window=_window(qtbot, tmp_path),
+        run_root=str(tmp_path / "runs"),
+    )
     plan = tmp_path / "plan.md"
     plan.write_text("打印 ok", encoding="utf-8")
     controller.window.left_pane.set_plan(str(plan))
@@ -103,8 +125,10 @@ def test_cancel_stops_a_running_generation(qtbot, tmp_path):
 
 def test_verify_edited_script_uses_engine_entrypoint(qtbot, tmp_path):
     toolchain = _FakeToolchain()
-    controller = RunController(opencode=_FakeOpencode(), toolchain=toolchain, run_root=str(tmp_path / "runs"))
-    qtbot.addWidget(controller.window)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=toolchain, window=_window(qtbot, tmp_path),
+        run_root=str(tmp_path / "runs"),
+    )
     controller.set_script_override("#!/usr/bin/env bash\necho edited\n")   # 模拟用户在界面上手工改过
 
     with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
@@ -124,12 +148,9 @@ def test_start_button_is_wired_to_the_controller(qtbot, tmp_path):
     而窗口一打开用户能点的就是按钮。这里用一个不自动装配控制器的窗口，
     避免窗口自带的控制器与测试控制器同时接管同一批按钮（那样点一次会跑两次）。
     """
-    window = MainWindow(wire_controller=False)
-    qtbot.addWidget(window)
+    window = _window(qtbot, tmp_path)
     controller = RunController(
-        opencode=_FakeOpencode(),
-        toolchain=_FakeToolchain(),
-        window=window,
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
         run_root=str(tmp_path / "runs"),
     )
     plan = tmp_path / "plan.md"
@@ -152,3 +173,249 @@ def test_dangerous_patterns_are_flagged_for_the_confirm_dialog():
     assert dangerous_matches("echo ok\nls -la") == []
     # 单个 -f / -r 不是递归强制删除：宁可精确，也别让每次都弹"危险"（那样警告会被忽略）
     assert dangerous_matches("rm -f /tmp/a\nrm -r /tmp/b") == []
+
+
+# ── 评审发现的缺陷：每一处都留一条会真的转红的用例 ──────────────────────
+
+
+class _StartFailsOpencode(_FakeOpencode):
+    """opencode 起不来（没装、路径写错、没执行权限）：run_loop 会在几毫秒内返回。"""
+
+    def start(self, run_dir, agent_name, model):
+        raise RuntimeError("无法执行 opencode：权限不够")
+
+
+def test_start_failure_does_not_freeze_the_window(qtbot, tmp_path):
+    """引擎快速失败时界面必须恢复可用。
+
+    原实现先 `worker.start()` 再接信号：run_loop 在 opencode 起不来时几毫秒内就返回，
+    那一轮的结论会被静默丢掉 —— 状态栏永远停在"开始运行…"，四个按钮永久禁用
+    （只有"取消"亮着且点了没用），只能重启应用。
+    """
+    controller = _controller(qtbot, tmp_path, opencode=_StartFailsOpencode())
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    controller.window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
+        controller.start()
+
+    assert blocker.args[0].outcome == "aborted_dependency"
+    assert controller.window.status_label.text().startswith("结论：")
+    assert controller.window.start_button.isEnabled()
+    assert not controller.window.cancel_button.isEnabled()
+
+
+def test_controller_connects_signals_before_starting_the_worker(qtbot, tmp_path, monkeypatch):
+    """信号必须在 start() **之前**接好。
+
+    真实事故形态：opencode 起不来时 run_loop 几毫秒内就返回，那一轮的结论会被静默丢掉，
+    界面停在"开始运行…"、按钮永久禁用。为了确定性地测出连接顺序（而不是靠 99% 都跑赢的
+    竞态），这里把 start() 换成一个"刚被启动就先发事件"的探针：控制器若在 start() 之后
+    才连信号，Qt 不会把已发出的事件补发过来，这个事件就永远到不了。
+    """
+    from tu_shell_agent.types import RunEvent
+    from tu_shell_agent.ui import run_controller as rc
+    from tu_shell_agent.ui.engine_worker import EngineWorker
+
+    class Probe(EngineWorker):
+        def start(self) -> None:  # noqa: D102 - 探针
+            self.event.emit(RunEvent("note", 0, {"message": "PROBE-在 start 当刻发出"}))
+            super().start()
+
+    monkeypatch.setattr(rc, "EngineWorker", Probe)
+    controller = _controller(qtbot, tmp_path)
+    seen: list = []
+    controller.events.connect(lambda event: seen.append(event.payload.get("message", "")))
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    controller.window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.start()
+
+    assert any(text.startswith("PROBE-在 start 当刻发出") for text in seen), seen
+
+
+def test_engine_layer_failure_emits_failed_not_finished(qtbot, tmp_path):
+    """连 LoopResult 都产不出来时（线程里的意外异常）必须走 failed，不能让人一直等。"""
+    controller = _controller(qtbot, tmp_path)
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("线程里的意外异常")
+
+    controller._worker = None
+    with qtbot.waitSignal(controller.failed, timeout=15_000) as blocker:
+        controller._run(explode, str(tmp_path / "run"), controller.window.left_pane.to_run_config())
+
+    assert "线程里的意外异常" in blocker.args[0]
+    assert controller.window.start_button.isEnabled()
+
+
+def test_verify_edited_refuses_to_run_while_a_run_is_in_progress(qtbot, tmp_path):
+    """运行中触发"改后重跑"不得改动正在跑的运行目录。
+
+    原实现把 `store.write_script(...)` 放在忙碌守卫**之前**：正在跑的那次运行的
+    script.sh（根目录与 attempts/<n>）会被用户改的文本换掉，引擎随后读到的就是它。
+    """
+    gate = threading.Event()
+
+    class _Gated(_FakeOpencode):
+        def generate(self, session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+            gate.wait(10)
+            return super().generate(session_id, message, schema, timeout_ms, on_delta, cancel)
+
+    controller = _controller(qtbot, tmp_path, opencode=_Gated())
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    controller.window.left_pane.set_plan(str(plan))
+
+    try:
+        with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
+            controller.start()
+            qtbot.wait(200)
+            controller.set_script_override("#!/usr/bin/env bash\necho USER_EDIT\n")
+            controller.verify_edited()      # 运行还没结束 → 必须被拒绝
+            assert controller.window.status_label.text() == "上一次运行还没结束"
+            # 必须**当刻**查盘：晚一点引擎自己的 write_script 会把用户改的文本盖掉，
+            # 那时再查就查不出"守卫之前就写了盘"这个缺陷。
+            written = [
+                path for path in Path(controller._run_dir).rglob("*.sh")
+                if "USER_EDIT" in path.read_text(encoding="utf-8", errors="replace")
+            ]
+            assert written == [], written
+            gate.set()
+    finally:
+        gate.set()                          # 断言失败时也要放行，别把线程留在运行态
+
+    assert blocker.args[0].outcome == "succeeded"
+
+
+def test_replay_without_a_report_does_not_claim_zero_findings(qtbot, tmp_path):
+    """回放一个**没留下 shellcheck 报告**的运行，不能显示成"0 处（本轮没有发现）"。
+
+    第 1 轮契约失败就退出的运行根本没有 attempts/<n>/shellcheck.json；把"报告缺失"
+    渲染成"检查过、没问题"是这份界面里最不该出现的假结论。
+    """
+    from tu_shell_agent.ui.run_controller import RunController
+
+    window = _window(qtbot, tmp_path)
+    RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    root = tmp_path / "runs"
+    # 两份都没有可用报告：一份压根没有 shellcheck.json，一份的报告是半截 JSON
+    for run_id, report in (("20260918-100000-aaaa", None), ("20260918-110000-bbbb", '{"comments": [{')):
+        run_dir = root / run_id
+        (run_dir / "attempts" / "1").mkdir(parents=True)
+        (run_dir / "script.sh").write_text("echo replay\n", encoding="utf-8")
+        (run_dir / "meta.json").write_text('{"outcome": "needs_human", "rounds": 1}', encoding="utf-8")
+        if report is not None:
+            (run_dir / "attempts" / "1" / "shellcheck.json").write_text(report, encoding="utf-8")
+
+    window.history_page.run_root = str(root)
+    window.history_page.reload()
+    for row in range(window.history_page.list_widget.count()):
+        window.history_page.list_widget.setCurrentRow(row)
+        assert "echo replay" in window.center_pane.current_text()
+        assert "尚未校验" in window.right_pane.findings_summary.text()
+        assert "0 处" not in window.right_pane.findings_summary.text()
+
+
+def test_blocking_level_shown_follows_the_run_config(qtbot, tmp_path):
+    """右栏标注用的阻断级别必须是**本次运行生效**的那一个（引擎读同一份 config）。"""
+    from tu_shell_agent.ui.run_controller import RunController
+
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+    window.left_pane.blocking_combo.setCurrentText("error")
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.start()
+
+    assert window.right_pane.blocking_level == "error"
+    # 断言屏幕上那句话就是**按当前级别算出来**的那句（规则本身对不对由下面那条单元测试管）
+    from tu_shell_agent.ui.panes.right import blocking_rule
+
+    assert blocking_rule("error") in window.right_pane.findings_summary.text()
+
+
+def test_right_pane_blocking_rule_matches_engine_semantics():
+    """右栏那句"哪些会阻断"必须与引擎的判定逐级一致（四个级别全试）。
+
+    原来它是一句写死的常量："error/warning/info 会阻断并回灌修复，style 只展示"。
+    级别设成 error 时它仍宣称 info 会阻断，而同一屏正把某条 info 标成"仅展示"；
+    级别设成 style 时它又说 style 只展示，而引擎（blocks_run）明明会回灌修复。
+    """
+    from tu_shell_agent.types import SEVERITY_RANK, blocks_run
+    from tu_shell_agent.ui.panes.right import blocking_rule
+
+    for level in SEVERITY_RANK:
+        rule = blocking_rule(level)
+        claimed = set(rule.split("（")[1].split("）")[0].split("/"))
+        actual = {item for item in SEVERITY_RANK if blocks_run(item, level)}
+        assert claimed == actual, f"{level}: {rule}"
+
+
+def test_settings_values_reach_the_engine_config_and_the_right_pane(qtbot, tmp_path):
+    """设置页那四个运行参数不能是死值：必须进左栏（= 进本次运行 config），
+    而右栏"会不会阻断"的标注必须跟着**生效**的级别走。
+
+    原实现里左栏把这四个值写死成引擎默认值、没有任何代码读 AppSettings，而右栏的级别
+    只从设置读 —— 同一个旋钮两个来源：引擎按 info 阻断、报告按设置的 error 标注，
+    用户会看到"这条只展示不触发修复"，而它恰恰就是把这次运行打进 needs_human 的那条。
+    """
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(
+            run_root=str(tmp_path / "runs"),
+            templates_dir=str(tmp_path / "templates"),
+            blocking_level="error",
+            max_rounds=5,
+            generate_timeout_ms=77_000,
+            execute_timeout_ms=33_000,
+        ),
+    )
+    qtbot.addWidget(window)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+
+    config = window.left_pane.to_run_config()
+    assert (config.blocking_level, config.max_rounds) == ("error", 5)
+    assert (config.generate_timeout_ms, config.execute_timeout_ms) == (77_000, 33_000)
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.start()
+
+    assert window.right_pane.blocking_level == "error"
+    meta = json.loads((Path(controller._run_dir) / "meta.json").read_text(encoding="utf-8"))
+    assert meta["config"]["blocking_level"] == "error"
+    assert meta["config"]["max_rounds"] == 5
+
+
+def test_finding_activation_jumps_the_script_view(qtbot, tmp_path):
+    """右栏双击一条发现要跳到中栏对应行（规格 §12）：不接线那句话就是空头承诺。"""
+    from tu_shell_agent.ui.run_controller import RunController
+
+    window = _window(qtbot, tmp_path)
+    RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    window.center_pane.show_round(1, "#!/usr/bin/env bash\necho one\necho two\necho three\n")
+
+    window.right_pane.finding_activated.emit(3)
+
+    assert window.center_pane.script_view.textCursor().blockNumber() == 2  # 第 3 行（0 基）

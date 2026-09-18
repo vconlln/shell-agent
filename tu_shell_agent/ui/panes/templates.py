@@ -141,6 +141,16 @@ class TemplatesPane(QWidget):
         self.body_edit.textChanged.connect(self._on_body_changed)
 
     # ── 列表与选择 ──────────────────────────────────────────────────────
+    def set_store(self, store: TemplateStore) -> None:
+        """换一个模板库（设置页里的"模板目录"靠它生效）。
+
+        换库后必须重载列表并把当前选中清掉：留着旧库的 `_current_id` 会让人以为
+        选中的还是原来那个模板，而正文已经来自另一个库（甚至根本不存在）。
+        """
+        self._store = store
+        self._current_id = None
+        self.reload()
+
     def reload(self) -> None:
         """重新读模板库并尽量保持原选中项（保存/删除后都会调用）。"""
         keep = self._current_id
@@ -245,7 +255,20 @@ class TemplatesPane(QWidget):
         field.setText(value)                       # textChanged 会顺带刷新预览
 
     def placeholder_values(self) -> dict[str, str]:
-        return {name: field.text() for name, field in self._placeholder_inputs.items()}
+        """用户**真正填过**的占位符值；空输入框不出现在结果里。
+
+        这一条是必须的：`render_template` 里 values 的优先级高于模板元数据的默认值
+        （render.py 的 `if name in values: return values[name]`）。而输入框一建出来
+        就是空的，若把空串当成"用户给的值"，选中内置模板后什么都不填就会把默认值顶掉 ——
+        `{{work_dir:.}}` 渲染成 `DIR=""`、`{{script_name:task.sh}}` 渲染成空名字，
+        于是预览里是一份会跑失败的骨架，而这份骨架正是交给模型生成的基准。
+        空 = 没填，让默认值（或占位符自带的行内默认）生效。
+        """
+        return {
+            name: field.text()
+            for name, field in self._placeholder_inputs.items()
+            if field.text().strip()
+        }
 
     # ── 预览 ────────────────────────────────────────────────────────────
     def _on_body_changed(self) -> None:

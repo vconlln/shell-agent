@@ -25,6 +25,19 @@ BLOCKING_LEVELS: tuple[Severity, ...] = ("error", "warning", "info", "style")
 _PREVIEW_IDLE = "（尚未选择方案文档）"
 
 
+def _absolute_run_root(text: str) -> str:
+    """运行根一律展开 `~` 并绝对化。
+
+    不处理的话 `~/runs` 会被引擎当成**相对**路径（`Path("~/runs")` 不是家目录），
+    于是在进程 CWD 下建一个名字就叫 `~` 的目录、整次运行都落在那里，界面毫无提示。
+    相对路径同理（`runs` → CWD/runs）。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    return str(Path(stripped).expanduser().absolute())
+
+
 class LeftPane(QWidget):
     """方案 + 本次运行参数的输入区。"""
 
@@ -124,7 +137,17 @@ class LeftPane(QWidget):
         """把方案正文读进预览，或把失败原因写进预览。"""
         try:
             text = Path(self._plan_path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+        except UnicodeDecodeError:
+            # 编码问题与"读不到"是两回事：Windows 记事本另存为 ANSI(GBK)/Unicode(UTF-16)
+            # 都会落到这里，笼统说"读不到"会让用户去查权限，而真正要做的是另存为 UTF-8。
+            self._plan_error = (
+                f"方案文档不是 UTF-8 编码（{Path(self._plan_path).name}）："
+                "请用编辑器另存为 UTF-8 后重试"
+            )
+            self._plan_text = ""
+            self.plan_preview.setPlainText(self._plan_error)
+            return
+        except OSError as error:
             # 方案是给人看的，读不了就是读不了，先说清原因再谈运行
             self._plan_error = f"读不到方案文档：{error}"
             self._plan_text = ""
@@ -152,7 +175,7 @@ class LeftPane(QWidget):
         """
         level = self.blocking_combo.currentText()
         return RunConfig(
-            run_root=self.run_root_edit.text().strip(),
+            run_root=_absolute_run_root(self.run_root_edit.text()),
             max_rounds=self.max_rounds_spin.value(),
             generate_timeout_ms=self.generate_timeout_spin.value(),
             execute_timeout_ms=self.execute_timeout_spin.value(),
@@ -169,10 +192,19 @@ class LeftPane(QWidget):
         path = self._plan_path
         if not path:
             problems.append("未选择方案文档")
-        elif self._plan_error or not Path(path).is_file():
+        elif self._plan_error:
+            # 原样带上读到失败时的原因（编码/权限/文件没了），不要在这里改写成笼统的
+            # "读不到" —— 那会把"请另存为 UTF-8"这种可操作的话丢掉。
+            problems.append(self._plan_error)
+        elif not Path(path).is_file():
             problems.append(f"方案文档读不到：{path}")
+        elif not self._plan_text.strip():
+            # 空方案（0 字节/纯空白）跑起来是"照着一个空方案生成脚本"：引擎对方案不做检查，
+            # 它会把空正文写进 run_dir/plan.md，最后还可能落成 succeeded —— 一次没有方案的
+            # 运行被记成成功。运行前就拦在这里。
+            problems.append(f"方案文档是空的：{path}")
 
-        run_root = self.run_root_edit.text().strip()
+        run_root = _absolute_run_root(self.run_root_edit.text())
         if not run_root:
             problems.append("运行根目录未填写")
         elif Path(run_root).is_file():

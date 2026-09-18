@@ -169,7 +169,12 @@ class SettingsPage(QWidget):
         try:
             return AppSettings.load(path), None
         except (OSError, ValueError) as exc:      # 含 json.JSONDecodeError（ValueError 子类）
-            warning = f"设置文件无法读取（{exc}），当前显示默认值；保存会覆盖它"
+            # 内容坏了与读不动（权限/占用）要分开说：后者保存同样会失败，
+            # 提示"保存会覆盖它"会把用户引到错误的方向。
+            if isinstance(exc, ValueError):
+                warning = f"设置文件内容无法解析（{exc}），当前显示默认值；保存会覆盖它"
+            else:
+                warning = f"设置文件无法读取（{exc}），当前显示默认值；修好之前保存也会失败"
             return AppSettings.defaults_for(path), warning
 
     def _on_save_clicked(self) -> None:

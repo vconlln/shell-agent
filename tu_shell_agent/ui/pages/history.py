@@ -28,23 +28,28 @@ from PySide6.QtWidgets import (
 from ...types import SEVERITY_RANK, ShellcheckFinding
 
 
-def parse_shellcheck(raw: str) -> tuple[ShellcheckFinding, ...]:
+def parse_shellcheck(raw: str) -> tuple[ShellcheckFinding, ...] | None:
     """把落盘的 shellcheck json1 报告还原成 findings（回放用）。
 
-    读不动就返回空元组而不是抛：回放时"这份报告缺了"和"报告里没有问题"必须能区分开 ——
-    区分不了的时候，历史页只显示脚本与输出，不谎称"零发现"。
+    返回值有三种，调用方**必须**区分：
+      - `None`：没有报告文件 / 不是合法 JSON / 结构不认识 → "这份运行没留下报告"；
+      - `()`：报告在、且 comments 为空 → "校验过了、零发现"；
+      - 非空元组：就是这些发现。
+    把前两者混成同一个值，界面就会把"没有数据"说成"检查过、没问题"。
     """
 
     def _int(value: object) -> int:
         return value if isinstance(value, int) else 0
 
+    if not raw.strip():
+        return None
     try:
-        data = json.loads(raw) if raw.strip() else None
+        data = json.loads(raw)
     except json.JSONDecodeError:
-        return ()
+        return None
     comments = data.get("comments") if isinstance(data, dict) else None
     if not isinstance(comments, list):
-        return ()
+        return None
     findings: list[ShellcheckFinding] = []
     for item in comments:
         if not isinstance(item, dict):

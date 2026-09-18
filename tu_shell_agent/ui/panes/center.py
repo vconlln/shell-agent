@@ -90,6 +90,14 @@ class CenterPane(QWidget):
             # 用户既然开着对比，新脚本到了就该让他看到「这一轮改了什么」
             self.tabs.setCurrentIndex(_COMPARE_TAB)
 
+    def jump_to_line(self, line_no: int) -> None:
+        """把光标跳到某一行（右栏报告里双击一条发现时用；规格 §12）。
+
+        转发给脚本视图，而不是让控制器去摸 `script_view`：视图怎么实现跳转是中栏的内部事。
+        """
+        self.script_view.jump_to_line(line_no)
+        self.tabs.setCurrentIndex(_CURRENT_TAB)
+
     def current_text(self) -> str:
         """本轮脚本全文（右栏点击跳转、历史回填与界面测试都用它）。"""
         return self.script_view.toPlainText()

@@ -477,6 +477,15 @@ def _drive_loop(
             )
 
         if not approved:
+            if _cancelled(cancel):
+                # 取消（含"生成期间按了取消、generate 正常返回"这条路径）与用户拒绝在界面上
+                # 是同一件事，但轮数必须与另两处取消路径一致：取消 = 这一轮没有产出可用脚本。
+                # 不统一的话，同一个用户动作会因为 generate 是抛异常还是正常返回，
+                # 在历史列表里显示成 0 轮或 1 轮。
+                write_meta({"outcome": "cancelled", "rounds": round_no - 1})
+                return LoopResult(
+                    "cancelled", round_no - 1, script_path, last_findings, last_execute
+                )
             write_meta({"outcome": "cancelled", "rounds": round_no})
             return LoopResult("cancelled", round_no, script_path, last_findings, last_execute)
 
@@ -692,6 +701,8 @@ def verify_and_execute(input_: VerifyInput) -> LoopResult:
         return LoopResult("aborted_dependency", round_no, script_path, findings, None)
 
     if not approved:
+        # 这里**不**减一：本入口不新起轮次，round_no 就是这次运行已完成的轮数，
+        # 用户拒绝执行并没有让哪一轮"白费"。与 run_loop 的取消路径不同，是有意的。
         write_meta({"outcome": "cancelled", "rounds": round_no})
         return LoopResult("cancelled", round_no, script_path, findings, None)
 

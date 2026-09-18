@@ -21,7 +21,8 @@ from .panes.templates import TemplatesPane
 from .pages.history import HistoryPage
 from .pages.selfcheck import SelfCheckPage
 from .pages.settings_page import SettingsPage
-from .settings import AppSettings, default_settings_path
+from .settings import AppSettings, default_settings_path, default_templates_dir
+from ..template_store.store import TemplateStore
 
 
 class MainWindow(QMainWindow):
@@ -41,8 +42,14 @@ class MainWindow(QMainWindow):
 
         self.left_pane = LeftPane()
         self.left_pane.setObjectName("leftPane")
-        self.templates_pane = TemplatesPane()
+        # 模板库的目录来自设置页；没设过就用应用数据目录下的 templates/。
+        self.templates_pane = TemplatesPane(
+            store=TemplateStore(str(self.settings.templates_dir or default_templates_dir()))
+        )
         self.templates_pane.setObjectName("templatesPane")
+        # 启动就要有列表：面板自己不会在构造时读盘，不调这一下用户看到的是空面板
+        # （会以为"模板丢了"，而模板其实好好躺在磁盘上）。
+        self.templates_pane.reload()
         self.center_pane = CenterPane()
         self.center_pane.setObjectName("centerPane")
         self.right_pane = RightPane()
@@ -98,11 +105,14 @@ class MainWindow(QMainWindow):
         root.setLayout(root_layout)
         self.setCentralWidget(root)
 
-        # 设置里已经存过的路径要体现在界面上，否则用户会以为设置没生效：
-        # 运行根只在左栏为空时预填（别覆盖用户刚敲进去的），阻断级别直接同步给右栏。
-        if self.settings.run_root and not self.left_pane.run_root_edit.text().strip():
-            self.left_pane.run_root_edit.setText(self.settings.run_root)
-        self.right_pane.blocking_level = self.settings.blocking_level
+        # 设置里存的值要体现在界面上，否则用户会以为设置没生效——设置页那四个运行参数
+        # （轮次/两个超时/阻断级别）此前根本没人读，是四个死值。
+        self._apply_settings_to_inputs()
+        # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
+        # 用户一改就该立刻反映，不能等到下次运行。
+        self.left_pane.blocking_combo.currentTextChanged.connect(
+            self._on_blocking_level_changed
+        )
         self.settings_page.saved.connect(self._on_settings_saved)
 
         self.controller = None
@@ -126,14 +136,29 @@ class MainWindow(QMainWindow):
             confirm_answer=None,
         )
 
+    def _apply_settings_to_inputs(self) -> None:
+        """把设置里的值铺到界面上（设置是"默认值"，左栏仍是本次运行可改的地方）。"""
+        pane = self.left_pane
+        # 运行根只在左栏为空时预填：别覆盖用户刚敲进去的
+        if self.settings.run_root and not pane.run_root_edit.text().strip():
+            pane.run_root_edit.setText(self.settings.run_root)
+        pane.blocking_combo.setCurrentText(self.settings.blocking_level)
+        pane.max_rounds_spin.setValue(self.settings.max_rounds)
+        pane.generate_timeout_spin.setValue(self.settings.generate_timeout_ms)
+        pane.execute_timeout_spin.setValue(self.settings.execute_timeout_ms)
+
+    def _on_blocking_level_changed(self, level: str) -> None:
+        self.right_pane.blocking_level = level
+
     def _on_settings_saved(self, _path: str) -> None:
         """设置保存后重新装载：只影响**之后**的运行，不打断正在跑的。"""
         self.settings = self.settings_page.collect()
         self.history_page.run_root = self.settings.run_root
-        self.right_pane.blocking_level = self.settings.blocking_level
-        if self.settings.run_root:
-            self.left_pane.run_root_edit.setText(self.settings.run_root)
         self.history_page.reload()
+        self._apply_settings_to_inputs()
+        if self.settings.templates_dir:
+            # 模板目录改了就得换库：不换的话设置页显示"已保存"，模板面板还指着旧目录
+            self.templates_pane.set_store(TemplateStore(str(self.settings.templates_dir)))
         self.set_status(f"设置已保存：{_path}")
 
     # ── 供控制器调用 ──────────────────────────────────────────────

@@ -85,7 +85,8 @@ def _builtin_template(template_id: str = "single") -> TemplateSpec:
 class RunController(QObject):
     """三区 ↔ 引擎的接线员。"""
 
-    finished = Signal(object)  # LoopResult
+    finished = Signal(object)  # LoopResult；与 failed 二选一
+    failed = Signal(str)       # 引擎层异常（连 LoopResult 都没产出）；与 finished 二选一
     events = Signal(object)    # RunEvent（同时转发给测试与需要观察的调用方）
 
     def __init__(
@@ -148,6 +149,8 @@ class RunController(QObject):
         window.verify_button.clicked.connect(self.verify_edited)
         window.open_dir_button.clicked.connect(self.open_run_dir)
         window.selfcheck_page.recheck_requested.connect(self.recheck_environment)
+        # 右栏报表明说"双击条目跳到中栏对应行"（规格 §12）：不接这根线，那句话就是空头承诺。
+        window.right_pane.finding_activated.connect(window.center_pane.jump_to_line)
         window.set_running(False)
 
     # ── 环境自检 ──────────────────────────────────────────────────
@@ -176,6 +179,9 @@ class RunController(QObject):
     # ── 对外动作 ──────────────────────────────────────────────────
     def start(self) -> None:
         """第 1 轮：方案 → 生成 → 校验 → 执行（失败回灌自修），全程在 worker 线程。"""
+        if self._busy():
+            self._status("上一次运行还没结束")
+            return
         self._prefill_inputs()
         problems = self.window.left_pane.validate()
         if problems:
@@ -185,6 +191,9 @@ class RunController(QObject):
         template = self._template_spec()
         config = self._config_from_ui()
         plan_text = self.window.left_pane.plan_text()
+        # 所有控件读取都必须在**主线程**完成后再交给 worker：Qt 控件不是线程安全的，
+        # 在 worker 线程里调 text() 属于未定义行为（最坏是堆损坏，而不是一个可见异常）。
+        values = self._placeholder_values()
         run_dir = run_dir_for(config.run_root, make_run_id())
         RunStore(run_dir).init()
 
@@ -198,7 +207,7 @@ class RunController(QObject):
                 LoopInput(
                     plan=plan_text,
                     template=template,
-                    values=self._placeholder_values(),
+                    values=values,
                     run_dir=run_dir,
                     config=config,
                     ports=ports,
@@ -206,7 +215,7 @@ class RunController(QObject):
                 )
             )
 
-        self._run(entry, run_dir, config, trusted=template.trusted)
+        self._run(entry, run_dir, config)
 
     def continue_repair(self) -> None:
         """在**既有会话**上继续修（规格 §6）：不重开会话、不重发首轮消息。
@@ -214,6 +223,9 @@ class RunController(QObject):
         会话 id 从运行目录的 meta.json 读 —— 引擎在循环里建会话，界面拿不到，
         读盘同时也是"重启界面后仍能续跑"的唯一途径。
         """
+        if self._busy():
+            self._status("上一次运行还没结束")
+            return
         meta = self._read_meta()
         session_id = meta.get("sessionId")
         if not session_id:
@@ -224,13 +236,14 @@ class RunController(QObject):
         last_round = int(meta.get("rounds") or 0)
         template = self._template_spec()
         evidence = self._evidence_from_last_result(last_round)
+        values = self._placeholder_values()   # 主线程读控件，理由同 start()
 
         def entry(ports: LoopPorts, cancel: Any) -> LoopResult:
             return resume_repair(
                 ResumeInput(
                     plan=self._plan_text,
                     template=template,
-                    values=self._placeholder_values(),
+                    values=values,
                     run_dir=run_dir,
                     session_id=session_id,
                     start_round=last_round + 1,
@@ -241,10 +254,15 @@ class RunController(QObject):
                 )
             )
 
-        self._run(entry, run_dir, config, trusted=template.trusted)
+        self._run(entry, run_dir, config)
 
     def verify_edited(self) -> None:
         """用户手工改过脚本后只重跑"校验 + 执行"（不生成、不烧轮次）。"""
+        # 守卫必须在**任何写盘之前**：这个入口会往 run_dir 写 script.sh，
+        # 若上一次运行还在跑，就会把正在跑的脚本换掉（引擎随后读到用户改的文本）。
+        if self._busy():
+            self._status("上一次运行还没结束")
+            return
         script = self._script_override
         if script is None:
             # 没显式给过覆盖 → 就用中栏里显示的正文（用户可能直接在脚本视图里改的）。
@@ -278,7 +296,7 @@ class RunController(QObject):
                 )
             )
 
-        self._run(entry, run_dir, config, trusted=template.trusted)
+        self._run(entry, run_dir, config)
 
     def cancel(self) -> None:
         if self._worker is None:
@@ -300,10 +318,8 @@ class RunController(QObject):
         entry: Callable[[LoopPorts, Any], LoopResult],
         run_dir: str,
         config: RunConfig,
-        *,
-        trusted: bool,
     ) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self._busy():
             self._status("上一次运行还没结束")
             return
         try:
@@ -312,10 +328,12 @@ class RunController(QObject):
             self._status(str(error))
             return
 
+        # 右栏那句"这一条会不会阻断"必须用**本次运行真正生效**的级别（引擎读的是同一份
+        # config）。级别有两个来源（设置页存值、左栏本次运行值），生效的只有左栏那个。
+        self.window.right_pane.blocking_level = config.blocking_level
+
         store = RunStore(run_dir)
-        worker = EngineWorker(
-            opencode=opencode, toolchain=toolchain, config=config, trusted=trusted
-        )
+        worker = EngineWorker(opencode=opencode, toolchain=toolchain, config=config)
         # ports 的 confirm/emit 由 worker 线程补（确认必须回到主线程弹窗、事件必须经信号），
         # 这里传进去的 confirm/emit 只是为了满足 LoopPorts 的完整性，永远不会被调用到。
         worker.submit_entry(
@@ -328,6 +346,10 @@ class RunController(QObject):
                 emit=_ignore,
             ),
         )
+        # **先接信号再 start()**：opencode 起不来时 run_loop 会在几毫秒内返回，
+        # 那时若槽还没连上，这一轮的结论就被静默丢掉——界面停在"开始运行…"、
+        # 四个按钮永久禁用（只有"取消"亮着且点了没用），只能重启应用。
+        # Qt 不会把已经发出的信号补发给后连的槽。
         worker.event.connect(self._on_event)
         worker.confirm_requested.connect(self._on_confirm_requested)
         worker.finished_result.connect(self._on_finished)
@@ -499,10 +521,19 @@ class RunController(QObject):
         self.finished.emit(result)
 
     def _on_failed(self, message: str) -> None:
+        """引擎层异常：没有 LoopResult 可给，所以走 failed 而不是 finished。
+
+        两个信号**二选一**（每次运行恰好一个）。等待结论的调用方要同时听两个，
+        否则引擎异常时它会一直等不到——这正是加这个信号的原因。
+        """
         self._set_running(False)
         self._status(f"引擎异常：{message}")
         self._dispose_adapter()
         self._sync_buttons()
+        self.failed.emit(message)
+
+    def _busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
 
     def _on_replay(self, snapshot: dict) -> None:
         """历史回放：把某次运行的产物回填三区（只读展示，不影响正在跑的运行）。"""
@@ -515,9 +546,15 @@ class RunController(QObject):
         # 回放前必须先清空：否则上一次运行的轮次会被当成"这一轮的上一轮"，对比页会给出
         # 两次**不同运行**之间的假差异，时间线里也会留着别人的轮次。
         center.reset()
+        right.reset()
         if script:
             center.show_round(int(meta.get("rounds") or 1), script)
-        right.render_findings(snapshot.get("findings") or ())
+        findings = snapshot.get("findings")
+        if findings is not None:
+            # None 表示"这份运行没留下 shellcheck 报告"（例如第 1 轮契约失败就退出了）：
+            # 不能喂空元组，那会被右栏渲染成"报告：0 处（本轮没有发现）"——把"没有数据"
+            # 说成"检查过了没问题"，是这份界面里最不该出现的假结论。
+            right.render_findings(findings)
         notes, assumptions = _split_notes(snapshot.get("notes") or "")
         right.render_notes(notes, assumptions)
         right.output_view.setPlainText(

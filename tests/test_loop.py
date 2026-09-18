@@ -449,7 +449,10 @@ def test_cancel_set_while_generation_is_in_flight_never_executes():
 
     ports["opencode"].generate = generate_then_cancel
     ports["toolchain"].execute = record_execute
-    result = run(ports, cancel=token)
+    # 用**非 trusted** 模板：trusted 时 `_confirm_and_execute` 里的 confirm 会被短路，
+    # `harness.confirmed == 0` 就成了恒真断言（与本次修复无关）。非 trusted 下它才有意义：
+    # 取消复查必须在确认之前生效，用户连确认框都不该看到。
+    result = run(ports, cancel=token, template=FakeTemplate(trusted=False))
 
     assert executions == []  # 关键断言：脚本一次都没被执行
     assert harness.confirmed == 0  # 连确认对话框都不该弹

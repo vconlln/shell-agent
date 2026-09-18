@@ -106,3 +106,55 @@ def test_set_plan_emits_signal_and_reports_unreadable_file(qtbot, tmp_path: Path
     assert blocker.args[0] == str(missing)
     assert "读不到" in pane.plan_preview.toPlainText()
     assert any("方案" in problem for problem in pane.validate())
+
+
+def test_empty_plan_is_rejected(qtbot, tmp_path):
+    """0 字节/纯空白的方案必须被拦下。
+
+    引擎对方案不做任何检查：空正文会被写进 run_dir/plan.md，模型照着"空方案"生成，
+    最后还可能落成 succeeded —— 一次根本没有方案的运行被记成成功。
+    """
+    for name, content in (("empty.md", ""), ("blank.md", "   \n\n\t\n")):
+        plan = tmp_path / name
+        plan.write_text(content, encoding="utf-8")
+        pane = LeftPane()
+        qtbot.addWidget(pane)
+        pane.set_plan(str(plan))
+        pane.run_root_edit.setText(str(tmp_path / "runs"))
+
+        problems = pane.validate()
+        assert any("方案" in problem and "空" in problem for problem in problems), problems
+
+
+def test_run_root_is_expanded_and_absolute(qtbot, tmp_path, monkeypatch):
+    """`~/runs` 与相对路径都必须落成绝对路径。
+
+    不处理的话引擎会把 "~/runs" 当成**相对**路径，在进程 CWD 下建一个名字就叫 `~`
+    的目录，整次运行都落在那里，而界面毫无提示。
+    """
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+    pane.run_root_edit.setText("~/tu-runs-review")
+
+    assert pane.to_run_config().run_root == str(Path.home() / "tu-runs-review")
+
+    pane.run_root_edit.setText("relative-runs")
+    configured = pane.to_run_config().run_root
+    assert Path(configured).is_absolute()
+    assert configured == str(Path.cwd() / "relative-runs")
+
+
+def test_non_utf8_plan_says_what_to_do(qtbot, tmp_path):
+    """GBK/UTF-16 的方案文档要提示"另存为 UTF-8"，而不是笼统说"读不到"。
+
+    目标用户是 Windows + 中文方案：记事本"另存为 ANSI/Unicode"是最常见的来源，
+    按"读不到"去查权限是白费功夫。
+    """
+    plan = tmp_path / "gbk.md"
+    plan.write_bytes("方案：按 mtime 倒序".encode("gbk"))
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+    pane.set_plan(str(plan))
+
+    problems = pane.validate()
+    assert any("UTF-8" in problem for problem in problems), problems
