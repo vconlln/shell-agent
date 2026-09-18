@@ -1,16 +1,268 @@
-"""右栏：shellcheck 报告与执行输出（骨架占位，内容由后续任务填充）。"""
+"""右栏：shellcheck 报告（按 SC 编号分组）+ 执行输出 + 模型取舍说明。
+
+这一栏是「人核对方案约束是否被落实」的唯一落点（规格 §11）：`succeeded` 只说明
+shellcheck 没有阻断项且退出码为 0，模型完全可能靠**放宽**方案里的约束来跑通
+（实测三次运行三次都这么过），而它把这些取舍写在脚本正文之外的 notes / assumptions 里。
+所以三件事必须同屏可见，报告也要说清「注入的阻断级别是哪一级、哪几条会阻断」——
+否则一次"通过"很容易被读成"方案被正确实现了"。
+
+本控件只做展示：不读盘、不起进程、不判定成败，内容全部由 RunController 喂进来。
+"""
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from collections.abc import Sequence
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (
+    QLabel, QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, blocks_run
+
+# 级别由重到轻：与 types.SEVERITY_RANK、左栏阻断级别下拉框同源
+_LEVELS_BY_WEIGHT: tuple[Severity, ...] = ("error", "warning", "info", "style")
+
+# 阻断规则写成一句话跟着级别走：级别是可配的，光写"阻断级别 warning"没人知道 warning 意味着什么
+_BLOCKING_RULE = "error/warning/info 会阻断并回灌修复，style 只展示"
+
+# stderr 是"出问题了"的那条流，跟 stdout 混在一起时人得逐行找，用颜色分开
+_STDERR_COLOR = "#b00020"
+_BLOCKING_COLOR = "#b00020"
+_NON_BLOCKING_COLOR = "#7f8c8d"
+
+_NOTES_TITLE = "模型取舍说明与假设（与中栏脚本正文并排核对）"
+_NOTES_WARNING = (
+    "succeeded 只表示「shellcheck 无阻断项 + 退出码 0」，不代表方案里的约束被实现："
+    "模型为跑通而放宽的约束只写在这里，必须逐条对照方案原文。"
+)
+
+_UNSET_NOTES = "（模型未给出取舍说明；请直接对照方案原文核对脚本正文）"
+_UNSET_ASSUMPTIONS = "（模型未声明任何假设）"
 
 
 class RightPane(QWidget):
-    """shellcheck 报告 + 执行输出 + 模型取舍说明。本任务只装配占位标题。"""
+    """shellcheck 报告分组 + 执行输出 + 模型取舍说明。"""
+
+    finding_activated = Signal(int)     # 发现所在行号，中栏据此跳转
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("rightPane")
+        self.setObjectName("rightPane")   # main_window 与骨架测试依赖的名字，不要改
+        self._findings: tuple[ShellcheckFinding, ...] = ()
+        # "校验过、这轮没发现"与"还没校验过"必须分开说：前者是结论，后者只是没数据
+        self._has_report: bool = False
+        # 与 RunConfig 默认一致（实测 SC2086 是 info 级）；接线方在运行参数变化时覆盖
+        self._blocking_level: Severity = "info"
+
+        self.findings_header = QLabel("校验报告（按 SC 编号分组；双击条目跳到中栏对应行）")
+        self.findings_header.setWordWrap(True)
+
+        self.findings_summary = QLabel()
+        self.findings_summary.setObjectName("findingsSummary")
+        self.findings_summary.setWordWrap(True)
+
+        self.findings_tree = QTreeWidget()
+        self.findings_tree.setObjectName("findingsTree")
+        self.findings_tree.setColumnCount(2)
+        self.findings_tree.setHeaderLabels(["SC 编号 / 说明", "数量 / 位置"])
+        # 激活（双击、回车）才跳转：单击就跳会让人在展开分组时被反复拽走
+        self.findings_tree.itemActivated.connect(self._on_item_activated)
+
+        self.execute_summary = QLabel()
+        self.execute_summary.setObjectName("executeSummary")
+        self.execute_summary.setWordWrap(True)
+
+        self.output_view = QPlainTextEdit()
+        self.output_view.setObjectName("outputView")
+        self.output_view.setReadOnly(True)
+        # 日志按原样换行：自动折行会让人分不清是脚本换的行还是界面折的行
+        self.output_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+
+        self.notes_header = QLabel(f"{_NOTES_TITLE}\n{_NOTES_WARNING}")
+        self.notes_header.setObjectName("notesHeader")
+        self.notes_header.setWordWrap(True)
+
+        self.notes_view = QPlainTextEdit()
+        self.notes_view.setObjectName("notesView")
+        self.notes_view.setReadOnly(True)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("校验报告与执行输出"))
-        layout.addStretch(1)
+        layout.addWidget(self.findings_header)
+        layout.addWidget(self.findings_summary)
+        layout.addWidget(self.findings_tree, 3)
+        layout.addWidget(QLabel("执行输出（stdout / stderr，stderr 标红）"))
+        layout.addWidget(self.execute_summary)
+        layout.addWidget(self.output_view, 3)
+        layout.addWidget(self.notes_header)
+        layout.addWidget(self.notes_view, 2)
+
+        self._refresh_findings()
+        self.execute_summary.setText("执行结果：尚未执行")
+        self.notes_view.setPlainText(f"{_UNSET_NOTES}\n\n假设（脚本成立的前提）：\n{_UNSET_ASSUMPTIONS}")
+
+    # ---- 阻断级别 -------------------------------------------------------------
+
+    @property
+    def blocking_level(self) -> Severity:
+        """本次运行注入的阻断级别。判定由引擎做，这里只用它标注哪几条会阻断。"""
+        return self._blocking_level
+
+    @blocking_level.setter
+    def blocking_level(self, level: Severity) -> None:
+        """换级别后必须重画报告：同一份发现，在不同级别下"会不会阻断"是不同结论。"""
+        if level == self._blocking_level:
+            return
+        self._blocking_level = level
+        self._refresh_findings()
+
+    # ---- 校验报告 -------------------------------------------------------------
+
+    def render_findings(self, findings: Sequence[ShellcheckFinding]) -> None:
+        """重画报告：同一 SC 编号聚成一组，组内按行列排序。
+
+        顶层组的先后顺序 = 引擎给出报告的顺序（同编号首现即定型），不按级别重排：
+        重排会让同一脚本的两次报告行序不一致，人对不上号；级别由组标题、组内第二列
+        和摘要行的分级计数体现。
+        """
+        self._findings = tuple(findings)
+        self._has_report = True
+        self._refresh_findings()
+
+    def _refresh_findings(self) -> None:
+        """按当前发现与阻断级别重画整块报告（摘要行 + 树），两条入口共用这一条重画路径。"""
+        self.findings_tree.clear()
+        if not self._findings:
+            # 还没跑过校验 → 说还没校验；跑过而没发现 → 说 0 处。
+            # 两者都不能只留一片空白：空白会被读成"检查过了、没问题"。
+            head = "报告：0 处（本轮没有发现）" if self._has_report else "报告：尚未校验"
+            self.findings_summary.setText(
+                f"{head}｜阻断级别 {self._blocking_level}（{_BLOCKING_RULE}）"
+            )
+            return
+
+        groups: dict[str, list[ShellcheckFinding]] = {}
+        for finding in self._findings:
+            groups.setdefault(finding.code, []).append(finding)
+
+        for code, members in groups.items():
+            blocking = any(blocks_run(item.level, self._blocking_level) for item in members)
+            group = QTreeWidgetItem([
+                f"{code}（{self._levels_text(members)}）· {'阻断' if blocking else '仅展示'}",
+                f"{len(members)} 处",
+            ])
+            group.setForeground(0, QBrush(QColor(_BLOCKING_COLOR if blocking else _NON_BLOCKING_COLOR)))
+            group.setToolTip(0, (
+                f"{code}：{len(members)} 处，{self._levels_text(members)} 级；"
+                + (f"达到阻断级别 {self._blocking_level}，会触发回灌修复"
+                   if blocking else f"低于阻断级别 {self._blocking_level}，只展示不触发修复")
+            ))
+            for finding in sorted(members, key=lambda item: (item.line, item.column)):
+                child = QTreeWidgetItem([
+                    f"第 {finding.line} 行:  {finding.message}",
+                    f"列 {finding.column} · {finding.level}",
+                ])
+                # 行号随条目存下来：跳转只需要行号，不必让槽回头看发现列表的次序
+                child.setData(0, Qt.ItemDataRole.UserRole, finding.line)
+                child.setToolTip(0, (
+                    f"{finding.code}（{finding.level}）第 {finding.line} 行第 {finding.column} 列："
+                    f"{finding.message}"
+                ))
+                group.addChild(child)
+            self.findings_tree.addTopLevelItem(group)
+
+        self.findings_tree.expandAll()
+        counts = {level: 0 for level in _LEVELS_BY_WEIGHT}
+        for finding in self._findings:
+            if finding.level in counts:
+                counts[finding.level] += 1
+        by_level = " · ".join(f"{level} {counts[level]}" for level in _LEVELS_BY_WEIGHT)
+        self.findings_summary.setText(
+            f"报告：{len(self._findings)} 处｜阻断级别 {self._blocking_level}（{_BLOCKING_RULE}）"
+            f"｜按级别：{by_level}"
+        )
+
+    @staticmethod
+    def _levels_text(members: Sequence[ShellcheckFinding]) -> str:
+        """组标题里的级别。同一编号理论上只对应一个级别，仍按实际出现过的级别如实列出。"""
+        levels = sorted({item.level for item in members}, key=lambda level: -SEVERITY_RANK[level])
+        return "/".join(levels)
+
+    def _on_item_activated(self, item: QTreeWidgetItem, _column: int) -> None:
+        """条目被激活 → 把行号广播出去。分组行不带行号，静默忽略。"""
+        line = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(line, int):
+            self.finding_activated.emit(line)
+
+    # ---- 执行输出 -------------------------------------------------------------
+
+    def render_execute(self, result: ExecuteResult) -> None:
+        """重画执行输出与摘要行。覆盖上一轮：右栏只显示最近一轮，历史留在运行目录里。"""
+        self._set_output(result.stdout, result.stderr)
+        self.execute_summary.setText(self._execute_summary_text(result))
+
+    def _execute_summary_text(self, result: ExecuteResult) -> str:
+        """摘要行必须能区分四态：正常退出 / 非零退出 / 超时 / 已取消（后两者含"超时""已取消"字样）。"""
+        states: list[str] = []
+        if result.cancelled:
+            states.append("已取消")
+        if result.timed_out:
+            states.append("超时")
+        if not states:
+            if result.exit_code is None:
+                states.append("结束状态未知")
+            else:
+                states.append("正常退出" if result.exit_code == 0 else "非零退出")
+
+        exit_code = "—" if result.exit_code is None else str(result.exit_code)
+        parts = [f"执行结果：{'、'.join(states)}", f"退出码 {exit_code}"]
+        if result.signal is not None:
+            parts.append(f"信号 {result.signal}")
+        parts.append(f"耗时 {result.duration_ms} ms")
+        if result.exit_code == 0 and states[0] not in ("超时", "已取消"):
+            # 退出码 0 最容易被当成功劳簿：这里就地把它说清楚，别让人跨栏去找那句话
+            parts.append("退出码 0 只说明脚本正常结束，不代表方案里的约束被满足")
+        if "\ufffd" in result.stdout or "\ufffd" in result.stderr:
+            # 引擎按 errors="replace" 解码（execute.py），非法字节会变成替换字符；
+            # ExecuteResult 没有对应字段，替换字符是界面上唯一能看见的信号
+            parts.append("输出含替换字符（非法字节已按 UTF-8 有损解码，未必是脚本的真实输出）")
+        return " · ".join(parts)
+
+    def _set_output(self, stdout: str, stderr: str) -> None:
+        """两条流写进同一个只读视图：stderr 染色，文本本身一字不改、也不截断。
+
+        不加"stdout:"之类的前缀或分隔行：输出区必须原样等于脚本真正打印的内容，
+        否则人复制出去复盘时拿到的就不是脚本的输出了。分色只靠格式，不靠插入字符。
+        """
+        self.output_view.clear()
+        cursor = self.output_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        for text, color in ((stdout, None), (stderr, _STDERR_COLOR)):
+            if not text:
+                continue
+            char_format = QTextCharFormat()
+            if color is not None:
+                char_format.setForeground(QColor(color))
+            cursor.insertText(text, char_format)
+        self.output_view.moveCursor(QTextCursor.MoveOperation.Start)
+
+    # ---- 模型取舍说明 ---------------------------------------------------------
+
+    def render_notes(self, notes: str, assumptions: Sequence[str]) -> None:
+        """摊开模型自述的取舍与假设（规格 §11）。
+
+        缺内容时写明确的一句话而不是留白：空白会被读成"没有取舍"，而更常见的情况是
+        "模型没交代"——前者可以放过，后者必须追问，两者的处理方式完全不同。
+        """
+        lines = [
+            "取舍说明（模型自述：为跑通而放宽或改动了方案里的哪些约束）",
+            notes.strip() or _UNSET_NOTES,
+            "",
+            "假设（脚本成立的前提）：",
+        ]
+        if assumptions:
+            lines.extend(f"- {item}" for item in assumptions)
+        else:
+            lines.append(_UNSET_ASSUMPTIONS)
+        self.notes_view.setPlainText("\n".join(lines))
