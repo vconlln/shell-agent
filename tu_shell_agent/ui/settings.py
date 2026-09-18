@@ -11,6 +11,10 @@ import json
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+# 应用名只有一个来源：app.py 用它设 QApplication.applicationName，设置路径也由它决定。
+# 两处写死成不同的字符串，就会变成"设置保存在 A、读取时找 B"。
+APP_NAME = "tu-shell-agent"
+
 
 def _type_matches(default: object, value: object) -> bool:
     """JSON 值的类型是否与字段默认值同型。
@@ -100,11 +104,14 @@ class AppSettings:
 def default_settings_path() -> Path:
     """设置的默认位置：Windows 是 %APPDATA%\\<应用名>\\settings.json，Linux 是 ~/.local/share/<应用名>/settings.json。
 
-    用 `QStandardPaths.AppDataLocation` 拿到平台正确的位置——它按 `QApplication.applicationName()` 分目录，
-    而任务 2 的 `app.py` 已经设了 `setApplicationName("tu-shell-agent")`，所以两边必须一致。
+    用 `QStandardPaths.GenericDataLocation` + 自己的常量拼，而**不用** `AppDataLocation`：
+    后者按 `QCoreApplication.applicationName()` 分目录，于是"设置存到哪"取决于调用时应用名
+    设没设、以及是谁在跑（无 QApplication 时它会退成 ~/.local/share/settings.json，
+    pytest 下又变成 <临时目录>/pytest-qt-qapp/）。那会让保存与读取指向两个不同的文件，
+    症状是"设置保存了、重启却没生效"。路径只由一个常量决定，就没有这个自由度。
     Qt 的导入放在函数内部：这个模块因此不依赖 Qt，测试里可以纯文件层面读写设置。
     """
     from PySide6.QtCore import QStandardPaths
 
-    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-    return Path(base) / "settings.json"
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+    return Path(base) / APP_NAME / "settings.json"

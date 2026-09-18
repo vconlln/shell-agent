@@ -7,11 +7,12 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+from .settings import APP_NAME
 
 
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("tu-shell-agent")
+    app.setApplicationName(APP_NAME)
     window = MainWindow()
     window.show()
     # 开窗之后立刻自检三件套（规格 §9：缺一不可）：探测起子进程，放在控制器线程里跑，

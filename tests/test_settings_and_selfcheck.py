@@ -187,3 +187,29 @@ def test_selfcheck_page_reports_and_recheck_signal(qtbot):
 
     with qtbot.waitSignal(page.recheck_requested, timeout=1000):
         page.recheck_button.click()
+
+
+def test_default_settings_path_does_not_depend_on_ambient_application_name():
+    """设置路径只由 APP_NAME 决定，不受"当前谁在跑"影响。
+
+    之前用 QStandardPaths.AppDataLocation 时它会按 applicationName 分目录：无 QApplication
+    时退成 ~/.local/share/settings.json，pytest 下又变成 <临时目录>/pytest-qt-qapp/ ——
+    保存与读取指向两个不同文件，症状是"设置保存了、重启却没生效"。
+    """
+    from PySide6.QtCore import QCoreApplication
+
+    from tu_shell_agent.ui.settings import APP_NAME, default_settings_path
+
+    path = default_settings_path()
+    assert path.is_absolute()
+    assert path.parent.name == APP_NAME
+    assert path.name == "settings.json"
+
+    # 换个应用名再问一次：路径必须一模一样（真应用里 app.py 设的就是 APP_NAME，
+    # 但这条不变量不该依赖"谁先谁后调用了什么"）。
+    previous = QCoreApplication.applicationName()
+    try:
+        QCoreApplication.setApplicationName("某个别的名字")
+        assert default_settings_path() == path
+    finally:
+        QCoreApplication.setApplicationName(previous)
