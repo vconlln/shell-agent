@@ -1,4 +1,8 @@
 import os
+
+# 无头跑界面测试：必须在 QApplication 创建之前设置
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import shutil
 from pathlib import Path
 
