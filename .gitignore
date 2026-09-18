@@ -16,3 +16,6 @@ tools/
 build/
 dist/
 *.spec
+# 但 packaging/ 下的 spec 是交付物本身，必须入库：
+# 上面那条 `*.spec` 原本是挡 pyinstaller 在仓库根目录随手生成的同名文件的。
+!packaging/*.spec
