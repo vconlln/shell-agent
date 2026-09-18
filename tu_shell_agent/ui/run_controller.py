@@ -36,8 +36,10 @@ from ..run_store.store import RunStore
 from ..template_store.builtins import BUILTIN_TEMPLATES
 from ..template_store.render import PlaceholderSpec, declared_names, render_template
 from ..types import (
+    SEVERITY_RANK,
     DetectionReport,
     ExecuteEvidence,
+    ExecuteResult,
     FailureEvidence,
     RunConfig,
     RunEvent,
@@ -47,6 +49,10 @@ from .widgets.confirm_dialog import ConfirmDialog
 
 # 引擎写 notes.md 时用的分隔（见 orchestrator.loop 的 _check_script 调用点）。
 _NOTES_SEPARATOR = "\n\n## 假设\n"
+
+# 关窗时没能在超时内停下的线程挂在这里，由模块级列表持有强引用。
+# Qt 的硬规则：QThread 在仍运行时被析构 = 进程 abort；保留引用是唯一不崩的选择。
+_ORPHANS: list[Any] = []
 
 
 def _split_notes(text: str) -> tuple[str, tuple[str, ...]]:
@@ -318,6 +324,8 @@ class RunController(QObject):
         entry: Callable[[LoopPorts, Any], LoopResult],
         run_dir: str,
         config: RunConfig,
+        *,
+        resuming: bool = False,
     ) -> None:
         if self._busy():
             self._status("上一次运行还没结束")
@@ -331,6 +339,23 @@ class RunController(QObject):
         # 右栏那句"这一条会不会阻断"必须用**本次运行真正生效**的级别（引擎读的是同一份
         # config）。级别有两个来源（设置页存值、左栏本次运行值），生效的只有左栏那个。
         self.window.right_pane.blocking_level = config.blocking_level
+        # 开跑前把三区里属于**上一次运行**的内容清掉：本次运行如果在生成阶段就失败
+        # （无凭据、opencode 起不来都是常态），不会有任何 script/shellcheck/execute 事件，
+        # 于是屏幕上会留着上一次的脚本、退出码 0 与 stdout —— 与本次"失败"并列，
+        # 是最容易被读成"这次也成功了"的一种假象。
+        self.window.center_pane.reset()
+        self.window.right_pane.reset()
+
+        if resuming and self._adapter is not None:
+            # 续跑不经过 run_loop 的 start()，所以适配器要在这里"续"起来：起 serve、
+            # 重写本次运行的 agent 文件（权限收敛点），复用既有会话。不做这一步，
+            # 第一次 generate 就会抛"适配器未启动"，被当成契约失败白烧轮次。
+            try:
+                self._adapter.resume(run_dir, config.model)
+            except Exception as error:  # noqa: BLE001 - 起不来就是依赖问题，如实报
+                self._dispose_adapter()
+                self._status(f"续跑前无法启动 opencode：{error}")
+                return
 
         store = RunStore(run_dir)
         worker = EngineWorker(opencode=opencode, toolchain=toolchain, config=config)
@@ -472,6 +497,10 @@ class RunController(QObject):
         elif event.type == "script":
             script = payload.get("script") or ""
             center.show_round(event.round, script)
+            # 右栏整块清空：这一轮的脚本刚落地，还没校验、没执行。不清的话，中间某轮
+            # 契约失败（只发 note、不发 shellcheck/execute）时，屏幕上会把**上一轮**的
+            # 退出码与 stdout 摆在本轮脚本旁边，时间线也会把上一轮的退出码记到本轮名下。
+            right.reset()
             self._status(f"第 {event.round} 轮 · 脚本已生成（{len(script.splitlines())} 行）")
         elif event.type == "shellcheck":
             findings = tuple(payload.get("findings") or ())
@@ -547,6 +576,11 @@ class RunController(QObject):
         # 两次**不同运行**之间的假差异，时间线里也会留着别人的轮次。
         center.reset()
         right.reset()
+        # 标注用的阻断级别要取**那次运行**记在 meta 里的值：用当前设置里的级别去标注
+        # 历史报告，会把当时被阻断的发现标成"仅展示"，与当时的结论相反。
+        recorded = (meta.get("config") or {}).get("blocking_level")
+        if recorded in SEVERITY_RANK:
+            right.blocking_level = recorded
         if script:
             center.show_round(int(meta.get("rounds") or 1), script)
         findings = snapshot.get("findings")
@@ -555,11 +589,31 @@ class RunController(QObject):
             # 不能喂空元组，那会被右栏渲染成"报告：0 处（本轮没有发现）"——把"没有数据"
             # 说成"检查过了没问题"，是这份界面里最不该出现的假结论。
             right.render_findings(findings)
+        execute = snapshot.get("execute")
+        if isinstance(execute, dict):
+            # 执行结论（退出码/超时/取消/耗时）必须一起回放：少了它，"这次到底跑没跑成"
+            # 就无从判断，而 attempts/<n>/execute.json 里明明记着。
+            right.render_execute(
+                ExecuteResult(
+                    exit_code=execute.get("exit_code"),
+                    signal=None,
+                    timed_out=bool(execute.get("timed_out")),
+                    cancelled=bool(execute.get("cancelled")),
+                    duration_ms=int(execute.get("duration_ms") or 0),
+                    stdout=snapshot.get("stdout") or "",
+                    stderr=snapshot.get("stderr") or "",
+                )
+            )
         notes, assumptions = _split_notes(snapshot.get("notes") or "")
         right.render_notes(notes, assumptions)
-        right.output_view.setPlainText(
-            (snapshot.get("stdout") or "") + (snapshot.get("stderr") or "")
-        )
+        errors = snapshot.get("errors") or ()
+        if errors:
+            # 失败运行没有脚本输出可看，把错误证据摊在输出区（带一行说明它是什么）：
+            # 回放"为什么失败"是历史页存在的意义。
+            right.output_view.setPlainText(
+                "本次运行没有执行输出；以下是落盘的错误证据：\n\n"
+                + "\n\n".join(f"── {name} ──\n{text}" for name, text in errors)
+            )
         self._status(f"回放：{meta.get('outcome') or '未知'}（{meta.get('rounds', '?')} 轮）")
 
     # ── 小工具 ────────────────────────────────────────────────────
@@ -609,11 +663,28 @@ class RunController(QObject):
         self.window.set_running(self._worker is not None and self._worker.isRunning())
 
     def shutdown(self) -> None:
-        """窗口关闭时的收尾：取消正在跑的运行并等它退出，再释放 adapter。"""
+        """窗口关闭时的收尾。顺序：停探测 → 停引擎 → 放依赖。
+
+        两个 QThread 都必须收干净：运行中的 QThread 被析构会让进程直接 abort
+        （不是异常，是核心转储），而探测线程（DetectWorker）是启动自检与"重新检测"
+        按钮都会起的、带上限 20s/件×3 的线程，窗口关掉时它很可能还在跑。
+        等不到就**故意不回收**（挂进 _ORPHANS 并由它持有引用）：宁可退出时留下一个
+        线程，也不能让进程崩在关闭路径上 —— 顺便也不释放 adapter，它还在被那个线程用。
+        """
+        detect = self._detect_worker
+        if detect is not None and detect.isRunning():
+            detect.wait(3000)
+            if detect.isRunning():
+                _ORPHANS.append(detect)
+
         worker = self._worker
         if worker is not None and worker.isRunning():
             worker.cancel()
-            worker.wait(5000)
+            worker.wait(8000)
+            if worker.isRunning():
+                _ORPHANS.append(worker)
+                self._status("引擎线程未在超时内结束；已保留它以免退出时崩溃")
+                return
         self._dispose_adapter()
 
 

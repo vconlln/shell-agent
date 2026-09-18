@@ -419,3 +419,143 @@ def test_finding_activation_jumps_the_script_view(qtbot, tmp_path):
     window.right_pane.finding_activated.emit(3)
 
     assert window.center_pane.script_view.textCursor().blockNumber() == 2  # 第 3 行（0 基）
+
+
+class _ContractFailingOpencode(_FakeOpencode):
+    """交回来的脚本缺锚点 → 第 1 轮就契约失败，这一轮不会有 shellcheck/execute 事件。"""
+
+    def generate(self, session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+        return GeneratedScript(script="#!/usr/bin/env bash\necho 缺锚点\n", notes="n", assumptions=())
+
+
+def test_second_run_does_not_leave_the_previous_run_on_screen(qtbot, tmp_path):
+    """连跑两次时，第二次的屏幕上不能留下第一次的脚本/退出码/输出。
+
+    第二次如果在生成阶段就失败（本机无凭据、opencode 起不来都是常态），本次不会有任何
+    script/shellcheck/execute 事件；不主动清屏的话，屏幕上就是「结论：需要人工」+
+    「退出码 0」+ 上一次的 stdout 并列 —— 最容易被读成"这次也成功了"。
+    """
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000) as first:
+        controller.start()
+    assert first.args[0].outcome == "succeeded"
+    assert window.right_pane.output_view.toPlainText().strip() == "ok"
+
+    # 第二次：opencode 起不来 → 本轮**一个 script 事件都不会有**，
+    # 所以清屏只能发生在开跑前（不能指望"新脚本到达时清"，那时压根没有新脚本）。
+    controller._opencode = _StartFailsOpencode()
+    with qtbot.waitSignal(controller.finished, timeout=15_000) as second:
+        controller.start()
+
+    assert second.args[0].outcome == "aborted_dependency"
+    assert window.center_pane.current_text().strip() == ""               # 没有上一次的脚本
+    assert window.right_pane.output_view.toPlainText().strip() == ""      # 没有上一次的输出
+    assert "尚未" in window.right_pane.execute_summary.text()             # 没有上一次的退出码
+    assert "0 处" not in window.right_pane.findings_summary.text()        # 没说"本轮没有发现"
+
+
+def test_new_round_clears_the_previous_rounds_report(qtbot, tmp_path):
+    """中间轮契约失败时，右栏不许把上一轮的退出码/stdout 摆在**本轮**脚本旁边。"""
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    window.center_pane.show_round(1, "#!/usr/bin/env bash\necho 第一轮\n")
+    window.right_pane.render_execute(
+        ExecuteResult(0, None, False, False, 51, "第一轮的输出\n", "")
+    )
+
+    # 第二轮脚本到达（引擎先发 script 再校验契约）
+    from tu_shell_agent.types import RunEvent
+
+    controller._on_event(RunEvent("script", 2, {"script": "#!/usr/bin/env bash\necho 第二轮\n"}))
+
+    assert "第二轮的输出" not in window.right_pane.output_view.toPlainText()
+    assert "第一轮的输出" not in window.right_pane.output_view.toPlainText()
+    assert "尚未" in window.right_pane.execute_summary.text()
+
+
+def test_replay_restores_execute_summary_and_error_evidence(qtbot, tmp_path):
+    """回放必须还原执行结论；失败运行必须能看到落盘的错误证据。"""
+    window = _window(qtbot, tmp_path)
+    RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    root = tmp_path / "runs"
+    ok = root / "20260918-100000-aaaa"
+    (ok / "attempts" / "1").mkdir(parents=True)
+    (ok / "script.sh").write_text("echo replay\n", encoding="utf-8")
+    (ok / "meta.json").write_text(
+        json.dumps({"outcome": "succeeded", "rounds": 1, "config": {"blocking_level": "error"}}),
+        encoding="utf-8",
+    )
+    (ok / "attempts" / "1" / "execute.json").write_text(
+        json.dumps({"exit_code": 3, "timed_out": False, "cancelled": False, "duration_ms": 733}),
+        encoding="utf-8",
+    )
+    (ok / "attempts" / "1" / "stdout.txt").write_text("replay out\n", encoding="utf-8")
+
+    failed = root / "20260918-110000-bbbb"
+    (failed / "attempts" / "1").mkdir(parents=True)
+    (failed / "meta.json").write_text('{"outcome": "needs_human", "rounds": 1}', encoding="utf-8")
+    (failed / "attempts" / "1" / "generation-error.txt").write_text(
+        "opencode 返回错误 APIError：没有凭据\n", encoding="utf-8"
+    )
+
+    window.history_page.run_root = str(root)
+    window.history_page.reload()
+    rows = {
+        window.history_page.list_widget.item(i).text(): i
+        for i in range(window.history_page.list_widget.count())
+    }
+
+    window.history_page.list_widget.setCurrentRow(rows["20260918-100000-aaaa · succeeded · 1 轮"])
+    assert "退出码 3" in window.right_pane.execute_summary.text()
+    assert "733" in window.right_pane.execute_summary.text()
+    assert window.right_pane.blocking_level == "error"   # 用**那次运行**记的级别标注
+
+    window.history_page.list_widget.setCurrentRow(rows["20260918-110000-bbbb · needs_human · 1 轮"])
+    assert "没有凭据" in window.right_pane.output_view.toPlainText()   # 失败原因看得见
+    assert "尚未" in window.right_pane.execute_summary.text()          # 没跑就是没跑
+
+
+def test_shutdown_waits_for_the_detect_worker(qtbot, tmp_path):
+    """关窗时必须把探测线程也收掉。
+
+    运行中的 QThread 被析构会让进程 abort（核心转储）；探测线程是启动自检与
+    "重新检测"按钮都会起的（上限 20s/件 × 3 件），窗口关掉时它很可能还在跑。
+    等不到就故意不回收（挂进 _ORPHANS 持有引用），但不能像没看见一样直接走人。
+    """
+    import time as _time
+
+    from tu_shell_agent.ui import run_controller as rc
+    from tu_shell_agent.ui.engine_worker import DetectWorker
+
+    class SlowDetect(DetectWorker):
+        def run(self) -> None:  # noqa: D102 - 探针：慢探测
+            _time.sleep(0.6)
+
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    monkeypatch_worker = SlowDetect({})
+    controller._detect_worker = monkeypatch_worker
+    monkeypatch_worker.start()
+    assert monkeypatch_worker.isRunning()
+
+    controller.shutdown()
+
+    assert not monkeypatch_worker.isRunning(), "关窗后探测线程仍在运行"
+    assert monkeypatch_worker not in rc._ORPHANS

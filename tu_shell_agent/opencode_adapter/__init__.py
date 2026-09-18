@@ -27,6 +27,39 @@ class OpencodeAdapter:
 
     # ── 生命周期 ────────────────────────────────────────────────────────
     def start(self, run_dir: str, agent_name: str = AGENT_NAME, model: str | None = None) -> str:
+        """首轮入口：起 serve、写本次运行的 agent 文件、**新建会话**并返回会话 id。"""
+        self._bring_up(run_dir, model)
+        assert self._client is not None
+        try:
+            response = self._client.post("/session", json={"title": f"tu-shell-agent {run_dir}"})
+            response.raise_for_status()
+            return str(response.json()["id"])
+        except BaseException:
+            # 到这里 serve 已经起来了、SSE 线程也已经在了；异常上抛前必须自己收尸，
+            # 否则 serve 子进程与订阅线程都会泄漏。CLI 的 finally 会调 dispose()，
+            # 恰好掩盖了这一点 —— 作为库使用或 Plan 2 复用时就会漏。
+            self.dispose()
+            self._serve = None
+            self._client = None
+            self._events_thread = None
+            self._auth = ""
+            raise
+
+    def resume(self, run_dir: str, model: str | None = None) -> None:
+        """续跑入口：起 serve、**重写**本次运行的 agent 文件，但不新建会话。
+
+        为什么必须单独有这个方法：`run_loop` 走 `start()`（新建会话），而 `resume_repair`
+        复用既有 sessionId、**不调** start()。适配器没起来就直接 generate 的话，第一句就是
+        `RuntimeError("适配器未启动")`，会被编排层当成一次契约失败吞掉 —— 白烧剩余轮次后
+        收在 needs_human（"继续修复"按钮在无头之外的机器上其实是坏的）。
+
+        agent 文件在这里重写是硬要求：它是"opencode 只写不跑"的权限收敛点，
+        续跑同样不能在没有它的目录里发起生成。
+        """
+        self._bring_up(run_dir, model)
+
+    def _bring_up(self, run_dir: str, model: str | None) -> None:
+        """起 serve + Basic 认证 + SSE 订阅；agent 文件先落盘（失败时自我收尸）。"""
         write_agent_file(run_dir, model)
         self._serve = start_serve(self._opencode_path, run_dir)
         try:
@@ -40,14 +73,7 @@ class OpencodeAdapter:
             self._stop_events.clear()
             self._events_thread = threading.Thread(target=self._consume_events, daemon=True)
             self._events_thread.start()
-
-            response = self._client.post("/session", json={"title": f"tu-shell-agent {run_dir}"})
-            response.raise_for_status()
-            return str(response.json()["id"])
         except BaseException:
-            # 到这里 serve 已经起来了、SSE 线程也已经在了；异常上抛前必须自己收尸，
-            # 否则 serve 子进程与订阅线程都会泄漏。CLI 的 finally 会调 dispose()，
-            # 恰好掩盖了这一点 —— 作为库使用或 Plan 2 复用时就会漏。
             self.dispose()
             self._serve = None
             self._client = None

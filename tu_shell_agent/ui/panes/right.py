@@ -141,6 +141,12 @@ class RightPane(QWidget):
         self._findings = ()
         self._has_report = False
         self._refresh_findings()
+        # 执行结论与 notes 也要清：只清报告的话，新一次运行（或回放另一条运行）开始后，
+        # 屏幕上会留着上一次的退出码、stdout 与模型自述 —— 那是最容易被读成
+        # "这次也成功了"的一种假象。
+        self.execute_summary.setText("执行结果：尚未执行")
+        self.output_view.clear()
+        self.render_notes("", ())
 
     def render_findings(self, findings: Sequence[ShellcheckFinding]) -> None:
         """重画报告：同一 SC 编号聚成一组，组内按行列排序。

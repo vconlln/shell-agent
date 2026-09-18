@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from ..filetext import write_text_lf
 
 # 这条常量**只**被本模块消费（agent 定义的正文），所以它属于这里而不是 orchestrator：
 # 分层是单向的 orchestrator → opencode_adapter，adapter 是叶子，反向 import 会让
@@ -77,5 +78,5 @@ def write_agent_file(run_dir: str, model: str | None = None) -> str:
     content = render_agent_file(run_dir, model)  # 先渲染：空 run_dir 要在落盘/建目录之前就抛错
     path = Path(run_dir, ".opencode", "agents", f"{AGENT_NAME}.md")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    write_text_lf(path, content)
     return str(path)

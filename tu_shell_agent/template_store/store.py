@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .builtins import BUILTIN_TEMPLATES
+from ..filetext import write_text_lf
 from .render import PlaceholderSpec, declared_names
 
 _ID_OK = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -89,9 +90,7 @@ class TemplateStore:
                 for m in metas
             ]
         }
-        self._index_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        write_text_lf(self._index_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
     # ── 对外 ────────────────────────────────────────────────────────────
     def list(self) -> list[TemplateMeta]:
@@ -101,7 +100,7 @@ class TemplateStore:
 
         if not metas:
             for builtin in BUILTIN_TEMPLATES:
-                self._body_path(builtin.id).write_text(builtin.body, encoding="utf-8")
+                write_text_lf(self._body_path(builtin.id), builtin.body)
                 metas.append(
                     TemplateMeta(
                         id=builtin.id,
@@ -149,7 +148,7 @@ class TemplateStore:
         if not _ID_OK.match(item.id):
             raise ValueError(f"非法模板 id：{item.id}")
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._body_path(item.id).write_text(item.body, encoding="utf-8")
+        write_text_lf(self._body_path(item.id), item.body)
         meta = TemplateMeta(
             id=item.id,
             name=item.name,

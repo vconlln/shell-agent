@@ -155,9 +155,26 @@ class HistoryPage(QWidget):
             "script": self._read_text(run_dir / "script.sh"),
             "notes": self._read_text(attempt / "notes.md"),
             "findings": parse_shellcheck(self._read_text(attempt / "shellcheck.json")),
+            "execute": self._read_json(attempt / "execute.json"),
             "stdout": self._read_text(attempt / "stdout.txt"),
             "stderr": self._read_text(attempt / "stderr.txt"),
+            "errors": self._error_evidence(attempt),
         }
+
+    @staticmethod
+    def _error_evidence(attempt: Path) -> tuple[tuple[str, str], ...]:
+        """这一轮留下的错误证据（generation-error.txt / start-error.txt / …）。
+
+        没有它，回放一次失败的运行就只剩"没有脚本、没有报告、没有输出"——而失败原因
+        恰恰是用户最需要看的东西（例如本机无凭据时那句 provider 原话）。放在这里
+        而不是只留在磁盘上：历史页是"拿证据复盘"的入口。
+        """
+        if not attempt.is_dir():
+            return ()
+        found = []
+        for path in sorted(attempt.glob("*-error.txt")):
+            found.append((path.name, HistoryPage._read_text(path)))
+        return tuple(found)
 
     @staticmethod
     def _latest_attempt(run_dir: Path) -> Path:

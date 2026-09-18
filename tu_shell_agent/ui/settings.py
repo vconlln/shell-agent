@@ -11,6 +11,8 @@ import json
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from ..filetext import write_text_lf
+
 # 应用名只有一个来源：app.py 用它设 QApplication.applicationName，设置路径也由它决定。
 # 两处写死成不同的字符串，就会变成"设置保存在 A、读取时找 B"。
 APP_NAME = "tu-shell-agent"
@@ -96,9 +98,7 @@ class AppSettings:
         if target is None:
             raise ValueError("未指定保存路径，且此前没有 load() 过")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        write_text_lf(target, json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n")
 
 
 def default_templates_dir() -> Path:

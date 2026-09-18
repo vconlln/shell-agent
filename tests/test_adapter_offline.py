@@ -478,3 +478,27 @@ def test_start_failure_stops_serve_and_does_not_leak(monkeypatch, stub, notes, t
     assert stopped == [1]  # serve 句柄被停掉
     assert instance._serve is None and instance._client is None  # 状态被复位
     assert instance._events_thread is None
+
+
+def test_resume_brings_up_serve_without_creating_a_session(adapter, stub, tmp_path: Path):
+    """`resume()` 是"继续修复"能用的前提：起 serve、重写 agent 文件，但**不新建会话**。
+
+    背景：`resume_repair` 复用既有 sessionId，不经过 `run_loop` 的 `start()`。适配器如果没
+    起来就直接 `generate`，第一句就是 `RuntimeError("适配器未启动")`，被编排层当成一次契约
+    失败吞掉 —— 白烧剩余轮次后收在 needs_human（"继续修复"按钮实际上是坏的）。
+    """
+    run_dir = tmp_path / "run"
+
+    adapter.resume(str(run_dir))
+
+    # 不新建会话：修复的语义是"接着那个会话继续"
+    assert stub.session_bodies == []
+    # agent 文件必须重写：它是"opencode 只写不跑"的权限收敛点，续跑同样不能少
+    agent_file = run_dir / ".opencode" / "agents" / f"{AGENT_NAME}.md"
+    assert agent_file.is_file()
+    assert "bash: deny" in agent_file.read_text(encoding="utf-8")
+
+    # 起来之后确实能对着既有会话发起生成
+    generated = adapter.generate(SESSION_ID, "接着修", SCHEMA, timeout_ms=5_000)
+    assert generated.script
+    assert stub.message_bodies[0]["parts"][0]["text"] == "接着修"
