@@ -110,3 +110,53 @@ def test_handle_width_does_not_depend_on_the_stylesheet(qtbot, tmp_path):
     qtbot.addWidget(plain)          # 故意不装主题（不调 apply_theme）
     for splitter in plain.findChildren(QSplitter):
         assert splitter.handleWidth() >= 6, splitter.objectName()
+
+
+# ── 缩小窗口时内容不许被压没（用户报过"挤压到看不见"）─────────────────────
+
+
+def test_window_refuses_to_shrink_below_a_usable_size(window):
+    """窗口自身要有最小尺寸：低于它，三栏 + 上下两块本来就放不下。"""
+    minimum = window.minimumSize()
+    assert minimum.width() >= 900, f"最小宽度 {minimum.width()} 太小，三栏会被压扁"
+    assert minimum.height() >= 650, f"最小高度 {minimum.height()} 太小，上下两块会被压扁"
+
+
+def test_panes_and_inner_panels_declare_minimums(window):
+    """每栏与关键内部控件都要有最小高度/宽度。
+
+    没有它们的时候（实测）：窗口高 560px 时方案预览只剩 12px、右栏报告树与输出区各 35px ——
+    等于看不见。QVBoxLayout 会把"没有最小高度"的控件一路压到零。
+    """
+    for widget, minimum in (
+        (window.left_pane.plan_preview, 90),
+        (window.center_pane.script_view, 140),
+        (window.center_pane.timeline, 80),
+        (window.center_pane.chat.transcript, 120),
+        (window.right_pane.findings_tree, 110),
+        (window.right_pane.output_view, 110),
+        (window.history_page.list_widget, 90),
+    ):
+        assert widget.minimumHeight() >= minimum, f"{widget.objectName() or widget} 缺少最小高度"
+
+    for column in (window.left_pane, window.center_pane, window.right_pane):
+        assert column.minimumWidth() >= 240, f"{column.objectName()} 缺少最小宽度"
+
+
+def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
+    """把窗口缩到**允许的最小尺寸**，关键控件仍要有能用的高度。
+
+    这是用户实际遇到的那个场景：一直缩小窗口，栏目越挤越扁，最后什么都看不见。
+    """
+    window.resize(window.minimumSize())
+    qtbot.wait(50)
+
+    assert window.width() <= window.minimumSize().width() + 5     # 真的缩到了下限
+    for widget, minimum in (
+        (window.left_pane.plan_preview, 88),      # 留 2px 容差给样式边距
+        (window.center_pane.script_view, 138),
+        (window.right_pane.findings_tree, 108),
+        (window.right_pane.output_view, 108),
+        (window.history_page.list_widget, 88),
+    ):
+        assert widget.height() >= minimum, f"{widget.objectName() or widget} 在下限尺寸下被压没了"

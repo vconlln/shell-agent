@@ -37,7 +37,10 @@ class CenterPane(QWidget):
         self.compare_view.setObjectName("compareView")
         # 与脚本视图保持一致：脚本不折行，长行靠横向滚动条看
         self.compare_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.compare_view.setOpenExternalLinks(False)  # 纯展示：不允许点开外部链接
+        self.compare_view.setOpenExternalLinks(False)
+        # 各块都要有能用的最小高度，否则窗口一缩小就被压成一条缝（实测 12~35px）
+        self.script_view.setMinimumHeight(140)
+        self.compare_view.setMinimumHeight(140)
 
         self.tabs.addTab(self.script_view, "本轮")
         self.tabs.addTab(self.compare_view, "对比上一轮")
@@ -45,6 +48,7 @@ class CenterPane(QWidget):
         self.tabs.addTab(self._chat, "模型对话")
         self.timeline = QListWidget()
         self.timeline.setObjectName("timeline")
+        self.timeline.setMinimumHeight(80)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setObjectName("centerSplitter")

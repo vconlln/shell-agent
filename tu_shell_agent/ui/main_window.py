@@ -164,11 +164,24 @@ class MainWindow(QMainWindow):
         # 的比例（拖了也没反应，看起来像"不能调"）。这里给每块一个能接受的小下限，
         # 让用户真的能把某一块压小；压小了内部靠滚动条看。
         for widget, minimum in (
-            (self.left_pane, 140), (self.templates_pane, 140),
-            (self.center_pane, 200), (self.right_pane, 200),
-            (self.history_page, 120), (self.side_pages, 160),
+            (self.left_pane, 220), (self.templates_pane, 220),
+            (self.center_pane, 240), (self.right_pane, 260),
+            (self.history_page, 150), (self.side_pages, 190),
         ):
             widget.setMinimumHeight(minimum)
+        # 各栏还要有最小**宽度**：只设高度的话，横向把窗口压窄时三栏会一路缩到贴边
+        # （内容被裁掉/看不见）。这三个数是"每栏还能看清内容"的下限。
+        self.left_pane.setMinimumWidth(240)
+        self.templates_pane.setMinimumWidth(240)
+        self.center_pane.setMinimumWidth(300)
+        self.right_pane.setMinimumWidth(260)
+        self.history_page.setMinimumWidth(220)
+        self.side_pages.setMinimumWidth(260)
+
+        # 窗口本身的最小尺寸 = 三栏最小宽 + 两条 8px 把手 + 边距；高度 = 左列两块 + 下方 + 按钮条。
+        # 低于这个尺寸这个界面本来就不可用，与其让 Qt 把内容裁掉，不如让窗口管理器直接不许缩到那么小
+        # （平铺窗口管理器也会读 min-size 提示）。
+        self.setMinimumSize(960, 700)
 
         self._layout_restored = False
         self.controller = None

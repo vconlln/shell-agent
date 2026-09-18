@@ -99,6 +99,8 @@ class HistoryPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(header)
+        self.list_widget.setMinimumHeight(90)
+        self.detail.setMinimumHeight(60)
         layout.addWidget(self.list_widget, 2)
         layout.addWidget(self.detail, 1)
 

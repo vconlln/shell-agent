@@ -71,6 +71,9 @@ class LeftPane(QWidget):
         self.plan_preview = QPlainTextEdit()
         self.plan_preview.setObjectName("planPreview")
         self.plan_preview.setReadOnly(True)
+        # 最小高度：没有它的时候，窗口一缩小 QVBoxLayout 会把这个预览压到 12px（实测），
+        # 方案正文等于看不见 —— 用户报的"挤压到看不见"就是这个。
+        self.plan_preview.setMinimumHeight(90)
         self.plan_preview.setPlainText(_PREVIEW_IDLE)
 
         self.run_root_edit = QLineEdit()

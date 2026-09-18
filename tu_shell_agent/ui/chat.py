@@ -55,6 +55,7 @@ class ChatPanel(QWidget):
         self.transcript = QPlainTextEdit()
         self.transcript.setObjectName("chatTranscript")
         self.transcript.setReadOnly(True)
+        self.transcript.setMinimumHeight(120)
         self.transcript.setPlaceholderText(
             "这里显示你与模型的对话；运行期间的模型输出也会流式追加在这里。"
         )
