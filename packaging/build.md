@@ -38,7 +38,10 @@ Linux（本机已验证）：
 .venv/bin/python -m PyInstaller --clean --noconfirm --distpath dist --workpath build packaging/tu-shell-agent.spec
 ```
 
-Windows（⚠ 未在 Linux 验证）：
+Windows（⚠ 未在 Linux 验证）：**双击 `packaging/build-windows.bat` 等价于下面全部步骤**
+（建 venv → 装依赖 → 打包 → `start /wait` 自检 → 打印 exe 路径）。
+那个 .bat 同样没在 Windows 上执行过（开发机是 Linux），它只是把本节命令按顺序抄了一遍；
+出问题请回到这里逐条跑：
 
 ```bat
 .venv\Scripts\python -m PyInstaller --clean --noconfirm --distpath dist --workpath build packaging\tu-shell-agent.spec
