@@ -79,3 +79,18 @@ def test_reload_is_safe_without_run_root(qtbot):
     page.reload()
     assert page.list_widget.count() == 0
     assert page.current_snapshot() == {}
+
+
+def test_history_refresh_button_rescans_the_run_root(qtbot, tmp_path):
+    """刷新按钮是回放页唯一的"重新读盘"入口：界面开着的时候别的进程也会往运行根写。"""
+    root = tmp_path / "runs"
+    root.mkdir(parents=True)
+    page = HistoryPage(run_root=str(root))
+    qtbot.addWidget(page)
+    page.reload()
+    assert page.list_widget.count() == 0
+
+    _make_run(root, "20260918-100000-aaaa", {"outcome": "succeeded", "rounds": 1})
+    page.refresh_button.click()
+
+    assert page.list_widget.count() == 1

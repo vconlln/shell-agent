@@ -15,10 +15,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -77,11 +79,18 @@ class HistoryPage(QWidget):
         self.list_widget = QListWidget()
         # 界面骨架测试（tests/test_ui_skeleton.py）按这个 objectName 找控件：改名会让它变红。
         self.list_widget.setObjectName("historyList")
+        self.refresh_button = QPushButton("刷新")
+        self.refresh_button.setObjectName("historyRefreshButton")
+        self.refresh_button.clicked.connect(lambda _checked=False: self.reload())
+        header = QHBoxLayout()
+        header.addWidget(QLabel("历史运行"))
+        header.addStretch(1)
+        header.addWidget(self.refresh_button)
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("历史运行"))
+        layout.addLayout(header)
         layout.addWidget(self.list_widget, 2)
         layout.addWidget(self.detail, 1)
 
