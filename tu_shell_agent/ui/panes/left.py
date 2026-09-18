@@ -1,16 +1,181 @@
-"""左栏：方案与本次运行参数（骨架占位，内容由后续任务填充）。"""
+"""左栏：方案选择与预览 + 本次运行参数。
+
+只收集输入并做廉价校验，**不发起运行**（运行由任务 9 的 RunController 负责），
+因此这里不碰网络、子进程，也不做建目录之类的磁盘写操作：写盘的失败信息
+在引擎侧才有上下文（例如「运行根是文件」「无权限」），在界面里抢先试一遍
+只会让同一件事有两处说法，且会在用户敲路径的过程中反复触发。
+"""
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from pathlib import Path
+
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+)
+
+from ...types import RunConfig, Severity
+
+# 与 types.SEVERITY_RANK 同源的四个级别；顺序即下拉框顺序（由重到轻）
+BLOCKING_LEVELS: tuple[Severity, ...] = ("error", "warning", "info", "style")
+
+# 未读到方案正文时预览区的开场白：区别于「方案文件空」
+_PREVIEW_IDLE = "（尚未选择方案文档）"
 
 
 class LeftPane(QWidget):
-    """方案 + 本次运行参数的输入区。本任务只装配占位标题。"""
+    """方案 + 本次运行参数的输入区。"""
+
+    plan_changed = Signal(str)          # 选择方案后发出（绝对路径）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("leftPane")
+        self.setObjectName("leftPane")   # main_window 与骨架测试依赖的名字，不要改
+        self._plan_path: str = ""        # 空串 = 未选方案
+        self._plan_text: str = ""        # 方案正文；读失败时为空（错误说明只在预览里显示）
+        self._plan_error: str = ""       # 非空 = 上次读取失败，validate() 要如实报出来
+
+        self.plan_edit = QLineEdit()
+        self.plan_edit.setObjectName("planEdit")
+        self.plan_edit.setReadOnly(True)          # 路径只能由文件对话框或 set_plan 写入
+        self.plan_edit.setPlaceholderText("选择一个方案文档（.md / .txt）")
+        browse_button = QPushButton("选择方案…")
+        browse_button.clicked.connect(self._browse_plan)
+
+        plan_row = QHBoxLayout()
+        plan_row.addWidget(self.plan_edit, 1)
+        plan_row.addWidget(browse_button)
+
+        self.plan_preview = QPlainTextEdit()
+        self.plan_preview.setObjectName("planPreview")
+        self.plan_preview.setReadOnly(True)
+        self.plan_preview.setPlainText(_PREVIEW_IDLE)
+
+        self.run_root_edit = QLineEdit()
+        self.run_root_edit.setObjectName("runRootEdit")
+
+        self.blocking_combo = QComboBox()
+        self.blocking_combo.setObjectName("blockingCombo")
+        self.blocking_combo.addItems(list(BLOCKING_LEVELS))
+        # 默认 info 而非 warning：实测 SC2086（变量未加引号）是 info 级，
+        # 以 warning 为默认会让这类真实隐患「只展示、不修」（规格 §11）。
+        self.blocking_combo.setCurrentText("info")
+
+        self.max_rounds_spin = QSpinBox()
+        self.max_rounds_spin.setObjectName("maxRoundsSpin")
+        self.max_rounds_spin.setRange(1, 10)      # 允许比规格的 3 轮更宽，但下限 1：0 轮等于不生成脚本
+        self.max_rounds_spin.setValue(3)
+
+        self.generate_timeout_spin = QSpinBox()
+        self.generate_timeout_spin.setObjectName("generateTimeoutSpin")
+        self.generate_timeout_spin.setRange(1_000, 3_600_000)
+        self.generate_timeout_spin.setSingleStep(10_000)
+        self.generate_timeout_spin.setSuffix(" ms")
+        self.generate_timeout_spin.setValue(300_000)
+
+        self.execute_timeout_spin = QSpinBox()
+        self.execute_timeout_spin.setObjectName("executeTimeoutSpin")
+        self.execute_timeout_spin.setRange(1_000, 3_600_000)
+        self.execute_timeout_spin.setSingleStep(10_000)
+        self.execute_timeout_spin.setSuffix(" ms")
+        self.execute_timeout_spin.setValue(120_000)
+
+        run_form = QFormLayout()
+        run_form.addRow("运行根目录", self.run_root_edit)
+        run_form.addRow("阻断级别", self.blocking_combo)
+        run_form.addRow("轮次上限", self.max_rounds_spin)
+        run_form.addRow("生成超时", self.generate_timeout_spin)
+        run_form.addRow("执行超时", self.execute_timeout_spin)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("方案与运行参数"))
-        layout.addStretch(1)
+        layout.addWidget(QLabel("方案文档"))
+        layout.addLayout(plan_row)
+        layout.addWidget(self.plan_preview, 1)
+        layout.addWidget(QLabel("运行参数（仅本次）"))
+        layout.addLayout(run_form)
+        # 组件路径（opencode / Git Bash / shellcheck）只在设置页改，这里只读不自检
+
+    # ---- 方案 -----------------------------------------------------------------
+
+    def set_plan(self, path: str) -> None:
+        """选定方案：读文件填预览；读不了就在预览里如实写错误，路径照样记下。"""
+        self._plan_path = str(path)
+        self.plan_edit.setText(self._plan_path)
+        if not self._plan_path:
+            self._plan_error = ""
+            self._plan_text = ""
+            self.plan_preview.setPlainText(_PREVIEW_IDLE)
+            self.plan_changed.emit("")
+            return
+        self._reload_preview()
+        self.plan_changed.emit(self._plan_path)
+
+    def _browse_plan(self) -> None:
+        """文件对话框选方案。用静态方法而不是实例方法，避免为了一个弹窗持有 QFileDialog。"""
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "选择方案文档", self._plan_path or str(Path.home()), "方案文档 (*.md *.txt);;全部文件 (*)",
+        )
+        if chosen:                       # 取消时返回空串，不能把已选方案清掉
+            self.set_plan(chosen)
+
+    def _reload_preview(self) -> None:
+        """把方案正文读进预览，或把失败原因写进预览。"""
+        try:
+            text = Path(self._plan_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            # 方案是给人看的，读不了就是读不了，先说清原因再谈运行
+            self._plan_error = f"读不到方案文档：{error}"
+            self._plan_text = ""
+            self.plan_preview.setPlainText(self._plan_error)
+            return
+        self._plan_error = ""
+        self._plan_text = text
+        self.plan_preview.setPlainText(text)
+
+    def plan_path(self) -> str:
+        """已选方案的路径；空串表示未选。"""
+        return self._plan_path
+
+    def plan_text(self) -> str:
+        """方案正文；未选或读失败时为空串（预览区里显示的提示语不算正文）。"""
+        return self._plan_text
+
+    # ---- 运行参数 -------------------------------------------------------------
+
+    def to_run_config(self) -> RunConfig:
+        """本次运行参数。组件路径由设置页与 selfcheck 决定，这里一律留空。
+
+        所以不传 path 覆盖：传了就等于给了引擎一个「界面上没显示过的路径」，
+        与规格 §12「组件路径只出现在设置页，避免两处可改」冲突。
+        """
+        level = self.blocking_combo.currentText()
+        return RunConfig(
+            run_root=self.run_root_edit.text().strip(),
+            max_rounds=self.max_rounds_spin.value(),
+            generate_timeout_ms=self.generate_timeout_spin.value(),
+            execute_timeout_ms=self.execute_timeout_spin.value(),
+            blocking_level=level if level in BLOCKING_LEVELS else "info",
+        )
+
+    def validate(self) -> list[str]:
+        """返回全部问题；文案带上「方案」「运行根」，用户才能一眼定位到是哪一格。
+
+        只查存在性、可读性与「是不是文件」这类廉价事实：真正的可写性要等引擎建运行目录时
+        才有结论，界面里先试一遍会在用户敲路径的过程中反复误报。
+        """
+        problems: list[str] = []
+        path = self._plan_path
+        if not path:
+            problems.append("未选择方案文档")
+        elif self._plan_error or not Path(path).is_file():
+            problems.append(f"方案文档读不到：{path}")
+
+        run_root = self.run_root_edit.text().strip()
+        if not run_root:
+            problems.append("运行根目录未填写")
+        elif Path(run_root).is_file():
+            # 目录不存在是正常的（引擎会新建），但指向一个文件时一定跑不起来
+            problems.append(f"运行根目录是一个文件，不是目录：{run_root}")
+        return problems
