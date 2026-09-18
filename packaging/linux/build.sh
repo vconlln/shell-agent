@@ -26,10 +26,25 @@ else
     PY="$VENV/bin/python"
 fi
 
-echo "[2/4] 安装依赖（PySide6 + pyinstaller + 测试依赖）…"
-"$PY" -m pip install --upgrade pip >/dev/null
-"$PY" -m pip install -e ".[ui,dev]"
-"$PY" -m pip install pyinstaller
+echo "[2/4] 准备依赖…"
+# 打包**只需要** PySide6 与 pyinstaller（spec 用 pathex 指向仓库根，不要求项目被安装）。
+# 所以这三步的失败后果不一样，处理方式也就不一样：
+#   1) 升级 pip：失败只警告（老 pip 也能干活，多半只是网络不通）；
+#   2) PySide6 + pyinstaller：失败必须停 —— 没有它们打不出产物；
+#   3) 可编辑安装项目（带测试依赖）：**失败只警告**。它只影响"能不能跑 pytest"与
+#      控制台入口，不影响打包。实测在网络抖动时它会因为拉不到 setuptools 而失败，
+#      那时把整次打包判死是没道理的（产物其实完全能出）。
+"$PY" -m pip install --upgrade pip >/dev/null || echo "  （升级 pip 失败，继续）"
+
+echo "  - PySide6 + pyinstaller（打包必需）"
+"$PY" -m pip install "PySide6>=6.11" pyinstaller || exit 1
+
+echo "  - 项目本身与测试依赖（可选，失败不影响出产物）"
+if ! "$PY" -m pip install -e ".[ui,dev]"; then
+    echo "  ⚠ 可编辑安装失败（多半是网络/代理拉不到构建依赖）。"
+    echo "    打包继续；但 pytest 与 tu-shell-agent 控制台入口可能不可用。"
+    echo "    网络恢复后单独跑一次：$PY -m pip install -e \".[ui,dev]\""
+fi
 
 echo "[3/4] 打包（one-folder）…"
 # --distpath/--workpath 是相对当前目录解析的，所以上面必须 cd 到仓库根。

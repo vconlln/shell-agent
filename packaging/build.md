@@ -44,7 +44,13 @@ py -3 -m venv .venv
 **Windows 那个 .bat 我没有 Windows 机器可以验证**（PyInstaller 也不能交叉编译），
 它只是把下面第 1-3 节的命令按顺序抄了一遍。若某一步失败，请照本节逐条手动跑。
 
-> 说明：脚本第 2 步会执行 `pip install -e ".[ui,dev]"`。这一步此前在本仓库**必然失败**
+> 说明（脚本第 2 步的失败后果分三档，别一刀切）：升级 pip 失败只警告；**PySide6 与
+> pyinstaller 失败会停**（没有它们打不出产物）；`pip install -e ".[ui,dev]"` 失败**只警告**
+> —— 它只影响"能不能跑 pytest"与控制台入口，而 spec 用 `pathex` 指向仓库根，打包本身
+> 不要求项目被安装。实测网络抖动时这一步会因为拉不到构建依赖而失败，那时把整次打包判死
+> 是没有道理的（产物其实完全能出）。
+
+> 另：这一步此前在本仓库**必然失败**
 > （setuptools 的平铺布局自动发现会因为"发现多个顶层包"拒绝构建：根目录下同时有
 > `tu_shell_agent/`、`packaging/`、`test_fixtures/`），已在 `pyproject.toml` 里加
 > `[tool.setuptools.packages.find] include = ["tu_shell_agent*"]` 修掉。

@@ -37,13 +37,23 @@ echo [1/4] 已存在 .venv，跳过创建
 
 rem ---- 步骤 2/4：依赖 --------------------------------------------------------
 :deps
-echo [2/4] 安装依赖：PySide6 + pyinstaller + 测试依赖 ...
-".venv\Scripts\python.exe" -m pip install --upgrade pip || goto :fail
-rem 项目本身也要装：pyproject 里声明了控制台入口，且 -e 安装会让 tu_shell_agent 可导入。
-rem 这一步曾经因为 setuptools 的平铺布局自动发现而失败，pyproject 里已加
-rem [tool.setuptools.packages.find] 限定成 tu_shell_agent*。
-".venv\Scripts\python.exe" -m pip install -e ".[ui,dev]" || goto :fail
-".venv\Scripts\python.exe" -m pip install pyinstaller || goto :fail
+echo [2/4] 准备依赖 ...
+rem 三步的失败后果不一样：升级 pip 失败只警告；PySide6 与 pyinstaller 缺失就打不出产物；
+rem 而"可编辑安装项目"只影响跑测试与控制台入口，失败不该把整次打包判死
+rem （网络抖动时它会因为拉不到 setuptools 而失败，但产物其实能出）。
+".venv\Scripts\python.exe" -m pip install --upgrade pip
+echo   - PySide6 与 pyinstaller，打包必需
+".venv\Scripts\python.exe" -m pip install "PySide6>=6.11" pyinstaller || goto :fail
+echo   - 项目本身与测试依赖，可选，失败不影响出产物
+rem pyproject 里用 [tool.setuptools.packages.find] 把自动发现限定成 tu_shell_agent*，
+rem 否则平铺布局会因为"发现多个顶层包"直接拒绝构建。
+".venv\Scripts\python.exe" -m pip install -e ".[ui,dev]"
+rem 用 goto 而不是 `if errorlevel 1 echo <中文>`：让中文只出现在 echo 行上，
+rem 脚本契约测试才能用一条简单规则守住"命令全 ASCII"（中文在 if 里同样是文本，
+rem 但规则要区分"命令"和"被 echo 的文本"就得解析批处理语法，太脆）。
+if not errorlevel 1 goto :deps_ok
+echo   ！可编辑安装失败，多半是网络或代理拉不到构建依赖，打包继续
+:deps_ok
 
 rem ---- 步骤 3/4：打包 --------------------------------------------------------
 echo [3/4] 打包：one-folder ...
