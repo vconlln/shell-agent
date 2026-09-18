@@ -528,7 +528,10 @@ class RunController(QObject):
 
     def _decide_confirm(self, payload: dict) -> bool:
         if self.auto_confirm:
-            return bool(self.confirm_answer)
+            # auto_confirm 的语义是"不问，直接批准"。注意 `confirm_answer=None` 表示
+            # "没有预置答案"而不是"拒绝"：写成 bool(None) 会让"打开了自动确认但没给答案"
+            # 变成每次都静默拒执行（实测：跑完只看到 cancelled，脚本一次都没跑）。
+            return self.confirm_answer is not False
         if self.confirm_answer is not None:
             # 预置了答案（测试替身）：绝不能弹模态窗 —— 无头环境里 exec() 会一直等下去。
             return bool(self.confirm_answer)

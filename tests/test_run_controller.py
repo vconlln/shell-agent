@@ -559,3 +559,27 @@ def test_shutdown_waits_for_the_detect_worker(qtbot, tmp_path):
 
     assert not monkeypatch_worker.isRunning(), "关窗后探测线程仍在运行"
     assert monkeypatch_worker not in rc._ORPHANS
+
+
+def test_auto_confirm_without_a_preset_answer_approves(qtbot, tmp_path):
+    """`auto_confirm=True` + `confirm_answer=None` 必须是"批准"，不是"拒绝"。
+
+    `confirm_answer=None` 的语义是"没有预置答案"（生产装配就是
+    auto_confirm=False + answer=None → 弹真实对话框）。若把 None 当成 False，
+    "打开了自动确认但没给答案"会变成每次执行都被静默拒掉 —— 现场表现是
+    运行结论永远是 cancelled、脚本一次都没跑，而报告里一切正常。
+    """
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"), auto_confirm=True, confirm_answer=None,
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("打印 ok", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
+        controller.start()
+
+    assert blocker.args[0].outcome == "succeeded"
+    assert window.right_pane.output_view.toPlainText().strip() == "ok"
