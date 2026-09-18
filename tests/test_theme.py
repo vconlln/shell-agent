@@ -54,7 +54,9 @@ def test_theme_tokens_are_the_documented_palette():
     # 圆角："尽量圆角"是用户明确要求，锁住它别再被改回 6px
     assert TOKENS["radius"] == "10px"
     assert TOKENS["radius_lg"] == "14px"
-    assert TOKENS["radius_pill"] == "999px"
+    # 页签半径必须 < 页签半高（Qt 否则退回直角），所以它不是 999px 那种"胶囊写法"
+    assert TOKENS["radius_pill"] == "11px"
+    assert int(TOKENS["radius_pill"].rstrip("px")) < 24 // 2 + 1
     # 分割条的**可抓宽度**（里程碑：曾经是 1px，用户抓不住）
     assert int(TOKENS["handle"].rstrip("px")) >= 6
 
@@ -187,3 +189,39 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
         return sum(abs(x - y) for x, y in zip(pa.getRgb()[:3], pb.getRgb()[:3]))
 
     assert distance(corner, "#101114") < distance(corner, "#17181c")
+
+
+def test_tab_corners_are_actually_rounded(themed_app, qtbot):
+    """页签的圆角必须真的画出来 —— 这条是用户报出来的（"这几个按钮不是圆角的"）。
+
+    踩的坑：Qt 画页签时，**圆角半径 >= 页签高度的一半就整个退回直角**。
+    原来写的 `border-radius: 999px`（CSS 里常见的"胶囊"写法）在这里不是"更大的圆角"，
+    而是"完全没有圆角"；而 QSS 字符串层面看不出任何问题 —— 只有取色能发现。
+    """
+    from PySide6.QtWidgets import QTabWidget
+
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    apply_theme(themed_app)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    qtbot.waitExposed(window)
+
+    for tabs in window.findChildren(QTabWidget):
+        bar = tabs.tabBar()
+        if bar.count() == 0:
+            continue
+        index = bar.currentIndex()
+        rect = bar.tabRect(index)                     # 取选中的那个：它有填充色，才能比较
+        image = bar.grab().toImage()
+
+        def color(dx: int, dy: int) -> str:
+            return QColor(image.pixel(rect.x() + dx, rect.y() + dy)).name()
+
+        corner = color(1, 1)
+        fill = color(rect.width() // 2, rect.height() - 4)
+        assert corner != fill, (
+            f"{tabs.objectName() or tabs} 的选中页签是直角（半径 {TOKENS['radius_pill']} 可能 >= 页签半高）"
+        )

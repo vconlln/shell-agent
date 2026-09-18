@@ -75,7 +75,10 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     # 控件尺寸（照 Codex 的行高与圆角）
     "radius": "10px",
     "radius_lg": "14px",
-    "radius_pill": "999px",
+    # 页签用的"胶囊"半径。**不能写 999px**：Qt 画页签时，只要圆角半径 >= 页签高度的一半
+    # 就整个退回画直角（实测 28px 高的页签：14px 生效，16px 变直角）—— 999px 那种写法
+    # 在这里不是"更大的圆角"，而是"没有圆角"。11px 在页签高 24~34px 时都安全。
+    "radius_pill": "11px",
     "row_height": "30px",
     "handle": "6px",   # 分割条的**可抓宽度**（不是画出 6px 粗线：见 QSS 里的 hover 规则）
     "font_size": "13px",
@@ -290,10 +293,10 @@ QTabBar::tab {{
     background: transparent;
     color: {css('fg_tertiary')};
     border: 1px solid transparent;
-    border-radius: {css('radius_pill')};   /* 胶囊式页签：圆角最大的地方，最能出"高级感" */
+    border-radius: {css('radius_pill')};   /* 胶囊式页签（半径必须 < 页签半高，见 TOKENS 注释） */
     padding: 5px 14px;
     margin-right: 6px;
-    min-height: 22px;
+    min-height: 24px;
 }}
 QTabBar::tab:hover {{ color: {css('fg')}; background-color: {css('bg_hover')}; }}
 QTabBar::tab:selected {{
