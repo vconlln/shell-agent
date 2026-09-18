@@ -25,6 +25,8 @@ python3 -m venv .venv
 ```
 
 前置三件套（缺一不可，程序启动时会自检）：`opencode`、Git Bash（Windows）/ bash（Linux）、`shellcheck`。
+仓库**不附带**这些二进制：本机开发时放在 `tools/` 下（已在 `.gitignore` 里），
+也可以通过设置页写绝对路径，或放进 PATH。
 
 ```bash
 # 桌面界面
@@ -46,10 +48,15 @@ Windows 上的 exe：把仓库拷过去，双击 `packaging\windows\build.bat`�
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -o addopts=""      # 211 passed, 1 skipped
+.venv/bin/python -m pytest -o addopts=""
 ```
 
-skip 的那条是需要真实 opencode 与凭据的端到端用例（`TU_LIVE=1` 才跑）。
+| 环境 | 结果 | 说明 |
+| --- | --- | --- |
+| 装了 shellcheck | 211 passed, 1 skipped | 本机（把 shellcheck 放进 `tools/` 或 PATH） |
+| 干净克隆、没装 shellcheck | 205 passed, 7 skipped | 6 条 shellcheck 用例自报"找不到 shellcheck"后跳过，不造假 |
+
+剩下 1 条 skip 是需要真实 opencode 与凭据的端到端用例（`TU_LIVE=1` 才跑）。
 
 ## 已知限制（如实写）
 
