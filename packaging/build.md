@@ -29,28 +29,47 @@ py -3 -m venv .venv
 
 ## 2. 打包命令
 
+### 2.0 一键脚本（推荐）
+
+两个平台各有一个文件夹，各放一个一键脚本 —— 建 venv → 装依赖 → 打包 → 产物自检：
+
+| 平台 | 脚本 | 产物 |
+| --- | --- | --- |
+| Linux | `packaging/linux/build.sh`（`bash packaging/linux/build.sh`，**已在 Linux 实测通过**） | `dist/linux/tu-shell-agent/tu-shell-agent` |
+| Windows | `packaging/windows/build.bat`（双击即可，**未在 Windows 上执行过**） | `dist\windows\tu-shell-agent\tu-shell-agent.exe` |
+
+两个脚本共用同一份 spec 与入口（`packaging/tu-shell-agent.spec` + `packaging/entry.py`，
+它们与平台无关），只是产物分目录存：`dist/linux/` 与 `dist/windows/` 互不覆盖。
+
+**Windows 那个 .bat 我没有 Windows 机器可以验证**（PyInstaller 也不能交叉编译），
+它只是把下面第 1-3 节的命令按顺序抄了一遍。若某一步失败，请照本节逐条手动跑。
+
+> 说明：脚本第 2 步会执行 `pip install -e ".[ui,dev]"`。这一步此前在本仓库**必然失败**
+> （setuptools 的平铺布局自动发现会因为"发现多个顶层包"拒绝构建：根目录下同时有
+> `tu_shell_agent/`、`packaging/`、`test_fixtures/`），已在 `pyproject.toml` 里加
+> `[tool.setuptools.packages.find] include = ["tu_shell_agent*"]` 修掉。
+
+### 2.1 手写命令
+
 **必须在仓库根目录执行**：`--distpath` / `--workpath` 是相对当前目录解析的
 （spec 内部的路径已经用 `SPECPATH` 拼成绝对路径，所以从别处调用不会把仓库外的目录混进模块搜索路径）。
 
 Linux（本机已验证）：
 
 ```bash
-.venv/bin/python -m PyInstaller --clean --noconfirm --distpath dist --workpath build packaging/tu-shell-agent.spec
+.venv/bin/python -m PyInstaller --clean --noconfirm --distpath dist/linux --workpath build/linux packaging/tu-shell-agent.spec
 ```
 
-Windows（⚠ 未在 Linux 验证）：**双击 `packaging/build-windows.bat` 等价于下面全部步骤**
-（建 venv → 装依赖 → 打包 → `start /wait` 自检 → 打印 exe 路径）。
-那个 .bat 同样没在 Windows 上执行过（开发机是 Linux），它只是把本节命令按顺序抄了一遍；
-出问题请回到这里逐条跑：
+Windows（⚠ 未在 Linux 验证）：
 
 ```bat
-.venv\Scripts\python -m PyInstaller --clean --noconfirm --distpath dist --workpath build packaging\tu-shell-agent.spec
+.venv\Scripts\python -m PyInstaller --clean --noconfirm --distpath dist\windows --workpath build\windows packaging\tu-shell-agent.spec
 ```
 
 产物：`dist/tu-shell-agent/`（one-folder，Linux 实测 **217MB**；Windows 体积会不同）。
 注意 spec 里 `console=False`：Windows 上是 GUI 子系统 exe（双击不弹黑窗），命令行读退出码要按第 3 节的办法。
 
-### 2.1 为什么入口是 `packaging/entry.py`，不是计划里写的 `tu_shell_agent/ui/app.py`
+### 2.2 为什么入口是 `packaging/entry.py`，不是计划里写的 `tu_shell_agent/ui/app.py`
 
 计划原文的 spec 把 `tu_shell_agent/ui/app.py` 直接当入口脚本。**实测跑不通**，证据（Linux + PyInstaller 6.22.3）：
 

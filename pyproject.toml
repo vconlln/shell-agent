@@ -9,6 +9,13 @@ dependencies = ["httpx>=0.27"]
 ui = ["PySide6>=6.11"]
 dev = ["pytest>=8", "pytest-qt>=4.5"]
 
+# 仓库是"平铺布局"：根目录下除了 tu_shell_agent/ 还有 packaging/ 与 test_fixtures/。
+# 不显式限定的话，setuptools 的自动发现会因为"发现多个顶层包"直接拒绝构建，
+# 于是 `pip install -e ".[ui,dev]"` 必然失败（实测报 Multiple top-level packages
+# discovered in a flat-layout）—— 打包脚本第 2 步就卡在这里。
+[tool.setuptools.packages.find]
+include = ["tu_shell_agent*"]
+
 [project.scripts]
 tu-shell-agent = "tu_shell_agent.cli:main"
 tu-shell-agent-ui = "tu_shell_agent.ui.app:main"

@@ -1,10 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 规格：one-folder 产物，Linux 与 Windows 共用（PyInstaller 不交叉编译，各打各的）。
 
-用法（**必须在仓库根目录**执行，--distpath/--workpath 是相对当前目录解析的）：
+通常不直接调它，而是用两个平台各自的一键脚本（它们会 cd 到仓库根再调本文件）：
+
+    Linux   : bash packaging/linux/build.sh    → dist/linux/tu-shell-agent/
+    Windows : packaging\windows\build.bat      → dist\windows\tu-shell-agent\
+
+手写命令时（**必须在仓库根目录**执行，--distpath/--workpath 相对当前目录解析）：
 
     .venv/bin/python -m PyInstaller --clean --noconfirm \
-        --distpath dist --workpath build packaging/tu-shell-agent.spec
+        --distpath dist/linux --workpath build/linux packaging/tu-shell-agent.spec
 
 入口是 `packaging/entry.py`，不是计划里写的 `tu_shell_agent/ui/app.py`：PyInstaller 把入口
 脚本当 `__main__` 跑，而 `__main__` 没有 `__package__`，`app.py` 顶部的相对导入会死在
