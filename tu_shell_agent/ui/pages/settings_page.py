@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Signal
+from ..widgets.scroll import form_container, scrollable
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -85,7 +86,11 @@ class SettingsPage(QWidget):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        layout = QVBoxLayout(self)
+        # 表单进滚动区：空间不够时滚动，而不是把控件压扁（见 widgets/scroll.py）
+        content, layout = form_container()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrollable(content))
         layout.addWidget(components)
         layout.addWidget(run_defaults)
         layout.addWidget(checks)

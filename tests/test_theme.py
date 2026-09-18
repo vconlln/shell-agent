@@ -147,7 +147,8 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
         return QColor(frame.pixel(widget.width() // 2, widget.height() // 2)).name()
 
     assert own_color(window.chat_panel.transcript) == "#0b0c0e"      # 只读记录区
-    assert own_color(window.left_pane.extra_edit) == "#17181c"       # 可编辑输入框
+    # 输入控件的底色与圆角由 test_form_controls_are_rounded... 用**隔离窗口**验证：
+    # 左栏现在可滚动，被滚出视野的控件单独 grab() 会得到空白帧（实测全黑），断言不可靠。
 
 
 # ── 圆角真的画出来了（不只是写了 border-radius）────────────────────────────
@@ -225,3 +226,87 @@ def test_tab_corners_are_actually_rounded(themed_app, qtbot):
         assert corner != fill, (
             f"{tabs.objectName() or tabs} 的选中页签是直角（半径 {TOKENS['radius_pill']} 可能 >= 页签半高）"
         )
+
+
+def test_form_controls_are_rounded_when_they_have_a_normal_height(themed_app, qtbot):
+    """输入类控件的圆角：在隔离窗口里验证（避免滚动区裁切/坐标偏差骗过取色）。
+
+    为什么用隔离窗口：在真实主窗口里，左栏内容比可见区域高，控件可能被滚动区裁掉一部分，
+    `mapTo()` 给出的坐标会落到别的控件上 —— 取色结果就不是这个控件的（这次排查被坑过）。
+    """
+    from PySide6.QtWidgets import (
+        QComboBox, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    )
+
+    apply_theme(themed_app)
+    host = QWidget()
+    host.setObjectName("paneCard")           # 和真实场景一样，父容器是"卡片"
+    qtbot.addWidget(host)
+    host.resize(320, 280)
+    layout = QVBoxLayout(host)
+    controls = {
+        "QComboBox": QComboBox(),
+        "QSpinBox": QSpinBox(),
+        "QLineEdit": QLineEdit(),
+        "QPlainTextEdit": QPlainTextEdit(),
+        "QPushButton": QPushButton("开始"),
+    }
+    for widget in controls.values():
+        widget.setMinimumHeight(30)
+        layout.addWidget(widget)
+    host.show()
+    qtbot.waitExposed(host)
+
+    image = host.grab().toImage()
+    for name, widget in controls.items():
+        def color(x: int, y: int) -> str:
+            point = widget.mapTo(host, QPoint(x, y))
+            return QColor(image.pixel(point.x(), point.y())).name()
+
+        corner = color(1, 1)
+        center = color(widget.width() // 2, widget.height() // 2)
+        assert corner != center, f"{name} 是矩形底（圆角没生效，或控件被压得比半径还矮）"
+
+
+def test_input_surface_differs_from_the_panel_so_rounding_is_visible():
+    """输入框底色必须与卡片底色不同。
+
+    同色时圆角处的像素和填充一个颜色 —— 形状在视觉上根本不存在（用户报的
+    "圆角边框 + 长方形底色"有一部分就是这么来的）。
+    """
+    assert TOKENS["bg_input"] != TOKENS["bg_elevated"]
+    assert TOKENS["bg_input"] != TOKENS["bg"]
+
+
+def test_input_surface_differs_from_the_panel_so_rounding_is_visible():
+    """输入框底色必须与卡片底色不同。
+
+    同色时圆角处的像素和填充一个颜色 —— 形状在视觉上根本不存在（用户报的
+    "圆角边框 + 长方形底色"有一部分就是这么来的）。
+    """
+    assert TOKENS["bg_input"] != TOKENS["bg_elevated"]
+    assert TOKENS["bg_input"] != TOKENS["bg"]
+
+
+def test_single_line_controls_refuse_to_shrink_below_a_usable_height(themed_app, qtbot):
+    """单行输入控件在**被挤压的布局**里也要保持可用高度。
+
+    这条隔离的是 QSS 的 `min-height`：把它撤掉，控件在 cramped 布局里会缩到 13px，
+    而 13px 时圆角半径 ≥ 半高 → Qt 画直角（"圆角边框 + 长方形底色"的成因之一）。
+    """
+    from PySide6.QtWidgets import QComboBox, QSpinBox, QVBoxLayout, QWidget
+
+    apply_theme(themed_app)
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.resize(240, 20)                  # 故意给一个装不下的高度
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    combo, spin = QComboBox(), QSpinBox()
+    layout.addWidget(combo)
+    layout.addWidget(spin)
+    host.show()
+    qtbot.waitExposed(host)
+
+    assert combo.height() >= 24, f"下拉框在挤压下缩到了 {combo.height()}px"
+    assert spin.height() >= 24, f"微调框在挤压下缩到了 {spin.height()}px"

@@ -20,15 +20,36 @@ from tu_shell_agent.ui.settings import AppSettings
 
 @pytest.fixture
 def window(qtbot, tmp_path):
-    win = MainWindow(
-        wire_controller=False,
-        settings=AppSettings(run_root=str(tmp_path / "runs"), templates_dir=str(tmp_path / "tpl")),
-    )
-    qtbot.addWidget(win)
-    win.resize(1440, 900)
-    win.show()
-    qtbot.waitExposed(win)
-    return win
+    """带主题的主窗口。
+
+    必须装上主题：`min-height` 这类约束是通过 QSS 生效的，不装主题测的是"没有样式表的世界"，
+    而用户看的是带样式表的版本（这个坑已经踩过一次：控件高度 21px 的判定只有在装了主题后
+    才反映真实情况）。用完把全局样式表还原，别泄漏给同一会话的其他测试。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from tu_shell_agent.ui.theme import apply_theme
+
+    app = QApplication.instance()
+    previous_sheet = app.styleSheet()
+    previous_palette = app.palette()
+    previous_style = app.style().objectName()
+    apply_theme(app)
+    try:
+        win = MainWindow(
+            wire_controller=False,
+            settings=AppSettings(run_root=str(tmp_path / "runs"), templates_dir=str(tmp_path / "tpl")),
+        )
+        qtbot.addWidget(win)
+        win.resize(1440, 900)
+        win.show()
+        qtbot.waitExposed(win)
+        yield win
+    finally:
+        app.setStyleSheet(previous_sheet)
+        app.setPalette(previous_palette)
+        if previous_style:
+            app.setStyle(previous_style)
 
 
 def test_all_splitters_have_a_grabbable_handle(window):
@@ -220,3 +241,51 @@ def test_collapse_state_is_saved_and_restored(qtbot, tmp_path):
     qtbot.waitExposed(again)                          # 还原发生在 showEvent 里
     assert again.right_pane.sections["notes"].is_collapsed() is True
     assert again.right_pane.sections["findings"].is_collapsed() is False   # 其余保持展开
+
+
+def test_form_controls_are_never_crushed(window, qtbot):
+    """表单控件永远不该被压扁（用户报"底色是长方形"，根因之一就是控件被压到 13px）。
+
+    实测：左栏内容需要 576px、最小 474px，而当时只分到 383px —— QFormLayout 把下拉框与
+    微调框压到 **13px 高**（sizeHint 是 29px）。而 13px 高时圆角半径 10px ≥ 半高 6.5px，
+    Qt 会整个退回画直角。现在表单进滚动区 + 单行输入声明 min-height，控件保持正常高度。
+    """
+    from PySide6.QtWidgets import QComboBox, QLineEdit, QSpinBox
+
+    window.resize(window.minimumSize())        # 最挤的情况
+    qtbot.wait(50)
+
+    controls = (
+        window.findChildren(QComboBox) + window.findChildren(QSpinBox)
+        + window.findChildren(QLineEdit)
+    )
+    assert controls, "一个输入控件都没找到？"
+    crushed = [
+        (type(c).__name__, c.objectName(), c.height())
+        for c in controls
+        # 跳过 Qt 内部控件（例如 QSpinBox 内部的 qt_spinbox_lineedit）：它们的高度由
+        # 外层控件决定，不是"被布局压扁"的证据。
+        if c.isVisible() and not c.objectName().startswith("qt_") and c.height() < 22
+    ]
+    assert crushed == [], f"这些控件被压扁了（高度 < 22px）：{crushed}"
+
+
+def test_left_pane_scrolls_instead_of_clipping_when_short(window, qtbot):
+    """左栏空间不够时要能**滚动**，而不是把内容裁掉看不见。
+
+    隔离的是 scroll.py 那层包装：没有它，QSS 的 min-height 会让控件保持高度、但整块内容
+    溢出面板被裁切（下半部分永远看不到，也没法滚过去）。
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    area = window.left_pane.findChild(QScrollArea)
+    assert area is not None, "左栏内容没有包在滚动区里"
+
+    window.resize(window.minimumSize())
+    qtbot.wait(50)
+    # 内容比可视区高 → 必须出现可滚动范围（这正是"能不能看到下面那半"的关键）
+    assert area.verticalScrollBar().maximum() > 0, "内容溢出时没有可滚动范围（会被裁掉）"
+
+    area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+    qtbot.wait(20)
+    assert area.verticalScrollBar().value() > 0, "滚动条拖不动"

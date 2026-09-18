@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Signal
+from ..widgets.scroll import form_container, scrollable
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
     QPushButton, QSpinBox, QVBoxLayout, QWidget,
@@ -112,7 +113,12 @@ class LeftPane(QWidget):
         run_form.addRow("生成超时", self.generate_timeout_spin)
         run_form.addRow("执行超时", self.execute_timeout_spin)
 
-        layout = QVBoxLayout(self)
+        # 表单进滚动区：左栏内容需要 576px，靠"压缩控件"适应高度会把输入框压到 13px
+        # （见 widgets/scroll.py 的说明）。现在按需要出滚动条，控件保持正常高度。
+        content, layout = form_container()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrollable(content))
         layout.addWidget(_section("方案文档"))
         layout.addLayout(plan_row)
         layout.addWidget(self.plan_preview, 1)

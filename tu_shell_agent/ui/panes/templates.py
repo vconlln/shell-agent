@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from ..widgets.scroll import form_container, scrollable
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -134,7 +135,11 @@ class TemplatesPane(QWidget):
         splitter.addWidget(editor)
         splitter.setSizes([120, 500])
 
-        layout = QVBoxLayout(self)
+        # 表单进滚动区：空间不够时滚动，而不是把控件压扁（见 widgets/scroll.py）
+        content, layout = form_container()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrollable(content))
         layout.addWidget(splitter, 1)
 
     def _connect_signals(self) -> None:

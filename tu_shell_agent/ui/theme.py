@@ -46,7 +46,9 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     "bg": "#101114",              # 冷调更深的一层（比 Codex 的 #181818 再压一档）
     "bg_elevated": "#17181c",     # 面板/输入：只比底色亮一档
     "bg_under": "#0b0c0e",        # 更深的一层（只读底、凹陷）
-    "bg_input": "#17181c",
+    # 输入框比面板**更深**：和面板同色时，圆角处的像素与填充同色 —— 形状根本看不出来
+    # （用户报的"圆角边框 + 长方形底色"里有一部分就是这个：输入框和卡片都是 #17181c）。
+    "bg_input": "#121317",
     "bg_hover": (255, 255, 255, 10),     # 4% 白（--color-background...hover）
     "bg_selected": (255, 255, 255, 20),  # 8% 白
     "bg_button": (255, 255, 255, 13),    # 5% 白
@@ -218,11 +220,15 @@ QPushButton:disabled {{
     background-color: transparent;
 }}
 QPushButton:focus {{ border-color: {css('border_focus')}; }}
-/* 主按钮（开始）：Codex 用白底黑字表示"主操作" */
+/* 主按钮（开始）：Codex 用白底黑字表示"主操作"。
+   **必须重复写 border-radius**：Qt 里 `border` 简写会把同一条规则之外的圆角重置掉，
+   只写 `border: 1px solid ...` 的按钮会被画成**直角矩形**（实测：主按钮整块是方的，
+   而同一条基类规则下的次按钮是圆的 —— 因为基类规则自己带了 border-radius）。 */
 QPushButton#primaryButton {{
     background-color: {css('fg')};
     color: {css('fg_on_accent')};
     border: 1px solid {css('fg')};
+    border-radius: {css('radius')};
     font-weight: 600;
 }}
 QPushButton#primaryButton:hover {{ background-color: #e6e6e6; border-color: #e6e6e6; }}
@@ -242,6 +248,11 @@ QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QSpinBox, QComboBox {{
     selection-background-color: {css('accent')};
     selection-color: {css('fg_on_accent')};
 }}
+/* 注意：这里**故意不写** min-height。
+   QSS 的 `min-height` 会覆盖 widget 的 `setMinimumHeight()`（加到 QPlainTextEdit 上会把
+   方案预览/脚本视图定制的 90/140px 下限冲掉，实测从 90 掉到 34）；而且用它来防"控件被压扁"
+   是无效的 —— 容器比最小尺寸还小时 Qt 照样会挤压，真正管用的是把表单放进滚动区
+   （见 widgets/scroll.py）加上窗口/栏目的最小尺寸。 */
 QLineEdit:hover, QSpinBox:hover, QComboBox:hover {{ border-color: {css('border_heavy')}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QTextBrowser:focus,
 QSpinBox:focus, QComboBox:focus {{ border-color: {css('border_focus')}; }}
@@ -323,6 +334,7 @@ QToolTip {{
     background-color: {css('bg_under')};
     color: {css('fg_secondary')};
     border: 1px solid {css('border')};
+    border-radius: {css('radius')};
     padding: 4px 6px;
 }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}

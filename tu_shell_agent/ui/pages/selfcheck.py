@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from ..widgets.scroll import form_container, scrollable
 from ...types import DetectionReport
 
 _TOOLS = ("opencode", "bash", "shellcheck")
@@ -33,7 +34,11 @@ class SelfCheckPage(QWidget):
         self.text.setReadOnly(True)             # 自检结果是"呈堂证供"，不允许用户改
         self.text.setPlainText("尚未检测。点击「重新检测」开始。")
 
-        layout = QVBoxLayout(self)
+        # 表单进滚动区：空间不够时滚动，而不是把控件压扁（见 widgets/scroll.py）
+        content, layout = form_container()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrollable(content))
         layout.addWidget(self.hint)
         layout.addWidget(self.recheck_button)
         layout.addWidget(self.text, 1)
