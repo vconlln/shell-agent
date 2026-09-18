@@ -374,3 +374,16 @@ OpenCode's free tier can only be used from within OpenCode
 
 仍然有效的未覆盖项（本机无法验证）：真实 provider 生成、Windows 侧的 exe 双击 /
 `taskkill /T /F` / 中文与含空格路径 / UTF-8 输出 / 权限 deny 实测 / 真流式视觉。
+
+### 一条只有端到端路径能抓到的缺陷（记下来当方法用）
+
+`_decide_confirm` 里的 `bool(self.confirm_answer)`：`confirm_answer=None` 被当成"拒绝"，
+于是"auto_confirm=True 但没给预置答案"时，**每次执行都被静默拒掉** —— 界面显示
+`cancelled`、脚本一次都没跑，而报告、时间线、meta 全都正常，看不出任何异常。
+
+它躲过了 209 条全绿测试：所有 `auto_confirm=True` 的用例都恰好带着默认的
+`confirm_answer=True`，而生产装配（`auto_confirm=False` + `answer=None`）走的是另一个分支。
+最后是靠"用真实 shellcheck + 真实 bash 跑一次改后重跑"的演示抓出来的。
+
+结论：**测试全绿不等于路径跑通**。凡是"只有生产装配才会走的参数组合"，至少要有一条
+用例把它原样走一遍；否则最后一道防线只能是端到端演示。
