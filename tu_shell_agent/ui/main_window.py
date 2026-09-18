@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -28,6 +30,9 @@ from ..template_store.store import TemplateStore
 def _titled(widget: QWidget, title: str) -> QWidget:
     """给一个控件加一行栏头，返回包好的容器（栏头文字是次级色小标题）。"""
     container = QWidget()
+    # 每栏是一张"卡片"：大圆角 + 极淡边框。圆角要看得出来就得有边框，而栏与栏之间的
+    # 分隔感也由它提供 —— 分割条平时是透明的（只在悬停时显色）。
+    container.setObjectName("paneCard")
     layout = QVBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(4)
@@ -72,6 +77,7 @@ class MainWindow(QMainWindow):
         # 用包装控件而不是往各 pane 里塞标签：pane 的布局归 pane 自己管，
         # 而且骨架测试是按 objectName 找 pane 的，包一层不影响 findChild。
         left_column = QSplitter(Qt.Orientation.Vertical)
+        self.left_column = left_column
         left_column.addWidget(self.left_pane)
         left_column.addWidget(self.templates_pane)
         left_column.setSizes([400, 500])
@@ -85,6 +91,7 @@ class MainWindow(QMainWindow):
 
         # 底栏左边是历史运行（列表 + 回放），右边是两个独立页。
         # 列表控件本身在 HistoryPage 里，objectName 仍是 historyList（界面骨架测试的契约）。
+        # 历史与两个独立页的标题由 _titled 提供，HistoryPage 内部的"历史运行"标签就不需要了
         self.history_page = HistoryPage(run_root=self.settings.run_root)
 
         self.selfcheck_page = SelfCheckPage()
@@ -110,13 +117,24 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("statusLabel")
         bottom.addWidget(self.status_label, 1)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.addWidget(self.history_page, 1)
-        bottom_row.addWidget(self.side_pages, 2)
+        # 历史与两个独立页之间也要能拖（原来是一个 QHBoxLayout，比例写死 1:2）。
+        self.bottom_row = QSplitter(Qt.Orientation.Horizontal)
+        self.bottom_row.setObjectName("bottomSplitter")
+        self.bottom_row.addWidget(self.history_page)   # 页面自己已有"历史运行"栏头
+        self.bottom_row.addWidget(self.side_pages)
+        self.bottom_row.setSizes([420, 900])
+
+        # 上下两层（三栏区 / 历史与设置区）放进竖向分割器：原来是一个 QVBoxLayout 的
+        # addWidget(..., 1) + addLayout(..., 1)，比例固定 1:1，用户**根本没法调** ——
+        # 这就是"不能调节竖向的长度"。现在拖中间那条就能改，而且尺寸会记进设置。
+        self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.vertical_splitter.setObjectName("verticalSplitter")
+        self.vertical_splitter.addWidget(self.splitter)
+        self.vertical_splitter.addWidget(self.bottom_row)
+        self.vertical_splitter.setSizes([560, 320])
 
         root_layout = QVBoxLayout()
-        root_layout.addWidget(self.splitter, 1)
-        root_layout.addLayout(bottom_row, 1)
+        root_layout.addWidget(self.vertical_splitter, 1)
         root_layout.addLayout(bottom)
 
         root = QWidget()
@@ -125,6 +143,8 @@ class MainWindow(QMainWindow):
 
         # 设置里存的值要体现在界面上，否则用户会以为设置没生效——设置页那四个运行参数
         # （轮次/两个超时/阻断级别）此前根本没人读，是四个死值。
+        for splitter in (self.splitter, self.left_column, self.vertical_splitter, self.bottom_row):
+            splitter.splitterMoved.connect(lambda *_args: self._save_layout())
         self._apply_settings_to_inputs()
         # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
         # 用户一改就该立刻反映，不能等到下次运行。
@@ -133,9 +153,79 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.saved.connect(self._on_settings_saved)
 
+        # 把手宽度写进代码而不是只靠 QSS：样式表没加载时（或换主题时）它会退回 Qt 默认的
+        # 4px，而 4px 抓不住 —— 用户"不能调节竖向的长度"就是这么来的。命中目标不能依赖样式。
+        # 用 findChildren 而不是列举我已知的那几个：中栏内部还有一个 splitter
+        # （页签 / 轮次时间线），漏掉它那条把手就只有 4px —— 测试里就是这么抓到的。
+        for splitter in self.findChildren(QSplitter):
+            splitter.setHandleWidth(8)
+
+        # 放开最小高度：各栏内部控件的 minimumSizeHint 加起来有 400~500px，会**锁死**分割器
+        # 的比例（拖了也没反应，看起来像"不能调"）。这里给每块一个能接受的小下限，
+        # 让用户真的能把某一块压小；压小了内部靠滚动条看。
+        for widget, minimum in (
+            (self.left_pane, 140), (self.templates_pane, 140),
+            (self.center_pane, 200), (self.right_pane, 200),
+            (self.history_page, 120), (self.side_pages, 160),
+        ):
+            widget.setMinimumHeight(minimum)
+
+        self._layout_restored = False
         self.controller = None
         if wire_controller:
             self._wire_controller()
+
+    # ── 布局记忆 ────────────────────────────────────────────────────
+    def _splitter_state(self) -> dict[str, list[int]]:
+        """四个分割器的尺寸。存**尺寸**而不是 saveState() 的字节：尺寸是可读的 JSON，
+        换 Qt 版本也不会失效，出问题时用户能自己看一眼。"""
+        return {
+            "main": self.splitter.sizes(),
+            "leftColumn": self.left_column.sizes(),
+            "vertical": self.vertical_splitter.sizes(),
+            "bottom": self.bottom_row.sizes(),
+        }
+
+    def _save_layout(self) -> None:
+        """拖动后立刻写盘（失败只记状态栏，不打断用户）。"""
+        try:
+            self.settings.layout = json.dumps(self._splitter_state(), ensure_ascii=False)
+            self.settings.save()
+        except (OSError, ValueError) as error:
+            self.set_status(f"布局未能保存：{error}")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """首次显示时还原布局尺寸。
+
+        必须在 showEvent 里做，不能在 `__init__` 里：控件没显示之前几何尺寸还没定下来，
+        那时 `setSizes()` 会被最小高度夹成一个平均分布 —— 表现为"设置里存了、开窗却没还原"
+        （实测：构造期设 [397,649]，显示后变成 [238,238]）。
+        """
+        super().showEvent(event)
+        if not self._layout_restored:
+            self._layout_restored = True
+            self._restore_layout()
+
+    def _restore_layout(self) -> None:
+        """按上次拖出来的尺寸还原；没存过或存坏了就用默认比例。"""
+        raw = getattr(self.settings, "layout", "") or ""
+        if not raw.strip():
+            return
+        try:
+            saved = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(saved, dict):
+            return
+        for key, splitter in (
+            ("main", self.splitter),
+            ("leftColumn", self.left_column),
+            ("vertical", self.vertical_splitter),
+            ("bottom", self.bottom_row),
+        ):
+            sizes = saved.get(key)
+            if isinstance(sizes, list) and len(sizes) == splitter.count():
+                splitter.setSizes([int(value) for value in sizes])
 
     # ── 接线 ──────────────────────────────────────────────────────
     def _wire_controller(self) -> None:
@@ -173,6 +263,8 @@ class MainWindow(QMainWindow):
         self.settings = self.settings_page.collect()
         self.history_page.run_root = self.settings.run_root
         self.history_page.reload()
+        for splitter in (self.splitter, self.left_column, self.vertical_splitter, self.bottom_row):
+            splitter.splitterMoved.connect(lambda *_args: self._save_layout())
         self._apply_settings_to_inputs()
         if self.settings.templates_dir:
             # 模板目录改了就得换库：不换的话设置页显示"已保存"，模板面板还指着旧目录

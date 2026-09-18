@@ -28,6 +28,13 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication
 
 # ── 令牌 ────────────────────────────────────────────────────────────────────
+#
+# 配色取向（2026-09-19 用户要求"显得高级、尽量圆角"）：底色从 Codex 的 #181818 往**冷调
+# 更深**走（#101114），面板只比底色亮一档（#17181c）——"高级感"主要来自**低对比的分层**，
+# 而不是把面板刷得比背景亮很多；文字不用纯白（#ecedf0），因为纯白在高对比深底上偏"廉价"；
+# 强调色从 #339cff 换成偏靛蓝的 #7c9cff，语义色全部降饱和（错误是玫瑰红而非正红），
+# 这样红色只用在"真的出问题了"的地方，而不是到处抢眼。
+# 圆角全面放大（控件 10px、面板 14px、页签胶囊），分割条给 6px 的可抓宽度但只在悬停时显色。
 # 颜色值分两种写法，别混：不透明的写 "#rrggbb"；**半透明的写 (r,g,b,a) 元组**。
 #
 # 为什么不写 8 位 hex：Qt 把 8 位 hex 解析成 `#AARRGGBB`（不是 CSS 的 `#RRGGBBAA`），
@@ -36,10 +43,10 @@ from PySide6.QtWidgets import QApplication
 # 所有颜色都必须经 css() / qcolor() 出口，禁止在别处直接写颜色字面量。
 TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     # 背景
-    "bg": "#181818",              # --gray-900 / --color-background-surface
-    "bg_elevated": "#212121",     # --gray-800 / -elevated-primary-opaque
-    "bg_under": "#0d0d0d",        # --gray-1000，比主背景更深的一层（外框/凹陷）
-    "bg_input": "#212121",
+    "bg": "#101114",              # 冷调更深的一层（比 Codex 的 #181818 再压一档）
+    "bg_elevated": "#17181c",     # 面板/输入：只比底色亮一档
+    "bg_under": "#0b0c0e",        # 更深的一层（只读底、凹陷）
+    "bg_input": "#17181c",
     "bg_hover": (255, 255, 255, 10),     # 4% 白（--color-background...hover）
     "bg_selected": (255, 255, 255, 20),  # 8% 白
     "bg_button": (255, 255, 255, 13),    # 5% 白
@@ -47,28 +54,30 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     "bg_button_active": (255, 255, 255, 31),
     "bg_accent": (51, 156, 255, 31),
     # 文字
-    "fg": "#ffffff",                     # --gray-0
-    "fg_secondary": (255, 255, 255, 179),  # 70%
-    "fg_tertiary": (255, 255, 255, 128),   # 50%
-    "fg_disabled": (255, 255, 255, 77),    # 30%
-    "fg_on_accent": "#0d0d0d",
+    "fg": "#ecedf0",                       # 不用纯白：深底上纯白偏刺眼
+    "fg_secondary": (236, 237, 240, 178),  # 70%
+    "fg_tertiary": (236, 237, 240, 120),   # 47%
+    "fg_disabled": (236, 237, 240, 70),    # 27%
+    "fg_on_accent": "#0b0c0e",
     # 边框
     "border_light": (255, 255, 255, 10),
     "border": (255, 255, 255, 20),
     "border_heavy": (255, 255, 255, 41),
-    "border_focus": (51, 156, 255, 179),
+    "border_focus": (124, 156, 255, 170),
     # 语义色
-    "accent": "#339cff",
-    "ok": "#40c977",
-    "warn": "#fb6a22",
-    "error": "#ff6764",
-    "error_dim": (255, 103, 100, 128),
-    "muted": "#afafaf",           # --gray-300，非阻断项的灰
-    "info": "#339cff",
+    "accent": "#7c9cff",          # 偏靛蓝，比"互联网蓝"更收敛
+    "ok": "#4ec98a",
+    "warn": "#e8a86a",
+    "error": "#f2707a",           # 玫瑰红：语义色降饱和，红色留给真问题
+    "error_dim": (242, 112, 122, 128),
+    "muted": "#a8adb8",
+    "info": "#7c9cff",
     # 控件尺寸（照 Codex 的行高与圆角）
-    "radius": "6px",
-    "radius_lg": "8px",
+    "radius": "10px",
+    "radius_lg": "14px",
+    "radius_pill": "999px",
     "row_height": "30px",
+    "handle": "6px",   # 分割条的**可抓宽度**（不是画出 6px 粗线：见 QSS 里的 hover 规则）
     "font_size": "13px",
     "font_size_small": "12px",
     "font_size_section": "11px",
@@ -175,9 +184,18 @@ QLabel[role="hint"], QLabel#statusLabel {{ color: {css('fg_secondary')}; }}
 QLabel[role="muted"] {{ color: {css('fg_tertiary')}; font-size: {css('font_size_small')}; }}
 
 /* ── 面板 ─────────────────────────────────────────────────────────── */
+/* 面板不再画 1px 边框，改用更大圆角的浅色卡片：圆角要看得出来，边框就得退到很淡；
+   分隔感由分割条 hover 与留白提供。 */
 QWidget#leftPane, QWidget#centerPane, QWidget#rightPane, QWidget#templatesPane,
-QWidget#historyPage, QWidget#settingsPage, QWidget#selfCheckPage {{
+QWidget#historyPage, QWidget#settingsPage, QWidget#selfCheckPage, QWidget#chatPanel {{
     background-color: {css('bg')};
+}}
+QWidget#chatPanel {{ border: 1px solid {css('border_light')}; border-radius: {css('radius_lg')}; }}
+/* 三栏/底栏的"卡片"：大圆角 + 极淡边框。栏与栏的分隔靠它，而不是靠那条透明的分割条。 */
+QWidget#paneCard {{
+    background-color: {css('bg_elevated')};
+    border: 1px solid {css('border_light')};
+    border-radius: {css('radius_lg')};
 }}
 
 /* ── 按钮：无渐变、无阴影、1px 边框 ────────────────────────────── */
@@ -216,7 +234,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QSpinBox, QComboBox {{
     background-color: {css('bg_input')};
     color: {css('fg')};
     border: 1px solid {css('border')};
-    border-radius: {css('radius')};
+    border-radius: {css('radius_lg')};
     padding: 4px 8px;
     selection-background-color: {css('accent')};
     selection-color: {css('fg_on_accent')};
@@ -245,9 +263,9 @@ QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background-color: {css
 
 /* ── 列表 / 树 / 表：行高 30、无网格、hover 4% ─────────────────── */
 QListWidget, QTreeWidget, QTableWidget {{
-    background-color: {css('bg')};
+    background-color: {css('bg_elevated')};
     border: 1px solid {css('border_light')};
-    border-radius: {css('radius')};
+    border-radius: {css('radius_lg')};
     outline: none;
     alternate-background-color: {css('bg_under')};
 }}
@@ -266,15 +284,15 @@ QHeaderView::section {{
 }}
 
 /* ── 页签：Codex 的胶囊式，去掉原生边框与底部横线 ─────────────── */
-QTabWidget::pane {{ border: 1px solid {css('border_light')}; border-radius: {css('radius')}; top: -1px; }}
+QTabWidget::pane {{ border: 1px solid {css('border_light')}; border-radius: {css('radius_lg')}; top: -1px; }}
 QTabBar {{ qproperty-drawBase: 0; }}
 QTabBar::tab {{
     background: transparent;
     color: {css('fg_tertiary')};
     border: 1px solid transparent;
-    border-radius: {css('radius')};
-    padding: 4px 12px;
-    margin-right: 4px;
+    border-radius: {css('radius_pill')};   /* 胶囊式页签：圆角最大的地方，最能出"高级感" */
+    padding: 5px 14px;
+    margin-right: 6px;
     min-height: 22px;
 }}
 QTabBar::tab:hover {{ color: {css('fg')}; background-color: {css('bg_hover')}; }}
@@ -285,10 +303,14 @@ QTabBar::tab:selected {{
 }}
 
 /* ── 分割器：1px 细线，不拖出宽槽 ──────────────────────────────── */
-QSplitter::handle {{ background-color: {css('border_light')}; }}
-QSplitter::handle:horizontal {{ width: 1px; }}
-QSplitter::handle:vertical {{ height: 1px; }}
+/* 分割条：**可抓宽度必须是毫米级手感**（6px），但平时不显色 —— 之前写死 1px 之后
+   用户根本抓不住（"不能调节竖向的长度"就是这么来的）。1px 的分隔感改由各面板自己的
+   1px 边框提供，所以视觉上依然是细线。 */
+QSplitter::handle {{ background-color: transparent; }}
+QSplitter::handle:horizontal {{ width: {css('handle')}; }}
+QSplitter::handle:vertical {{ height: {css('handle')}; }}
 QSplitter::handle:hover {{ background-color: {css('border_heavy')}; }}
+QSplitter::handle:pressed {{ background-color: {css('accent')}; }}
 
 /* ── 菜单 / 提示 / 滚动条 ─────────────────────────────────────── */
 QMenu {{ background-color: {css('bg_elevated')}; border: 1px solid {css('border')}; border-radius: {css('radius')}; }}
@@ -302,7 +324,7 @@ QToolTip {{
 }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
-QScrollBar::handle {{ background-color: {css('border_heavy')}; border-radius: 5px; min-height: 24px; }}
+QScrollBar::handle {{ background-color: {css('border_heavy')}; border-radius: 4px; min-height: 28px; }}
 QScrollBar::handle:hover {{ background-color: {css('fg_disabled')}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
@@ -310,9 +332,9 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 /* ── 复选框 ───────────────────────────────────────────────────── */
 QCheckBox {{ spacing: 6px; }}
 QCheckBox::indicator {{
-    width: 14px; height: 14px;
+    width: 15px; height: 15px;
     border: 1px solid {css('border_heavy')};
-    border-radius: 4px;
+    border-radius: 5px;
     background-color: {css('bg_input')};
 }}
 QCheckBox::indicator:checked {{ background-color: {css('accent')}; border-color: {css('accent')}; }}
@@ -325,6 +347,8 @@ QPlainTextEdit#templateBody, QPlainTextEdit#templatePreview, QPlainTextEdit#conf
     font-size: {css('font_size_small')};
 }}
 QPlainTextEdit#notesView {{ font-family: inherit; }}
+/* 对话记录与输入框也用等宽：里面的脚本片段要能对齐 */
+QPlainTextEdit#chatTranscript, QPlainTextEdit#chatInput {{ font-family: "{mono}"; font-size: {css('font_size_small')}; }}
 
 /* ── 底栏状态：单行、次级色、上方一条细线 ─────────────────────── */
 QLabel#statusLabel {{
@@ -351,8 +375,8 @@ def apply_theme(app: QApplication) -> None:
 STDERR_COLOR = qcolor("error")
 BLOCKING_COLOR = qcolor("error")
 NON_BLOCKING_COLOR = qcolor("muted")
-DIFF_ADDED_BG = "#0f2f1b"      # 深色底上的"新增行"：低饱和绿底，别用浅绿整块糊上去
-DIFF_ADDED_FG = "#40c977"
-DIFF_REMOVED_BG = "#3a1517"
-DIFF_REMOVED_FG = "#ff6764"
+DIFF_ADDED_BG = "#12241c"      # 深色底上的"新增行"：低饱和深底，别用浅绿整块糊上去
+DIFF_ADDED_FG = "#6fd39b"
+DIFF_REMOVED_BG = "#2a1417"
+DIFF_REMOVED_FG = "#f2909a"
 DIFF_GUTTER_FG = css("fg_tertiary")

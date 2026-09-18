@@ -30,20 +30,33 @@ def test_stylesheet_has_no_eight_digit_hex():
 def test_css_and_qcolor_render_translucent_tokens_correctly():
     """半透明令牌必须经出口函数转成 rgba()/QColor(r,g,b,a)，不能当 hex 用。"""
     assert css("bg_hover") == "rgba(255, 255, 255, 10)"
-    assert css("bg") == "#181818"                     # 不透明的原样给 hex
+    assert css("bg") == "#101114"                     # 不透明的原样给 hex
     color = qcolor("fg_secondary")
-    assert (color.red(), color.green(), color.blue(), color.alpha()) == (255, 255, 255, 179)
+    assert (color.red(), color.green(), color.blue(), color.alpha()) == (236, 237, 240, 178)
 
 
-def test_theme_tokens_match_codex_desktop_values():
-    """关键令牌必须与 Codex 桌面版 electron-dark 作用域一致（改动要是有意的）。"""
-    assert TOKENS["bg"] == "#181818"          # --gray-900
-    assert TOKENS["bg_elevated"] == "#212121"  # --gray-800
-    assert TOKENS["fg"] == "#ffffff"           # --gray-0
-    assert TOKENS["accent"] == "#339cff"       # --blue-300
-    assert TOKENS["error"] == "#ff6764"        # --red-300
-    assert TOKENS["ok"] == "#40c977"           # --green-300
+def test_theme_tokens_are_the_documented_palette():
+    """关键令牌固定下来（改动必须是有意的，并且同步改这条测试与设计文档）。
+
+    注意：这套色板**已经不是 Codex 原值**了。2026-09-19 用户要求"显得高级、尽量圆角"，
+    于是从 Codex 的 #181818 往冷调更深走、文字不用纯白、强调色换靛蓝、语义色降饱和、
+    圆角全面放大。照抄的是它的**结构与比例**（分层关系、字号、行高、三级文字），
+    不是具体色值 —— 这条测试锁的就是"现在的有意取值"，不是"与 Codex 逐字一致"。
+    """
+    assert TOKENS["bg"] == "#101114"
+    assert TOKENS["bg_elevated"] == "#17181c"
+    assert TOKENS["bg_under"] == "#0b0c0e"
+    assert TOKENS["fg"] == "#ecedf0"
+    assert TOKENS["accent"] == "#7c9cff"
+    assert TOKENS["error"] == "#f2707a"
+    assert TOKENS["ok"] == "#4ec98a"
     assert TOKENS["row_height"] == "30px"
+    # 圆角："尽量圆角"是用户明确要求，锁住它别再被改回 6px
+    assert TOKENS["radius"] == "10px"
+    assert TOKENS["radius_lg"] == "14px"
+    assert TOKENS["radius_pill"] == "999px"
+    # 分割条的**可抓宽度**（里程碑：曾经是 1px，用户抓不住）
+    assert int(TOKENS["handle"].rstrip("px")) >= 6
 
 
 @pytest.fixture
@@ -83,12 +96,12 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
         point = widget.mapTo(window, widget.rect().topLeft() + offset)
         return QColor(image.pixel(point.x(), point.y())).name()
 
-    assert rendered(window) == "#181818"                              # 主背景 --gray-900
-    assert rendered(window.center_pane.script_view) == "#0d0d0d"      # 只读底 --gray-1000
-    assert rendered(window.right_pane.output_view) == "#0d0d0d"
-    # 主操作（开始）是白底黑字，与 Codex 一致；取中心点避开圆角
+    assert rendered(window) == "#101114"                              # 主背景
+    assert rendered(window.center_pane.script_view) == "#0b0c0e"      # 只读底（更深一档）
+    assert rendered(window.right_pane.output_view) == "#0b0c0e"
+    # 主操作（开始）是浅底深字；取中心点避开圆角
     center = QPoint(window.start_button.width() // 2, window.start_button.height() // 2)
-    assert rendered(window.start_button, center) == "#ffffff"
+    assert rendered(window.start_button, center) == "#ecedf0"
 
 
 def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
@@ -122,5 +135,46 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
         return QColor(image.pixel(point.x(), point.y())).name()
 
     chat = window.center_pane.chat
-    assert rendered(chat.transcript) == "#0d0d0d"        # 只读记录区
-    assert rendered(window.left_pane.extra_edit) == "#212121"   # 可编辑输入框
+    assert rendered(chat.transcript) == "#0b0c0e"        # 只读记录区
+    assert rendered(window.left_pane.extra_edit) == "#17181c"   # 可编辑输入框
+
+
+# ── 圆角真的画出来了（不只是写了 border-radius）────────────────────────────
+
+
+def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
+    """取角落与中心两个像素：圆角生效时，角落露出的应该是父底而不是控件自己的底色。
+
+    只断言"QSS 里有 border-radius"是不够的：控件没吃到那条规则、或被 :read-only 之类
+    的分支顶掉，字符串照样对，界面还是直角。
+    """
+    from PySide6.QtWidgets import QListWidget
+
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    apply_theme(themed_app)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    qtbot.waitExposed(window)
+
+    history = window.history_page.list_widget      # bg_elevated + 14px 圆角（QSS 里定的）
+    assert isinstance(history, QListWidget)
+    image = window.grab().toImage()
+
+    def sample(offset: QPoint) -> str:
+        point = history.mapTo(window, history.rect().topLeft() + offset)
+        return QColor(image.pixel(point.x(), point.y())).name()
+
+    center = sample(QPoint(history.width() // 2, history.height() // 2))
+    corner = sample(QPoint(1, 1))
+
+    assert center == "#17181c", "列表底色没吃到主题"
+    assert corner != center, "角落与中心同色 → 圆角没生效（被画成直角了）"
+    # 角落应当是"父底色"（可能叠了一丝边框），明显比控件底色更接近页面背景
+    def distance(a: str, b: str) -> int:
+        pa, pb = QColor(a), QColor(b)
+        return sum(abs(x - y) for x, y in zip(pa.getRgb()[:3], pb.getRgb()[:3]))
+
+    assert distance(corner, "#101114") < distance(corner, "#17181c")
