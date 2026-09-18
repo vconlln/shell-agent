@@ -261,6 +261,13 @@ def _confirm_and_execute(
     用户拒绝时第二个元素为 None，终态由调用方落盘；execute 故障抛 `_ExecuteError`，
     同样由调用方兜底成 aborted_dependency。
     """
+    # 执行前最后一次查取消，这一处不能省：另两处检查（轮次开头、generate 抛异常分支）都
+    # 覆盖不了「生成期间置位 + generate **正常返回**」这条路径 —— 那时脚本会照跑并落成
+    # succeeded，用户按了取消却看到"成功"，是假成功。返回 (False, None) 走既有的"未获批"
+    # 路径（调用方落 outcome=cancelled），不新增终态、也不伪造执行结果。
+    if _cancelled(cancel):
+        return False, None
+
     emit(RunEvent("phase", round_no, {"phase": "confirming"}))
     approved = trusted or ports.confirm.confirm(round_no, script_path, script, trusted)
     if not approved:

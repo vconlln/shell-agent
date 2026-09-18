@@ -427,6 +427,37 @@ def test_cancel_during_generation_returns_cancelled_without_burning_a_round():
     assert harness.metas[-1]["outcome"] == "cancelled"
 
 
+def test_cancel_set_while_generation_is_in_flight_never_executes():
+    """生成期间置位、且 generate **正常返回** 时，脚本一次都不能被执行。
+
+    上一条只覆盖"generate 抛异常"，异常分支里恰好有一次 _cancelled 检查；但用户按取消之后
+    generate 完全可能正常返回（服务端已算完、只是回包晚于取消），那时若不在执行前复查，
+    脚本会照跑并落成 succeeded —— 用户取消了一个会改磁盘的脚本，却看到"成功"。
+    """
+    ports, harness = make_ports([GOOD])
+    token = _Token()
+    executions: list[str] = []
+
+    def generate_then_cancel(session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+        harness.prompts.append(message)
+        token.set()  # 用户在生成期间按了取消
+        return GOOD  # 但生成仍然正常返回
+
+    def record_execute(script_path, *args, **kwargs):
+        executions.append(script_path)
+        return ExecuteResult(0, None, False, False, 1, "ok\n", "")
+
+    ports["opencode"].generate = generate_then_cancel
+    ports["toolchain"].execute = record_execute
+    result = run(ports, cancel=token)
+
+    assert executions == []  # 关键断言：脚本一次都没被执行
+    assert harness.confirmed == 0  # 连确认对话框都不该弹
+    assert result.outcome == "cancelled"
+    assert len(harness.prompts) == 1  # 没有第二轮
+    assert harness.metas[-1]["outcome"] == "cancelled"
+
+
 def test_generation_failure_without_cancel_still_burns_a_round():
     """反向对照：没有取消令牌时，生成异常仍按契约失败回灌（防止把失败都当取消）。"""
     ports, harness = make_ports([GOOD])
