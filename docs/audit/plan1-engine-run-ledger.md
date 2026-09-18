@@ -2,7 +2,7 @@
 
 ## 起飞前裁定（控制器）
 - **技术栈于实现阶段修订为「全 Python」**（用户裁定）：PySide6 界面 + httpx 直打 opencode HTTP/SSE + pytest + PyInstaller。规格 §19 记录了修订；TypeScript 版计划与其任务 1 代码（commit 52bbcaf..75d8615）已从工作树删除，git 历史仍可查。
-- 目录：`/home/vconlln/my-agent`（真实目录；早期因沙箱只读而用的软链中转已不再需要）。文件策略现为 danger-full-access，审批提示已关闭——**不得再请求提权**。
+- 目录：仓库根目录（下文相对路径均相对它）。
 - 环境：Python 3.14.7 + `.venv`（httpx 0.28.1、pytest 9.1.1 已装）；`tools/shellcheck` 0.11.0 静态二进制已就位；本机**没有**可用的 opencode 1.x Linux 二进制 → 任务 12 的真实冒烟默认 skip（不影响其余任务与离线端到端）。
 - PySide6 6.11.2 / pytest-qt 4.5.0 / PyInstaller 6.22.3 已于本机 dry-run 验证可解析（Plan 2 与 M4 使用）。
 - **计划 vs 规格冲突（用户裁定）**：CLI 非 TTY 默认拒绝执行、必须显式 `--yes`（规格 §11 为准）。已写进计划任务 12 与其验证命令。
