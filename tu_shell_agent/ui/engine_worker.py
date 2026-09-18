@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from dataclasses import replace
+from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Signal
 
@@ -34,11 +35,30 @@ class EngineWorker(QThread):
         self._confirm_answer: bool | None = None
         self._confirm_gate = threading.Event()
         self._input: LoopInput | None = None
+        self._entry: Callable[[LoopPorts, Any], LoopResult] | None = None
+        self._ports: LoopPorts | None = None
 
     # ── 主线程调用 ────────────────────────────────────────────────
     def submit(self, input_: LoopInput) -> None:
-        """设置本次运行输入（必须在 start() 之前调用）。"""
+        """第 1 轮入口：设置本次运行输入（必须在 start() 之前调用）。"""
         self._input = input_
+        self._entry = None
+        self._ports = None
+
+    def submit_entry(
+        self,
+        entry: Callable[[LoopPorts, Any], LoopResult],
+        ports: LoopPorts,
+    ) -> None:
+        """通用入口：续跑（`resume_repair`）与改后重跑（`verify_and_execute`）走这里。
+
+        编排层的三个入口输入类型不同、返回类型相同，所以线程桥只需要认"给我 ports 和取消
+        令牌、还我一个 LoopResult"这一个形状 —— 否则每加一个入口就要改一次线程桥。
+        ports 里的 confirm/emit 由 worker 线程补上（确认要回主线程、事件要走信号）。
+        """
+        self._entry = entry
+        self._ports = ports
+        self._input = None
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -65,28 +85,25 @@ class EngineWorker(QThread):
         self.event.emit(event)
 
     def run(self) -> None:  # noqa: D102 - QThread
-        if self._input is None:
-            self.failed.emit("EngineWorker.submit() 未被调用")
+        base = self._ports if self._ports is not None else getattr(self._input, "ports", None)
+        if base is None:
+            self.failed.emit("EngineWorker.submit()/submit_entry() 未被调用")
             return
         ports = LoopPorts(
             opencode=self._opencode,
             toolchain=self._toolchain,
             confirm=self,
-            store=self._store if self._store is not None else self._input.ports.store,
+            store=self._store if self._store is not None else base.store,
             emit=self._emit,
         )
-        input_ = LoopInput(
-            plan=self._input.plan,
-            template=self._input.template,
-            values=self._input.values,
-            run_dir=self._input.run_dir,
-            config=self._config,
-            ports=ports,
-            agent_name=self._input.agent_name,
-            cancel=self._cancel,
-        )
         try:
-            result = run_loop(input_)
+            if self._entry is not None:
+                result = self._entry(ports, self._cancel)
+            else:
+                assert self._input is not None
+                # 用 replace 而不是重新拼一个 LoopInput：入参以后再加字段时，
+                # 这里不必跟着改（漏改会静默丢掉新字段）。
+                result = run_loop(replace(self._input, ports=ports, cancel=self._cancel))
         except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
             self.failed.emit(str(error))
             return
@@ -95,3 +112,28 @@ class EngineWorker(QThread):
     # ConfirmPort 协议
     def confirm(self, round_no: int, script_path: str, script: str, trusted: bool) -> bool:
         return self._confirm(round_no, script_path, script, trusted)
+
+
+class DetectWorker(QThread):
+    """环境探测也放线程里：`detect_all` 会起若干子进程（各自跑一次 `--version`），
+    在 UI 线程里跑会把窗口冻住好几秒 —— 用户还以为程序挂了。
+    """
+
+    done = Signal(object)   # DetectionReport
+    failed = Signal(str)    # 探测本身炸了（与"探测完成但发现问题"是两回事）
+
+    def __init__(self, overrides: dict[str, str] | None = None, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._overrides = dict(overrides or {})
+
+    def run(self) -> None:  # noqa: D102 - QThread
+        try:
+            # 函数内 import：本模块被 ui 的控制器在启动路径上导入，
+            # 顶层拉进 shell_toolchain 会让"只想建个窗口"也付出这条依赖链的代价。
+            from ..shell_toolchain.detect import detect_all, system_deps
+
+            report = detect_all(system_deps(self._overrides))
+        except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
+            self.failed.emit(str(error))
+            return
+        self.done.emit(report)
