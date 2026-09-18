@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..ports import ConfirmPort, OpencodePort, RunStorePort, ToolchainPort
-from ..template_store.render import PlaceholderSpec, render_template
+from ..template_store.render import PlaceholderSpec, render_template, to_lf
 from ..types import (
     ContractEvidence,
     ContractResult,
@@ -158,7 +158,10 @@ def _precheck(
         ports.store.write_meta({"outcome": "aborted_dependency", "rounds": 0})
         return None, LoopResult("aborted_dependency", 0)
     if detection.problems:
+        # 与上面 detect 抛异常那条分支一样落终态：否则运行目录里会留下"有目录、无 meta.json"
+        # 的运行，Plan 2 的历史列表读到会缺结论。
         emit(RunEvent("note", 0, {"message": "\n".join(detection.problems)}))
+        ports.store.write_meta({"outcome": "aborted_dependency", "rounds": 0})
         return None, LoopResult("aborted_dependency", 0)
 
     # 规格 §10：运行目录要自包含可回放 —— 输入（方案全文、渲染后的骨架）必须落盘，
@@ -579,9 +582,11 @@ def verify_and_execute(input_: VerifyInput) -> LoopResult:
     - 用户拒绝 → `cancelled`；
     - 执行完成 → `succeeded` / `needs_human`（按退出码与 timed_out/cancelled 判定，与 run_loop 同规则）。
 
-    脚本**按磁盘上的原样**校验与执行（`script_path` 就是用户改完的那份），既不重新生成、
-    也不改写它；异常兜底与 run_loop 同一条规矩：shellcheck / execute 抛异常一律落
-    `*-error.txt` 并终止为 `aborted_dependency`，不穿出编排层。
+    脚本**不重新生成、也不做契约校验**，但入口处会做一次**换行归一化**：规格 §11 要求脚本
+    不得含 `\r`（Git Bash 会报错），run_loop 靠写盘时 `to_lf` 保证这一点，而这里校验的是用户
+    手改过的既有文件，所以要读进来归一化一次、必要时就地写回（归一化发生了就落
+    `normalized.txt` 留证）。异常兜底与 run_loop 同一条规矩：shellcheck / execute 抛异常一律
+    落 `*-error.txt` 并终止为 `aborted_dependency`，不穿出编排层。
     """
     ports = input_.ports
     config = input_.config
@@ -592,11 +597,45 @@ def verify_and_execute(input_: VerifyInput) -> LoopResult:
     write_meta = _make_meta_writer(ports, input_.run_dir, {"config": _jsonable(config)})
 
     try:
-        script = Path(script_path).read_text(encoding="utf-8")
+        path = Path(script_path)
+        # 必须走字节读取：`Path.read_text()` 是通用换行模式，会把 \r\n 悄悄读成 \n，那样下面
+        # 的 to_lf 永远看不出 CRLF（归一化会变成死代码），而磁盘上那份文件其实仍是 CRLF，
+        # shellcheck 与 bash 照样报 \r 错。
+        raw = path.read_bytes().decode("utf-8", errors="replace")
+        script = raw
+        # 规格 §11：脚本文件不得含 \r（Git Bash 会报 \r 错）。run_loop 靠写盘时 to_lf 保证，
+        # 而这里校验的是用户手工改过的**既有文件**，所以要在入口补一次 —— 否则 Windows 上
+        # 编辑器存出来的 CRLF 会变成"脚本莫名失败"。
+        normalized = to_lf(raw)
+        if normalized != raw:
+            if "\ufffd" in raw:
+                # errors="replace" 解出替换字符，说明这份文件不是 UTF-8（例如记事本存成 GBK）：
+                # 回写等于把用户的手工修改永久损坏，所以只提示、不动文件，让 shellcheck 照实报。
+                emit(
+                    RunEvent(
+                        "note",
+                        round_no,
+                        {"message": "脚本不是 UTF-8，跳过换行归一化（未改动文件）"},
+                    )
+                )
+            else:
+                # 同理必须走字节写入：`Path.write_text()` 在 Windows 上会把 \n 按 os.linesep
+                # 又翻回 \r\n，白归一化一场（已实测 newline=None 的这个翻译行为）。
+                path.write_bytes(normalized.encode("utf-8"))
+                script = normalized
+                ports.store.write_attempt(
+                    round_no,
+                    {
+                        "normalized.txt": (
+                            f"脚本含 {raw.count(chr(13))} 个 \\r，已就地归一化为 LF"
+                            "（规格 §11：脚本不得含 \\r，否则 Git Bash 报错）。\n"
+                        )
+                    },
+                )
     except OSError as error:
-        # 读不到用户改过的脚本 = 校验阶段的外部依赖故障，与 shellcheck 自身故障落在同一处：
+        # 读不到/写不回用户改过的脚本 = 校验阶段的外部依赖故障，与 shellcheck 自身故障落在同一处：
         # *-error.txt + aborted_dependency，界面据此提示"这份脚本读不到"。
-        note = f"读取脚本失败：{error}"
+        note = f"读取或归一化脚本失败：{error}"
         emit(RunEvent("note", round_no, {"message": note}))
         ports.store.write_attempt(round_no, {"shellcheck-error.txt": note + "\n"})
         write_meta({"outcome": "aborted_dependency", "rounds": round_no})

@@ -217,3 +217,5 @@ def test_resume_repair_continues_existing_session_without_restarting_opencode(tm
     assert result.outcome == "succeeded"
     assert result.rounds == 2
     assert len(harness.prompts) == 1
+    assert "## 第" in harness.prompts[0]  # 修复消息的抬头
+    assert "## 方案文档" not in harness.prompts[0]  # 首轮消息才有的段落

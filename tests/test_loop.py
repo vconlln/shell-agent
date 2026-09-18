@@ -1,7 +1,13 @@
 import json
 from dataclasses import dataclass, field
 
-from tu_shell_agent.orchestrator.loop import LoopInput, LoopPorts, run_loop
+from tu_shell_agent.orchestrator.loop import (
+    LoopInput,
+    LoopPorts,
+    VerifyInput,
+    run_loop,
+    verify_and_execute,
+)
 from tu_shell_agent.types import (
     DetectionReport,
     ExecuteResult,
@@ -458,3 +464,53 @@ def test_detect_failure_aborts_instead_of_raising():
     assert harness.prompts == []  # 没进生成
     assert "detect-error.txt" in _attempt_names(harness)
     assert any(patch.get("outcome") == "aborted_dependency" for patch in harness.metas)
+
+
+def test_detect_problems_also_writes_terminal_meta():
+    """detect **报 problems**（而不是抛异常）也要落终态。
+
+    这条分支此前不写 meta.json，于是运行目录里会留下"有目录、无 meta.json"的运行，
+    Plan 2 的历史列表读到会缺结论；现在与"detect 抛异常"那条分支对齐。
+    """
+    ports, harness = make_ports([GOOD])
+    ports["toolchain"].detect = lambda: DetectionReport(
+        None, None, None, ("缺 bash", "缺 shellcheck")
+    )
+
+    result = run(ports)
+
+    assert result.outcome == "aborted_dependency"
+    assert result.rounds == 0
+    assert harness.prompts == []  # 预检没过，不进生成
+    assert "detect-error.txt" not in _attempt_names(harness)  # 不是"探测崩了"，别留错证据
+    assert contains_meta(harness, {"outcome": "aborted_dependency", "rounds": 0})
+
+
+def test_verify_and_execute_normalizes_crlf_script_in_place(tmp_path):
+    """规格 §11：脚本文件不得含 \\r（Git Bash 会报 \\r 错）。
+
+    run_loop 路径靠写盘时 `to_lf` 保证这一点；verify_and_execute 校验的是**用户手工改过的
+    既有文件**，Windows 上的编辑器很容易把它存成 CRLF，所以入口必须补一次归一化 ——
+    否则用户在界面上点"重跑改过的脚本"，会看到"脚本莫名失败"而找不到原因。
+    """
+    script = tmp_path / "script.sh"
+    script.write_bytes(b'#!/usr/bin/env bash\r\n# @@TU:BODY@@\r\necho "ok"\r\n')
+    ports, harness = make_ports([GOOD])
+
+    result = verify_and_execute(
+        VerifyInput(
+            script_path=str(script),
+            run_dir=str(tmp_path),
+            round_no=1,
+            config=CONFIG,
+            ports=LoopPorts(**ports),
+        )
+    )
+
+    assert result.outcome == "succeeded"
+    # 必须用 read_bytes 断言：read_text 的通用换行会把 \r\n 悄悄读成 \n，那样即使磁盘上仍是
+    # CRLF 这条断言也会通过（第一版就踩了这个坑：归一化成了死代码而测试却是绿的）。
+    assert b"\r" not in script.read_bytes()
+    # 除换行外内容一字不动（只去 \r，不重排、不裁剪、不翻译）
+    assert script.read_bytes() == b'#!/usr/bin/env bash\n# @@TU:BODY@@\necho "ok"\n'
+    assert "normalized.txt" in _attempt_names(harness)  # 归一化这件事留下证据
