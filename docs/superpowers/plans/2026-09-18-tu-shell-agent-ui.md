@@ -542,18 +542,26 @@ class MainWindow(QMainWindow):
             bottom.addWidget(button)
         bottom.addStretch(1)
 
-        right_column = QVBoxLayout()
-        right_column.addWidget(self.splitter, 1)
-        right_column.addLayout(bottom)
+        # 底部一行：左边历史运行列表，右边两个独立页
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self.history_list, 1)
+        bottom_row.addWidget(self.side_pages, 2)
+
+        root_layout = QVBoxLayout()
+        root_layout.addWidget(self.splitter, 1)
+        root_layout.addLayout(bottom_row, 1)
+        root_layout.addLayout(bottom)
 
         root = QWidget()
-        root.setLayout(right_column)
+        root.setLayout(root_layout)
         self.setCentralWidget(root)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         # 任务 9 会在这里接上 worker 的取消与收尾；此刻必须是安全的 no-op
         super().closeEvent(event)
 ```
+
+> **必须注意（这是一次真实踩坑，实现者已因此挂掉一次）**：`history_list` 与 `side_pages` **必须真的被加进布局**。第一版骨架把它们创建出来、也设了 `objectName`，却忘了 `addWidget`——于是它们没有父对象，`findChild(QWidget, "historyList")` 沿对象树找不到，两条用例直接失败。**Qt 的 `findChild` 只搜对象树，孤立控件不在树里。**
 
 `ui/app.py`：
 
@@ -983,6 +991,18 @@ class AppSettings:
             raise ValueError("未指定保存路径，且此前没有 load() 过")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def default_settings_path() -> Path:
+    """设置的默认位置：Windows 是 %APPDATA%\\<应用名>\\settings.json，Linux 是 ~/.local/share/<应用名>/settings.json。
+
+    用 `QStandardPaths.AppDataLocation` 拿到平台正确的位置——它按 `QApplication.applicationName()` 分目录，
+    而任务 2 的 `app.py` 已经设了 `setApplicationName("tu-shell-agent")`，所以两边必须一致。
+    """
+    from PySide6.QtCore import QStandardPaths
+
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    return Path(base) / "settings.json"
 ```
 
 > **`save()` 的语义**：`load(path)` 要把 `path` 记进 `self._loaded_from`（一个**非 dataclass 字段**，即普通的实例属性），这样界面里 `settings.save()` 就写回原文件；测试里正是这样用的。
@@ -1694,7 +1714,13 @@ class RunController(QObject):
 
 `widgets/confirm_dialog.py`：模态对话框，展示脚本全文并**高亮危险模式**（`rm -rf`、`mkfs`、`dd if=`、`> /dev/sd`、`chmod -R 777 /`、`curl ... | bash`），两个按钮"执行/跳过"。`ConfirmDialog.dangerous_matches(script) -> list[str]` 是**纯函数式**的公开方法，便于单测。
 
-`pages/history.py`：`reload()` 扫 `run_root/*/meta.json`（**必须容忍 bare 与超集两种形状**），列表项形如 `20260918-100000-aaaa · succeeded · 2 轮`；`current_snapshot()` 返回 `{"meta": …, "script": …, "stdout": …}` 供界面回填三区。
+`pages/history.py`：`reload()` 扫 `run_root/*/meta.json`（**必须容忍三种形状**：bare `{outcome, rounds}`、超集 `{runId, sessionId, config, detection, outcome, rounds}`、以及 verify 路径只有 `config` 的中间形态——缺键要当作"未知"而不是 KeyError），列表项形如 `20260918-100000-aaaa · succeeded · 2 轮`；`current_snapshot()` 返回 `{"meta": …, "script": …, "stdout": …}` 供界面回填三区。
+
+**本任务要把任务 2 里那个未使用的导入用起来（这是计划留下的一处冗余，现在收口）**：
+任务 2 的 `main_window.py` 底部左侧放的是一个裸 `QListWidget`（objectName `historyList`），同时又 `from .pages.history import HistoryPage` 却没用它——因为当时还没接线。现在把两者合并：
+- `MainWindow` 的底部左侧改为放 **`HistoryPage` 本身**（替掉裸 `QListWidget`）；
+- `HistoryPage` 内部的那个列表控件必须保留 `objectName="historyList"`，这样任务 2 的测试契约（`findChild(QWidget, "historyList")`）**依然成立**，不必改测试；
+- 接线：`HistoryPage.list_widget` 选中某条 → 三区回填（脚本进中栏、报告/输出进右栏、meta 进状态栏）；`reload()` 在每次运行结束后自动调用一次。
 
 `main_window.py` 接线：把按钮与 `RunController` 的方法连起来；`closeEvent` 改成"若 worker 在跑则 `cancel()` 并 `wait(5000)`，再 `dispose()`"。
 
