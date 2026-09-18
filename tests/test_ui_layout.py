@@ -252,12 +252,26 @@ def test_right_pane_expands_again_when_space_returns(window, qtbot):
     assert "output" not in collapsed, "空间回来了，「执行输出」应当自动展开"
 
 
-def test_section_header_is_not_a_button(window):
-    """标题行只是状态显示，不是按钮：点它不会切换（手动折叠已按用户要求去掉）。"""
+def test_section_header_is_plain_text(window, qtbot):
+    """区块标题是纯文字：没有折叠箭头，也不是按钮（用户裁定：自动折叠不该留手动暗示）。
+
+    收起状态靠"标题变淡"提示（动态属性 collapsed）—— 再挂一个 ▾/▸ 会让人以为要点它。
+    """
     for section in window.right_pane.sections.values():
-        assert section.header.text().startswith(("▾", "▸"))
-        # QLabel 没有 clicked 信号 —— 这一条同时锁住"不要再把它做回按钮"
+        assert not section.header.text().startswith(("▾", "▸", "▶", "▼"))
+        assert section.header.text() in {
+            "校验报告", "执行输出", "模型取舍说明与假设"
+        }
+        # QLabel 没有 clicked 信号 —— 同时锁住"不要再把它做回按钮"
         assert not hasattr(section.header, "clicked")
+        assert section.header.property("collapsed") in ("true", "false")
+
+    # 收起时属性要跟着变（样式表靠它把标题调淡）
+    section = window.right_pane.sections["notes"]
+    section.set_collapsed(True)
+    assert section.header.property("collapsed") == "true"
+    section.set_collapsed(False)
+    assert section.header.property("collapsed") == "false"
 
 
 def test_left_pane_scrolls_instead_of_clipping_when_short(window, qtbot):

@@ -10,16 +10,15 @@
 理由是运行过程中人盯着的是"有没有问题、跑成什么样"；取舍说明是**事后**核对方案约束时才看的，
 所以空间不足时它先让位。校验报告任何时候都不自动收起 —— 它是这一屏的主要结论。
 
-标题行只显示状态、不接收点击（可点的标题会让人以为"这里要手动操作"）。
+标题行是**纯文字**：没有折叠箭头、也不接收点击（用户裁定：既然是自动的，就不该留下让人
+以为要手动操作的东西）。收起状态靠"标题变淡"提示 —— 内容消失了本身就说明它被收起了，
+再挂一个箭头反而像按钮。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
-
-_ARROW_COLLAPSED = "▸"
-_ARROW_EXPANDED = "▾"
 
 # 判定时的缓冲带：正好卡在边界上时不要来回抖（拖分割条时高度常常只差一两像素）
 _HYSTERESIS_PX = 16
@@ -66,9 +65,10 @@ class CollapsibleSection(QWidget):
         self._title = title
         self._collapsed = False
 
-        self.header = QLabel(self._label())
+        self.header = QLabel(self._title)
         self.header.setObjectName("sectionHeader")
         self.header.setProperty("role", "section")
+        self.header.setProperty("collapsed", "false")
 
         self.content = widget
 
@@ -88,15 +88,14 @@ class CollapsibleSection(QWidget):
         if collapsed == self._collapsed:
             return
         self._collapsed = collapsed
-        self.header.setText(self._label())
+        self.header.setProperty("collapsed", "true" if collapsed else "false")
+        # 改动态属性后要重新求值样式表，否则 [collapsed="true"] 那条不生效
+        self.header.style().unpolish(self.header)
+        self.header.style().polish(self.header)
         self.content.setVisible(not collapsed)
         self._refresh_tooltip()
         if emit:
             self.auto_state_changed.emit(collapsed)
-
-    def _label(self) -> str:
-        arrow = _ARROW_COLLAPSED if self._collapsed else _ARROW_EXPANDED
-        return f"{arrow} {self._title}"
 
     def _refresh_tooltip(self) -> None:
         if self._collapsed:

@@ -186,6 +186,8 @@ QLabel#paneHeader, QLabel[role="section"] {{
     padding: 2px 0;
 }}
 QLabel[role="hint"], QLabel#statusLabel {{ color: {css('fg_secondary')}; }}
+/* 栏内区块标题：收起时变淡（自动折叠没有箭头，靠这个提示状态） */
+QLabel#sectionHeader[collapsed="true"] {{ color: {css('fg_disabled')}; }}
 QLabel[role="muted"] {{ color: {css('fg_tertiary')}; font-size: {css('font_size_small')}; }}
 
 /* ── 面板 ─────────────────────────────────────────────────────────── */
@@ -337,8 +339,16 @@ QToolTip {{
     border-radius: {css('radius')};
     padding: 4px 6px;
 }}
+/* 滚动条轨道用**所在控件**的底色，不用 transparent：
+   透明时轨道区域显示的是背后那一层（卡片色），与控件自己的底色不一致。
+   注：这条是为了配色一致，**不声称**修掉了用户报的"圆角没覆盖完全" —— 那个现象我复现过一次，
+   但在当前代码里再也复现不出来（两种写法取色完全相同），所以没有对应的测试。 */
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
+QPlainTextEdit:read-only QScrollBar, QTextBrowser QScrollBar {{ background: {css('bg_under')}; }}
+QPlainTextEdit:!read-only QScrollBar, QTextEdit:!read-only QScrollBar {{ background: {css('bg_input')}; }}
+QListWidget QScrollBar, QTreeWidget QScrollBar, QTableWidget QScrollBar,
+QScrollArea QScrollBar {{ background: {css('bg_elevated')}; }}
 QScrollBar::handle {{ background-color: {css('border_heavy')}; border-radius: 4px; min-height: 28px; }}
 QScrollBar::handle:hover {{ background-color: {css('fg_disabled')}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
