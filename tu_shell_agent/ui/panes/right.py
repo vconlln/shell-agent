@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, blocks_run
-from ..widgets.collapsible import CollapsibleSection
+from ..widgets.collapsible import CollapsibleSection, plan_collapse
 from ..theme import BLOCKING_COLOR, NON_BLOCKING_COLOR, STDERR_COLOR
 
 # 级别由重到轻：与 types.SEVERITY_RANK、左栏阻断级别下拉框同源
@@ -66,7 +66,7 @@ _UNSET_ASSUMPTIONS = "（模型未声明任何假设）"
 class RightPane(QWidget):
     """shellcheck 报告分组 + 执行输出 + 模型取舍说明。"""
 
-    section_toggled = Signal(str, bool)   # (区块 key, 是否已收起)
+    sections_auto_collapsed = Signal(tuple)   # 因空间不足被自动收起的 key 集合（测试/提示用）
 
     finding_activated = Signal(int)     # 发现所在行号，中栏据此跳转
 
@@ -132,8 +132,6 @@ class RightPane(QWidget):
             "output": CollapsibleSection("执行输出", output_body),
             "notes": CollapsibleSection("模型取舍说明与假设", notes_body),
         }
-        for key, section in self.sections.items():
-            section.toggled.connect(lambda collapsed, k=key: self.section_toggled.emit(k, collapsed))
 
         layout = QVBoxLayout(self)
         for key, stretch in (("findings", 3), ("output", 3), ("notes", 2)):
@@ -154,15 +152,34 @@ class RightPane(QWidget):
             layout.addWidget(widget, 1 if (stretch and index == len(widgets) - 1) else 0)
         return body
 
-    # ---- 折叠状态（由窗口负责持久化）-------------------------------------
-    def collapsed_state(self) -> dict[str, bool]:
-        return {key: section.is_collapsed() for key, section in self.sections.items()}
+    # ---- 折叠：按可用高度自动判定 ---------------------------------------
+    # 优先级从高到低：运行中盯着的是"有没有问题、跑成什么样"，取舍说明是事后核对用的。
+    _SECTION_ORDER: tuple[tuple[str, int], ...] = (
+        ("findings", 150),   # 校验报告：永不自动收起
+        ("output", 150),     # 执行输出
+        ("notes", 110),      # 模型取舍说明与假设
+    )
 
-    def set_collapsed_state(self, state: dict) -> None:
-        """程序化还原折叠状态（不发信号，避免"还原"被当成"用户操作"再写回设置）。"""
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self.apply_auto_collapse()
+
+    def apply_auto_collapse(self) -> set[str]:
+        """按当前高度收起/展开三块，返回被收起的 key 集合。
+
+        为什么要自动（用户裁定，2026-09-19）：折叠不该要用户手动点 —— 空间够就全展开，
+        不够才收，收回来的高度给更需要看的那块。之前那套"默认展开 + 点击切换 + 状态写进
+        设置"已删除：用户明确说这里不需要手动折叠。
+        """
+        should_collapse = plan_collapse(
+            max(self.height(), 0), list(self._SECTION_ORDER), keep_expanded="findings"
+        )
         for key, section in self.sections.items():
-            if key in state:
-                section.set_collapsed(bool(state[key]))
+            section.set_collapsed(key in should_collapse)
+        if should_collapse != getattr(self, "_auto_collapsed", None):
+            self._auto_collapsed = set(should_collapse)
+            self.sections_auto_collapsed.emit(tuple(sorted(should_collapse)))
+        return should_collapse
 
     # ---- 阻断级别 -------------------------------------------------------------
 

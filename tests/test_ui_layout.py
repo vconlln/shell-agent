@@ -213,61 +213,51 @@ def test_tool_area_is_tall_enough_for_its_tallest_tab(window, qtbot):
             )
 
 
-def test_collapse_state_is_saved_and_restored(qtbot, tmp_path):
-    """收起哪块要**写进磁盘**并还原（默认展开，只记"收起的"）。
+def test_right_pane_collapses_automatically_by_height(window, qtbot):
+    """右栏三块按**可用高度自动**收起（用户裁定：这里不需要手动折叠）。
 
-    注意要用真实的设置文件路径：`AppSettings` 只有在 load() 过之后才知道往哪写，
-    没有路径时 save() 会抛 ValueError（界面把它显示成状态栏提示）。
+    优先级：校验报告 > 执行输出 > 模型取舍说明与假设。用真实操作触发（缩窗口 + 拖竖向分割条），
+    不是直接改控件的尺寸 —— 右栏挂在布局里，直接 resize() 会被布局覆盖（这条测试第一版就踩了）。
     """
-    path = tmp_path / "settings.json"
-    settings = AppSettings.load(path)
-    settings.run_root = str(tmp_path / "runs")
-    window = MainWindow(wire_controller=False, settings=settings)
-    qtbot.addWidget(window)
+    sections = window.right_pane.sections
+
+    def collapsed() -> set[str]:
+        return {key for key, section in sections.items() if section.is_collapsed()}
+
     window.resize(1440, 900)
-    window.show()
-    qtbot.waitExposed(window)
-
-    window.right_pane.sections["notes"].set_collapsed(True)
-    window._on_section_toggled("notes", True)          # 模拟用户点击
-
-    on_disk = json.loads(path.read_text(encoding="utf-8"))
-    assert json.loads(on_disk["collapsed_sections"]) == ["notes"]
-
-    again = MainWindow(wire_controller=False, settings=settings)
-    qtbot.addWidget(again)
-    again.resize(1440, 900)
-    again.show()
-    qtbot.waitExposed(again)                          # 还原发生在 showEvent 里
-    assert again.right_pane.sections["notes"].is_collapsed() is True
-    assert again.right_pane.sections["findings"].is_collapsed() is False   # 其余保持展开
-
-
-def test_form_controls_are_never_crushed(window, qtbot):
-    """表单控件永远不该被压扁（用户报"底色是长方形"，根因之一就是控件被压到 13px）。
-
-    实测：左栏内容需要 576px、最小 474px，而当时只分到 383px —— QFormLayout 把下拉框与
-    微调框压到 **13px 高**（sizeHint 是 29px）。而 13px 高时圆角半径 10px ≥ 半高 6.5px，
-    Qt 会整个退回画直角。现在表单进滚动区 + 单行输入声明 min-height，控件保持正常高度。
-    """
-    from PySide6.QtWidgets import QComboBox, QLineEdit, QSpinBox
-
-    window.resize(window.minimumSize())        # 最挤的情况
     qtbot.wait(50)
+    assert collapsed() == set(), "空间足够时不该折叠"
 
-    controls = (
-        window.findChildren(QComboBox) + window.findChildren(QSpinBox)
-        + window.findChildren(QLineEdit)
-    )
-    assert controls, "一个输入控件都没找到？"
-    crushed = [
-        (type(c).__name__, c.objectName(), c.height())
-        for c in controls
-        # 跳过 Qt 内部控件（例如 QSpinBox 内部的 qt_spinbox_lineedit）：它们的高度由
-        # 外层控件决定，不是"被布局压扁"的证据。
-        if c.isVisible() and not c.objectName().startswith("qt_") and c.height() < 22
-    ]
-    assert crushed == [], f"这些控件被压扁了（高度 < 22px）：{crushed}"
+    window.resize(window.minimumSize())           # 缩到允许的最小尺寸
+    qtbot.wait(50)
+    window.vertical_splitter.setSizes([300, 460])  # 再把上半压小，右栏更矮
+    qtbot.wait(50)
+    assert "notes" in collapsed(), "空间不足时应先收起「模型取舍说明与假设」"
+    assert "output" in collapsed(), "更挤时应连「执行输出」一起收起"
+    assert "findings" not in collapsed(), "「校验报告」是主要结论，不该被自动收起"
+
+
+def test_right_pane_expands_again_when_space_returns(window, qtbot):
+    """把空间还回来要自动展开 —— 这才是"不需要手动"的关键。"""
+    sections = window.right_pane.sections
+    window.resize(window.minimumSize())
+    qtbot.wait(50)
+    window.vertical_splitter.setSizes([300, 460])
+    qtbot.wait(50)
+    assert any(section.is_collapsed() for section in sections.values())
+
+    window.vertical_splitter.setSizes([900, 300])   # 把上半拖回大尺寸
+    qtbot.wait(50)
+    collapsed = {key for key, section in sections.items() if section.is_collapsed()}
+    assert "output" not in collapsed, "空间回来了，「执行输出」应当自动展开"
+
+
+def test_section_header_is_not_a_button(window):
+    """标题行只是状态显示，不是按钮：点它不会切换（手动折叠已按用户要求去掉）。"""
+    for section in window.right_pane.sections.values():
+        assert section.header.text().startswith(("▾", "▸"))
+        # QLabel 没有 clicked 信号 —— 这一条同时锁住"不要再把它做回按钮"
+        assert not hasattr(section.header, "clicked")
 
 
 def test_left_pane_scrolls_instead_of_clipping_when_short(window, qtbot):

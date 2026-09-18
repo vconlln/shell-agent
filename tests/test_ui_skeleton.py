@@ -43,13 +43,17 @@ def test_close_event_cancels_running_engine_without_raising(qtbot):
     window.close()  # 未运行时也必须安全
 
 
-def test_right_pane_blocks_are_collapsible_and_default_expanded(qtbot):
-    """右栏三块可折叠、默认展开（用户裁定：默认收起会让人以为功能不存在）。"""
+def test_right_pane_has_three_auto_collapsible_blocks(qtbot):
+    """右栏三块的折叠是**按可用高度自动**判定的（用户裁定：不需要手动折叠）。"""
     window = MainWindow()
     qtbot.addWidget(window)
 
     sections = window.right_pane.sections
     assert set(sections) == {"findings", "output", "notes"}
-    for name, section in sections.items():
-        assert section.is_collapsed() is False, f"{name} 默认被收起了"
-        assert section.content.isVisible() or not window.isVisible()
+    # 自动判定是纯函数，直接验它对高度的反应
+    from tu_shell_agent.ui.widgets.collapsible import plan_collapse
+
+    order = list(window.right_pane._SECTION_ORDER)
+    assert plan_collapse(1000, order, keep_expanded="findings") == set()
+    assert plan_collapse(100, order, keep_expanded="findings") == {"notes", "output"}
+    assert "findings" not in plan_collapse(60, order, keep_expanded="findings")

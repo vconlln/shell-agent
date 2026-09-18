@@ -46,8 +46,6 @@ class AppSettings:
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：
     # 与其它设置同一个文件，用户能直接看、能删、能抄给同事。
     layout: str = ""
-    # 右栏哪些区块被收起了（JSON 数组，例如 ["notes"]）。默认展开，用户收哪块记哪块。
-    collapsed_sections: str = ""
 
     def __post_init__(self) -> None:
         # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：

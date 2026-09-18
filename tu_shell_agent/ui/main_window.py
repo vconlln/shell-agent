@@ -143,7 +143,6 @@ class MainWindow(QMainWindow):
         for splitter in self.findChildren(QSplitter):
             splitter.splitterMoved.connect(lambda *_args: self._save_layout())
         # 折叠状态也记进设置（默认展开，用户收起哪块就记哪块）
-        self.right_pane.section_toggled.connect(self._on_section_toggled)
         self._apply_settings_to_inputs()
         # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
         # 用户一改就该立刻反映，不能等到下次运行。
@@ -218,29 +217,6 @@ class MainWindow(QMainWindow):
         if not self._layout_restored:
             self._layout_restored = True
             self._restore_layout()
-            self._restore_sections()
-
-    def _on_section_toggled(self, key: str, collapsed: bool) -> None:
-        """记下用户收起了哪块（默认展开，所以只记"收起的"）。"""
-        state = self.right_pane.collapsed_state()
-        self.settings.collapsed_sections = json.dumps(
-            sorted(k for k, value in state.items() if value), ensure_ascii=False
-        )
-        try:
-            self.settings.save()
-        except (OSError, ValueError) as error:
-            self.set_status(f"折叠状态未能保存：{error}")
-
-    def _restore_sections(self) -> None:
-        raw = getattr(self.settings, "collapsed_sections", "") or ""
-        if not raw.strip():
-            return
-        try:
-            collapsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return
-        if isinstance(collapsed, list):
-            self.right_pane.set_collapsed_state({str(key): True for key in collapsed})
 
     def _restore_layout(self) -> None:
         """按上次拖出来的尺寸还原；没存过或存坏了就用默认比例。"""
@@ -301,7 +277,6 @@ class MainWindow(QMainWindow):
         for splitter in self.findChildren(QSplitter):
             splitter.splitterMoved.connect(lambda *_args: self._save_layout())
         # 折叠状态也记进设置（默认展开，用户收起哪块就记哪块）
-        self.right_pane.section_toggled.connect(self._on_section_toggled)
         self._apply_settings_to_inputs()
         if self.settings.templates_dir:
             # 模板目录改了就得换库：不换的话设置页显示"已保存"，模板面板还指着旧目录
