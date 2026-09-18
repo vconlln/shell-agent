@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, blocks_run
+from ..widgets.collapsible import CollapsibleSection
 from ..theme import BLOCKING_COLOR, NON_BLOCKING_COLOR, STDERR_COLOR
 
 # 级别由重到轻：与 types.SEVERITY_RANK、左栏阻断级别下拉框同源
@@ -65,6 +66,8 @@ _UNSET_ASSUMPTIONS = "（模型未声明任何假设）"
 class RightPane(QWidget):
     """shellcheck 报告分组 + 执行输出 + 模型取舍说明。"""
 
+    section_toggled = Signal(str, bool)   # (区块 key, 是否已收起)
+
     finding_activated = Signal(int)     # 发现所在行号，中栏据此跳转
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -108,22 +111,58 @@ class RightPane(QWidget):
         self.notes_view.setObjectName("notesView")
         self.notes_view.setReadOnly(True)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.findings_header)
-        layout.addWidget(self.findings_summary)
+        # 三块各自可折叠（默认展开）：窗口矮的时候让用户自己决定先看哪块，而不是让布局
+        # 把三块一起压扁。内部控件仍挂在对象树上（折叠只是 setVisible(False)），
+        # 所以 findChild 与既有代码、测试都不受影响。
+        findings_body = self._wrap(
+            [self.findings_header, self.findings_summary, self.findings_tree], stretch=True
+        )
+        output_body = self._wrap(
+            [_section("stdout / stderr（stderr 标红）"), self.execute_summary, self.output_view],
+            stretch=True,
+        )
+        notes_body = self._wrap([self.notes_header, self.notes_view], stretch=True)
+        # 三块各自的最小高度：折叠能解决"没空间"，但**展开着**的时候不能让布局把某一块压成一条缝
+        # （实测过：窗口高 560px 时报告树与输出区各剩 35px，等于看不见）。
         self.findings_tree.setMinimumHeight(110)
         self.output_view.setMinimumHeight(110)
         self.notes_view.setMinimumHeight(80)
-        layout.addWidget(self.findings_tree, 3)
-        layout.addWidget(_section("执行输出（stdout / stderr，stderr 标红）"))
-        layout.addWidget(self.execute_summary)
-        layout.addWidget(self.output_view, 3)
-        layout.addWidget(self.notes_header)
-        layout.addWidget(self.notes_view, 2)
+        self.sections = {
+            "findings": CollapsibleSection("校验报告", findings_body),
+            "output": CollapsibleSection("执行输出", output_body),
+            "notes": CollapsibleSection("模型取舍说明与假设", notes_body),
+        }
+        for key, section in self.sections.items():
+            section.toggled.connect(lambda collapsed, k=key: self.section_toggled.emit(k, collapsed))
+
+        layout = QVBoxLayout(self)
+        for key, stretch in (("findings", 3), ("output", 3), ("notes", 2)):
+            layout.addWidget(self.sections[key], stretch)
 
         self._refresh_findings()
         self.execute_summary.setText("执行结果：尚未执行")
         self.notes_view.setPlainText(f"{_UNSET_NOTES}\n\n假设（脚本成立的前提）：\n{_UNSET_ASSUMPTIONS}")
+
+    @staticmethod
+    def _wrap(widgets: Sequence[QWidget], *, stretch: bool) -> QWidget:
+        """把若干控件装进一个容器（折叠区块的内容体），返回容器。"""
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        for index, widget in enumerate(widgets):
+            layout.addWidget(widget, 1 if (stretch and index == len(widgets) - 1) else 0)
+        return body
+
+    # ---- 折叠状态（由窗口负责持久化）-------------------------------------
+    def collapsed_state(self) -> dict[str, bool]:
+        return {key: section.is_collapsed() for key, section in self.sections.items()}
+
+    def set_collapsed_state(self, state: dict) -> None:
+        """程序化还原折叠状态（不发信号，避免"还原"被当成"用户操作"再写回设置）。"""
+        for key, section in self.sections.items():
+            if key in state:
+                section.set_collapsed(bool(state[key]))
 
     # ---- 阻断级别 -------------------------------------------------------------
 

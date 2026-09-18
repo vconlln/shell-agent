@@ -347,8 +347,16 @@ QPlainTextEdit#templateBody, QPlainTextEdit#templatePreview, QPlainTextEdit#conf
     font-size: {css('font_size_small')};
 }}
 QPlainTextEdit#notesView {{ font-family: inherit; }}
-/* 对话记录与输入框也用等宽：里面的脚本片段要能对齐 */
-QPlainTextEdit#chatTranscript, QPlainTextEdit#chatInput {{ font-family: "{mono}"; font-size: {css('font_size_small')}; }}
+/* 对话记录与输入框也用等宽：里面的脚本片段要能对齐。
+   记录区**显式**给"更深的只读底"：它挂在工具区页签里之后，`QPlainTextEdit:read-only`
+   这条通用规则不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
+   "只读区看起来和输入框一样"会让人以为可以直接在记录里打字。 */
+QPlainTextEdit#chatTranscript {{
+    background-color: {css('bg_under')};
+    font-family: "{mono}";
+    font-size: {css('font_size_small')};
+}}
+QPlainTextEdit#chatInput {{ font-family: "{mono}"; font-size: {css('font_size_small')}; }}
 
 /* ── 底栏状态：单行、次级色、上方一条细线 ─────────────────────── */
 QLabel#statusLabel {{

@@ -22,6 +22,7 @@ from .panes.right import RightPane
 from .panes.templates import TemplatesPane
 from .pages.history import HistoryPage
 from .pages.selfcheck import SelfCheckPage
+from .chat import ChatPanel
 from .pages.settings_page import SettingsPage
 from .settings import AppSettings, default_settings_path, default_templates_dir
 from ..template_store.store import TemplateStore
@@ -76,15 +77,10 @@ class MainWindow(QMainWindow):
         # 每栏顶部一行小标题（Codex 的分区感来自"小号、次级色、字距略宽"的栏头）。
         # 用包装控件而不是往各 pane 里塞标签：pane 的布局归 pane 自己管，
         # 而且骨架测试是按 objectName 找 pane 的，包一层不影响 findChild。
-        left_column = QSplitter(Qt.Orientation.Vertical)
-        self.left_column = left_column
-        left_column.addWidget(self.left_pane)
-        left_column.addWidget(self.templates_pane)
-        left_column.setSizes([400, 500])
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")   # 测试契约
-        self.splitter.addWidget(_titled(left_column, "方案与模板"))
+        self.splitter.addWidget(_titled(self.left_pane, "方案与运行参数"))
         self.splitter.addWidget(_titled(self.center_pane, "脚本与轮次"))
         self.splitter.addWidget(_titled(self.right_pane, "校验与输出"))
         self.splitter.setSizes([360, 620, 460])
@@ -97,10 +93,17 @@ class MainWindow(QMainWindow):
         self.selfcheck_page = SelfCheckPage()
         self.settings_page = SettingsPage()
         self.settings_page.set_settings(self.settings)
-        self.side_pages = QTabWidget()
-        self.side_pages.setObjectName("sidePages")     # 测试契约
-        self.side_pages.addTab(self.selfcheck_page, "环境自检")
-        self.side_pages.addTab(self.settings_page, "设置")
+        self.chat_panel = ChatPanel()
+
+        # 工具区：低频面板都收进这一行的页签（用户裁定的排布）。
+        # 主区三栏因此各自只干一件事：方案与参数 / 脚本与轮次 / 校验与输出。
+        self.tool_tabs = QTabWidget()
+        self.tool_tabs.setObjectName("toolTabs")
+        self.tool_tabs.addTab(self.history_page, "历史运行")
+        self.tool_tabs.addTab(self.templates_pane, "模板库")
+        self.tool_tabs.addTab(self.chat_panel, "模型对话")
+        self.tool_tabs.addTab(self.selfcheck_page, "环境自检")
+        self.tool_tabs.addTab(self.settings_page, "设置")
 
         self.start_button = QPushButton("开始")
         # 主操作用白底黑字（Codex 的主按钮就这样），其余按钮是"白 5% 叠加 + 1px 边框"
@@ -117,12 +120,6 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("statusLabel")
         bottom.addWidget(self.status_label, 1)
 
-        # 历史与两个独立页之间也要能拖（原来是一个 QHBoxLayout，比例写死 1:2）。
-        self.bottom_row = QSplitter(Qt.Orientation.Horizontal)
-        self.bottom_row.setObjectName("bottomSplitter")
-        self.bottom_row.addWidget(self.history_page)   # 页面自己已有"历史运行"栏头
-        self.bottom_row.addWidget(self.side_pages)
-        self.bottom_row.setSizes([420, 900])
 
         # 上下两层（三栏区 / 历史与设置区）放进竖向分割器：原来是一个 QVBoxLayout 的
         # addWidget(..., 1) + addLayout(..., 1)，比例固定 1:1，用户**根本没法调** ——
@@ -130,7 +127,7 @@ class MainWindow(QMainWindow):
         self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
         self.vertical_splitter.setObjectName("verticalSplitter")
         self.vertical_splitter.addWidget(self.splitter)
-        self.vertical_splitter.addWidget(self.bottom_row)
+        self.vertical_splitter.addWidget(_titled(self.tool_tabs, "工具区"))
         self.vertical_splitter.setSizes([560, 320])
 
         root_layout = QVBoxLayout()
@@ -143,8 +140,10 @@ class MainWindow(QMainWindow):
 
         # 设置里存的值要体现在界面上，否则用户会以为设置没生效——设置页那四个运行参数
         # （轮次/两个超时/阻断级别）此前根本没人读，是四个死值。
-        for splitter in (self.splitter, self.left_column, self.vertical_splitter, self.bottom_row):
+        for splitter in self.findChildren(QSplitter):
             splitter.splitterMoved.connect(lambda *_args: self._save_layout())
+        # 折叠状态也记进设置（默认展开，用户收起哪块就记哪块）
+        self.right_pane.section_toggled.connect(self._on_section_toggled)
         self._apply_settings_to_inputs()
         # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
         # 用户一改就该立刻反映，不能等到下次运行。
@@ -166,7 +165,7 @@ class MainWindow(QMainWindow):
         for widget, minimum in (
             (self.left_pane, 220), (self.templates_pane, 220),
             (self.center_pane, 240), (self.right_pane, 260),
-            (self.history_page, 150), (self.side_pages, 190),
+            (self.tool_tabs, 300),
         ):
             widget.setMinimumHeight(minimum)
         # 各栏还要有最小**宽度**：只设高度的话，横向把窗口压窄时三栏会一路缩到贴边
@@ -175,13 +174,15 @@ class MainWindow(QMainWindow):
         self.templates_pane.setMinimumWidth(240)
         self.center_pane.setMinimumWidth(300)
         self.right_pane.setMinimumWidth(260)
-        self.history_page.setMinimumWidth(220)
-        self.side_pages.setMinimumWidth(260)
+        self.tool_tabs.setMinimumWidth(300)
 
         # 窗口本身的最小尺寸 = 三栏最小宽 + 两条 8px 把手 + 边距；高度 = 左列两块 + 下方 + 按钮条。
         # 低于这个尺寸这个界面本来就不可用，与其让 Qt 把内容裁掉，不如让窗口管理器直接不许缩到那么小
         # （平铺窗口管理器也会读 min-size 提示）。
-        self.setMinimumSize(960, 700)
+        # 高度的下限按"工具区里最高的那个页签装得下"来定：实测对话面板 minimumSizeHint
+        # 305px、模板面板 465px、历史页 452px —— 给 300 会让对话面板溢出被裁掉（症状是
+        # 输入框盖在记录区上、内容看不全）。所以工具区最小 300、窗口相应留到 780。
+        self.setMinimumSize(960, 780)
 
         self._layout_restored = False
         self.controller = None
@@ -194,9 +195,8 @@ class MainWindow(QMainWindow):
         换 Qt 版本也不会失效，出问题时用户能自己看一眼。"""
         return {
             "main": self.splitter.sizes(),
-            "leftColumn": self.left_column.sizes(),
             "vertical": self.vertical_splitter.sizes(),
-            "bottom": self.bottom_row.sizes(),
+            "center": self.center_pane.splitter.sizes(),
         }
 
     def _save_layout(self) -> None:
@@ -218,6 +218,29 @@ class MainWindow(QMainWindow):
         if not self._layout_restored:
             self._layout_restored = True
             self._restore_layout()
+            self._restore_sections()
+
+    def _on_section_toggled(self, key: str, collapsed: bool) -> None:
+        """记下用户收起了哪块（默认展开，所以只记"收起的"）。"""
+        state = self.right_pane.collapsed_state()
+        self.settings.collapsed_sections = json.dumps(
+            sorted(k for k, value in state.items() if value), ensure_ascii=False
+        )
+        try:
+            self.settings.save()
+        except (OSError, ValueError) as error:
+            self.set_status(f"折叠状态未能保存：{error}")
+
+    def _restore_sections(self) -> None:
+        raw = getattr(self.settings, "collapsed_sections", "") or ""
+        if not raw.strip():
+            return
+        try:
+            collapsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if isinstance(collapsed, list):
+            self.right_pane.set_collapsed_state({str(key): True for key in collapsed})
 
     def _restore_layout(self) -> None:
         """按上次拖出来的尺寸还原；没存过或存坏了就用默认比例。"""
@@ -232,9 +255,8 @@ class MainWindow(QMainWindow):
             return
         for key, splitter in (
             ("main", self.splitter),
-            ("leftColumn", self.left_column),
             ("vertical", self.vertical_splitter),
-            ("bottom", self.bottom_row),
+            ("center", self.center_pane.splitter),
         ):
             sizes = saved.get(key)
             if isinstance(sizes, list) and len(sizes) == splitter.count():
@@ -276,8 +298,10 @@ class MainWindow(QMainWindow):
         self.settings = self.settings_page.collect()
         self.history_page.run_root = self.settings.run_root
         self.history_page.reload()
-        for splitter in (self.splitter, self.left_column, self.vertical_splitter, self.bottom_row):
+        for splitter in self.findChildren(QSplitter):
             splitter.splitterMoved.connect(lambda *_args: self._save_layout())
+        # 折叠状态也记进设置（默认展开，用户收起哪块就记哪块）
+        self.right_pane.section_toggled.connect(self._on_section_toggled)
         self._apply_settings_to_inputs()
         if self.settings.templates_dir:
             # 模板目录改了就得换库：不换的话设置页显示"已保存"，模板面板还指着旧目录

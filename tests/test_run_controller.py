@@ -790,7 +790,7 @@ def test_ask_creates_a_session_and_streams_the_reply(qtbot, tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text("把 .log 清掉，但别动 logs/ 目录", encoding="utf-8")
     window.left_pane.set_plan(str(plan))
-    chat = window.center_pane.chat
+    chat = window.chat_panel
 
     chat.input.setPlainText("为什么第一轮失败了？")
     chat.send_button.click()
@@ -821,9 +821,9 @@ def test_ask_reuses_the_existing_run_session(qtbot, tmp_path):
     controller._run_dir = str(run_dir)
     controller._session_id = "ses_运行里的"
 
-    window.center_pane.chat.input.setPlainText("解释一下这条报告")
-    window.center_pane.chat.send_button.click()
-    qtbot.waitUntil(lambda: window.center_pane.chat.send_button.isEnabled(), timeout=10_000)
+    window.chat_panel.input.setPlainText("解释一下这条报告")
+    window.chat_panel.send_button.click()
+    qtbot.waitUntil(lambda: window.chat_panel.send_button.isEnabled(), timeout=10_000)
 
     assert opencode.start_calls == 0, "不该另起会话"
     assert opencode.questions[0][0] == "ses_运行里的"
@@ -838,7 +838,7 @@ def test_extract_script_puts_it_in_the_center_pane_without_running_it(qtbot, tmp
         opencode=_ChattyOpencode(), toolchain=toolchain, window=window,
         run_root=str(tmp_path / "runs"),
     )
-    chat = window.center_pane.chat
+    chat = window.chat_panel
     chat.add_assistant("改好的版本：\n\n```bash\necho 来自对话的脚本\n```\n")
 
     chat.extract_button.click()
@@ -861,7 +861,7 @@ def test_assistant_delta_streams_into_the_chat_transcript(qtbot, tmp_path):
     controller._on_event(RunEvent("assistant_delta", 1, {"text": "#!/usr/bin/env bash\n"}))
     controller._on_event(RunEvent("assistant_delta", 1, {"text": "echo hi\n"}))
 
-    text = window.center_pane.chat.transcript_text()
+    text = window.chat_panel.transcript_text()
     assert "第 1 轮 · 模型输出" in text
     assert "echo hi" in text
 

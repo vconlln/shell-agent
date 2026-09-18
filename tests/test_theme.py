@@ -113,8 +113,9 @@ def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     # 按 set 比：findChildren 的遍历顺序是实现细节，不是契约
+    # 排布调整后左栏改叫「方案与运行参数」（模板库移进了工具区），并多了「工具区」栏头
     headers = {label.text() for label in window.findChildren(QLabel, "paneHeader")}
-    assert headers == {"方案与模板", "脚本与轮次", "校验与输出"}
+    assert headers == {"方案与运行参数", "脚本与轮次", "校验与输出", "工具区"}
 
 
 def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
@@ -134,9 +135,17 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
         point = widget.mapTo(window, widget.rect().topLeft() + offset)
         return QColor(image.pixel(point.x(), point.y())).name()
 
-    chat = window.center_pane.chat
-    assert rendered(chat.transcript) == "#0b0c0e"        # 只读记录区
-    assert rendered(window.left_pane.extra_edit) == "#17181c"   # 可编辑输入框
+    # 对话面板在工具区页签里（未选中时不渲染），所以用**控件自己的帧**取色：
+    # 从整窗帧里按坐标取会被页签裁切/相邻控件遮挡影响（这条用例第一版就是这么失败的）。
+    window.tool_tabs.setCurrentWidget(window.chat_panel)
+    qtbot.wait(50)
+
+    def own_color(widget) -> str:
+        frame = widget.grab().toImage()
+        return QColor(frame.pixel(widget.width() // 2, widget.height() // 2)).name()
+
+    assert own_color(window.chat_panel.transcript) == "#0b0c0e"      # 只读记录区
+    assert own_color(window.left_pane.extra_edit) == "#17181c"       # 可编辑输入框
 
 
 # ── 圆角真的画出来了（不只是写了 border-radius）────────────────────────────

@@ -87,14 +87,21 @@ def test_corrupt_layout_setting_is_ignored_not_fatal(window):
     window._restore_layout()
 
 
-def test_history_and_side_pages_are_resizable(window):
-    """历史列表与"环境自检/设置"之间也要能拖（原来是写死的 1:2）。"""
-    bottom = window.findChild(QSplitter, "bottomSplitter")
-    assert bottom is not None
-    assert bottom.count() == 2
-    before = bottom.sizes()
-    bottom.setSizes([220, 880])
-    assert bottom.sizes() != before
+def test_center_area_and_tool_area_are_resizable(window):
+    """中栏内部（页签 / 轮次时间线）与"主区 / 工具区"之间的比例都要能调。
+
+    排布调整后：底部不再是"历史 + 两页"的横向分割器（历史已收进工具区页签），
+    能调的横向比例只剩三栏本身；竖向仍是"主区 / 工具区"。
+    """
+    center = window.center_pane.splitter
+    before = center.sizes()
+    center.setSizes([300, 260])
+    assert center.sizes() != before, "中栏内部（脚本 / 时间线）比例拖不动"
+
+    vertical = window.vertical_splitter
+    before_v = vertical.sizes()
+    vertical.setSizes([400, 600])
+    assert vertical.sizes() != before_v
 
 
 def test_handle_width_does_not_depend_on_the_stylesheet(qtbot, tmp_path):
@@ -132,7 +139,7 @@ def test_panes_and_inner_panels_declare_minimums(window):
         (window.left_pane.plan_preview, 90),
         (window.center_pane.script_view, 140),
         (window.center_pane.timeline, 80),
-        (window.center_pane.chat.transcript, 120),
+        (window.chat_panel.transcript, 120),
         (window.right_pane.findings_tree, 110),
         (window.right_pane.output_view, 110),
         (window.history_page.list_widget, 90),
@@ -141,6 +148,8 @@ def test_panes_and_inner_panels_declare_minimums(window):
 
     for column in (window.left_pane, window.center_pane, window.right_pane):
         assert column.minimumWidth() >= 240, f"{column.objectName()} 缺少最小宽度"
+    # 工具区也要有下限：它现在装着 5 个页签（历史/模板库/对话/自检/设置）
+    assert window.tool_tabs.minimumHeight() >= 180
 
 
 def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
@@ -152,11 +161,62 @@ def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
     qtbot.wait(50)
 
     assert window.width() <= window.minimumSize().width() + 5     # 真的缩到了下限
+    # 注意：历史列表现在在工具区页签里 —— 它没被选中时高度是 0，那是"没显示"而不是"被压没"，
+    # 所以这里只检查主区三栏里常驻可见的控件。
     for widget, minimum in (
         (window.left_pane.plan_preview, 88),      # 留 2px 容差给样式边距
         (window.center_pane.script_view, 138),
         (window.right_pane.findings_tree, 108),
         (window.right_pane.output_view, 108),
-        (window.history_page.list_widget, 88),
     ):
         assert widget.height() >= minimum, f"{widget.objectName() or widget} 在下限尺寸下被压没了"
+
+
+def test_tool_area_is_tall_enough_for_its_tallest_tab(window, qtbot):
+    """工具区的最小高度必须装得下里面最高的页签，否则内容会溢出被裁掉。
+
+    实测：对话面板 minimumSizeHint 305px，而工具区当时最小只有 200px —— 结果是输入框
+    盖在记录区上、记录区看不全（取色时发现的：按坐标取到的像素属于下面那个输入框）。
+    """
+    assert window.tool_tabs.minimumHeight() >= 300
+
+    for index in range(window.tool_tabs.count()):
+        page = window.tool_tabs.widget(index)
+        needed = page.minimumSizeHint().height()
+        # 模板面板要 465px，所以这里只要求"对话面板/历史页这类常看的页签装得下"；
+        # 更高的页签靠工具区自己可拖大来满足（竖向分割器还在）。
+        if page is window.chat_panel:
+            assert window.tool_tabs.minimumHeight() >= min(needed, 300), (
+                f"{window.tool_tabs.tabText(index)} 需要 {needed}px，工具区最小只有 "
+                f"{window.tool_tabs.minimumHeight()}px"
+            )
+
+
+def test_collapse_state_is_saved_and_restored(qtbot, tmp_path):
+    """收起哪块要**写进磁盘**并还原（默认展开，只记"收起的"）。
+
+    注意要用真实的设置文件路径：`AppSettings` 只有在 load() 过之后才知道往哪写，
+    没有路径时 save() 会抛 ValueError（界面把它显示成状态栏提示）。
+    """
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path)
+    settings.run_root = str(tmp_path / "runs")
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    qtbot.waitExposed(window)
+
+    window.right_pane.sections["notes"].set_collapsed(True)
+    window._on_section_toggled("notes", True)          # 模拟用户点击
+
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(on_disk["collapsed_sections"]) == ["notes"]
+
+    again = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(again)
+    again.resize(1440, 900)
+    again.show()
+    qtbot.waitExposed(again)                          # 还原发生在 showEvent 里
+    assert again.right_pane.sections["notes"].is_collapsed() is True
+    assert again.right_pane.sections["findings"].is_collapsed() is False   # 其余保持展开

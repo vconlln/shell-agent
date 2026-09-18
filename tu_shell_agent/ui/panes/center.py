@@ -14,11 +14,9 @@ from PySide6.QtWidgets import (
 
 from ..widgets.diff_view import render_diff_html
 from ..widgets.script_view import ScriptView
-from ..chat import ChatPanel
 from ..theme import DIFF_GUTTER_FG
 
 _CURRENT_TAB = 0
-_CHAT_TAB = 2
 _COMPARE_TAB = 1
 
 
@@ -44,21 +42,20 @@ class CenterPane(QWidget):
 
         self.tabs.addTab(self.script_view, "本轮")
         self.tabs.addTab(self.compare_view, "对比上一轮")
-        self._chat = ChatPanel()
-        self.tabs.addTab(self._chat, "模型对话")
+
         self.timeline = QListWidget()
         self.timeline.setObjectName("timeline")
         self.timeline.setMinimumHeight(80)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setObjectName("centerSplitter")
-        splitter.addWidget(self.tabs)
-        splitter.addWidget(self.timeline)
-        splitter.setSizes([560, 200])
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.setObjectName("centerSplitter")
+        self.splitter.addWidget(self.tabs)
+        self.splitter.addWidget(self.timeline)
+        self.splitter.setSizes([560, 200])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(splitter)
+        layout.addWidget(self.splitter)
 
         self._rounds: list[tuple[int, str]] = []  # 已展示过的 (轮次, 脚本)，按到达顺序
         self._current_round: int | None = None
@@ -67,16 +64,6 @@ class CenterPane(QWidget):
         self._refresh_compare()
 
     # ── 整屏重置 ──────────────────────────────────────────────────
-    # ── 模型对话（第三个页签）──────────────────────────────────────────
-    @property
-    def chat(self) -> ChatPanel:
-        """对话面板。它同时是**流式输出**的落点：生成期间的增量文本也往这里追加。
-
-        为什么不单开一个"模型输出"区：生成一版脚本要几十秒，那几十秒里"AI 在说什么"
-        与"我问它什么"是同一件事的两个方向，分成两块反而要用户在两个地方找。
-        """
-        return self._chat
-
     def reset(self) -> None:
         """回到「还没有脚本」的初始态；历史回放换一次运行前必须先调它。
 

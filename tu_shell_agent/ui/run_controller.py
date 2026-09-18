@@ -161,7 +161,7 @@ class RunController(QObject):
         # 右栏报表明说"双击条目跳到中栏对应行"（规格 §12）：不接这根线，那句话就是空头承诺。
         window.right_pane.finding_activated.connect(window.center_pane.jump_to_line)
         # 模型对话面板（对话只说话，不执行任何脚本）
-        chat = window.center_pane.chat
+        chat = window.chat_panel
         chat.send_requested.connect(self.ask)
         chat.cancel_requested.connect(self.cancel_chat)
         chat.script_extracted.connect(self._on_script_extracted)
@@ -334,7 +334,7 @@ class RunController(QObject):
         权限收敛点不会因为"只是聊天"而被跳过）。新会话的第一句话会带上方案上下文，
         否则模型不知道这个项目在干什么。
         """
-        chat = self.window.center_pane.chat
+        chat = self.window.chat_panel
         if self._chat_worker is not None and self._chat_worker.isRunning():
             chat.add_note("上一句话还没回复完。")
             return
@@ -397,14 +397,14 @@ class RunController(QObject):
         return run_dir
 
     def _on_chat_done(self, reply: str) -> None:
-        chat = self.window.center_pane.chat
+        chat = self.window.chat_panel
         if not reply.strip():
             chat.add_note("模型返回了空回复。")
         chat.set_busy(False)
         chat.set_status("可以继续问；回复里的脚本可以点「把最新脚本放进中栏」再走改后重跑。")
 
     def _on_chat_failed(self, message: str) -> None:
-        chat = self.window.center_pane.chat
+        chat = self.window.chat_panel
         chat.add_error(f"对话失败：{message}")
         chat.set_busy(False)
         chat.set_status("对话失败；上面是原始错误。")
@@ -620,7 +620,7 @@ class RunController(QObject):
         elif event.type == "assistant_delta":
             # 增量文本原来是被丢掉的（只有状态栏一句"模型输出中…"）：生成一版要几十秒，
             # 那几十秒里用户看不到模型在写什么。现在流式追加到「模型对话」页签。
-            chat = self.window.center_pane.chat
+            chat = self.window.chat_panel
             if not getattr(self, "_stream_open", False):
                 chat.begin_stream(f"第 {event.round} 轮 · 模型输出")
                 self._stream_open = True
