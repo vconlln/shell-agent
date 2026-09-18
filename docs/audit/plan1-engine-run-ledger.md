@@ -316,3 +316,38 @@ F1–F7 全部 ADDRESSED，无新 Critical/Important。残留 3 条 Minor（均�
 **引擎不该把"取消会被尊重"寄托在每个实现都自觉上**；修复落在引擎（执行前最后一刻复查令牌 → 走既有未获批终态）。
 **最终整分支审查为何没抓到**：审查者检查了"cancel/abort 未接线"（F2）并促成适配器侧接线，
 但没有把"引擎是否在工作流关键点复查令牌"作为独立检查项——**协议边界上的责任归属**当时没被追问。
+
+## 实测补记（2026-09-18 晚）：免费额度拒绝"禁用工具的 agent"
+
+现象：Plan 2 的界面接线完成后，用真实 opencode（本机 1.18.31，`opencode auth list` 为
+**0 credentials**，即只能走免费额度）跑端到端，三轮生成全部失败，`attempts/<n>/generation-error.txt` 都是：
+
+```
+opencode 返回错误 APIError：Error from provider (Console):
+OpenCode's free tier can only be used from within OpenCode
+```
+
+定位过程（每次都用真实 `opencode serve` + HTTP 消息请求，控制变量）：
+
+| 变量 | 结果 |
+| --- | --- |
+| agent=`build`（内置）/ `plan` / `general` | 成功 |
+| agent=自定义但只有 `description` + `mode: primary` | 成功 |
+| agent=自定义 + `permission.read: {"*": deny}` + 白名单 | 成功 |
+| agent=自定义 + **完整 permission 块**（bash/edit/glob/grep/list/lsp/skill/task/todowrite/question/webfetch/websearch/doom_loop/external_directory 全 deny） | **失败** |
+| 同一个 agent 文件，额外带 `x-opencode-client: tu-shell-agent` 头 | **仍然失败**（所以不是客户端身份头的问题） |
+
+结论与处置：
+
+1. 触发条件是 agent 文件里的**权限块**（把工具全部 deny），不是自定义 agent 本身，
+   也不是缺 `x-opencode-client` 头。曾短暂按"缺客户端身份头"改过适配器并加了断言，
+   被上表第 5 行证伪后已完整回退（不留无证据的行为与断言）。
+2. **不为了绕开上游限制而放宽权限**：`bash: deny` / `edit: deny` / `read` 白名单正是
+   "opencode 只写不跑、引擎独占执行"这条安全模型的实现（规格 §9）。宁可在无凭据的机器上
+   跑不通生成，也不能让模型拿到执行能力。
+3. 因此"能不能生成"取决于 opencode 是否已登录（有真实 provider 凭据）。无凭据 +
+   免费额度时，界面会如实显示这条 provider 错误（状态栏 + meta.json），不会伪造成
+   "生成失败但已重试"之类的假象。
+4. 遗留改进（未做）：环境自检目前只查三件套的版本，没有查 `opencode auth` 是否为空；
+   在 Windows 机器上这会表现为"自检全绿但一生成就失败"。建议后续在自检里补一条
+   "opencode 未登录"的提示。
