@@ -71,6 +71,9 @@ class LoopInput:
     ports: LoopPorts
     agent_name: str = "tu-shell-writer"
     cancel: Any = None
+    # 用户在界面上临时追加的要求（可为空）。它进提示词、也进运行目录的冻结输入，
+    # 所以"这次为什么这么改"在运行目录里查得到。
+    extra: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +142,7 @@ class _ExecuteError(Exception):
 
 
 def _precheck(
-    *, ports: LoopPorts, run_dir: str, plan: str, skeleton: str
+    *, ports: LoopPorts, run_dir: str, plan: str, skeleton: str, extra: str = ""
 ) -> tuple[DetectionReport | None, LoopResult | None]:
     """环境预检 + 输入落盘。返回 (探测结果, 要直接终止的结果)。
 
@@ -166,7 +169,10 @@ def _precheck(
 
     # 规格 §10：运行目录要自包含可回放 —— 输入（方案全文、渲染后的骨架）必须落盘，
     # 否则事后无法判断"当时到底让它实现什么"。
-    ports.store.write_inputs({"plan.md": plan, "template.sh": skeleton})
+    inputs = {"plan.md": plan, "template.sh": skeleton}
+    if extra.strip():
+        inputs["extra.md"] = extra
+    ports.store.write_inputs(inputs)
     return detection, None
 
 
@@ -339,6 +345,7 @@ def _drive_loop(
     first_round: int,
     evidence: FailureEvidence | None,
     write_meta: Callable[[dict[str, Any]], None],
+    extra: str = "",
 ) -> LoopResult:
     """修复循环本体，`run_loop` 与 `resume_repair` 共用。
 
@@ -368,10 +375,19 @@ def _drive_loop(
 
         message = (
             build_first_message(
-                skeleton=skeleton, anchors=anchors, plan=plan, run_dir=run_dir
+                skeleton=skeleton,
+                anchors=anchors,
+                plan=plan,
+                run_dir=run_dir,
+                extra=extra,
             )
             if evidence is None
-            else build_repair_message(evidence=evidence, anchors=anchors, skeleton=skeleton)
+            else build_repair_message(
+                evidence=evidence,
+                anchors=anchors,
+                skeleton=skeleton,
+                extra=extra,
+            )
         )
 
         try:
@@ -537,7 +553,11 @@ def run_loop(input_: LoopInput) -> LoopResult:
     )
 
     detection, aborted = _precheck(
-        ports=ports, run_dir=input_.run_dir, plan=input_.plan, skeleton=skeleton
+        ports=ports,
+        run_dir=input_.run_dir,
+        plan=input_.plan,
+        skeleton=skeleton,
+        extra=input_.extra,
     )
     if aborted is not None:
         return aborted
@@ -575,6 +595,7 @@ def run_loop(input_: LoopInput) -> LoopResult:
         first_round=1,
         evidence=None,
         write_meta=write_meta,
+        extra=input_.extra,
     )
 
 
@@ -735,6 +756,7 @@ class ResumeInput:
     config: RunConfig
     ports: LoopPorts
     evidence: FailureEvidence | None = None
+    extra: str = ""
     # 本入口不调 start()，agent_name 用不到；保留字段是为了与 LoopInput 的装配参数对齐，
     # 让调用方（界面）在两个入口间换用时不必改参数表。
     agent_name: str = "tu-shell-writer"
@@ -773,7 +795,11 @@ def resume_repair(input_: ResumeInput) -> LoopResult:
     )
 
     detection, aborted = _precheck(
-        ports=ports, run_dir=input_.run_dir, plan=input_.plan, skeleton=skeleton
+        ports=ports,
+        run_dir=input_.run_dir,
+        plan=input_.plan,
+        skeleton=skeleton,
+        extra=input_.extra,
     )
     if aborted is not None:
         return aborted

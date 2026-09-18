@@ -102,3 +102,25 @@ def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
     # 按 set 比：findChildren 的遍历顺序是实现细节，不是契约
     headers = {label.text() for label in window.findChildren(QLabel, "paneHeader")}
     assert headers == {"方案与模板", "脚本与轮次", "校验与输出"}
+
+
+def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
+    """新增的两个控件也要在深色主题里（否则会出现浅色残留的输入框）。"""
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    apply_theme(themed_app)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    qtbot.waitExposed(window)
+
+    image = window.grab().toImage()
+
+    def rendered(widget, offset: QPoint = QPoint(8, 8)) -> str:
+        point = widget.mapTo(window, widget.rect().topLeft() + offset)
+        return QColor(image.pixel(point.x(), point.y())).name()
+
+    chat = window.center_pane.chat
+    assert rendered(chat.transcript) == "#0d0d0d"        # 只读记录区
+    assert rendered(window.left_pane.extra_edit) == "#212121"   # 可编辑输入框

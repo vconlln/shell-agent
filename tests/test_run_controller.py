@@ -737,3 +737,158 @@ def test_continue_repair_resumes_the_adapter_instead_of_starting_it(qtbot, tmp_p
         controller.continue_repair()
 
     assert adapter.resumed == [(str(run_dir), None)], "续跑没有调用 resume()"
+
+
+# ── 模型对话（问它、让它解释）────────────────────────────────────────────
+
+
+class _ChattyOpencode(_FakeOpencode):
+    """支持自由对话的替身：记录收到的问题，回复里带一段脚本。"""
+
+    def __init__(self) -> None:
+        self.sessions: list[str] = []
+        self.questions: list[tuple[str, str, str]] = []
+        self.reply = "先备份再删除，脚本如下：\n\n```bash\necho 来自对话的脚本\n```\n"
+
+    def start(self, run_dir, agent_name="tu-shell-agent", model=None):
+        session = f"ses_chat_{len(self.sessions) + 1}"
+        self.sessions.append(session)
+        return session
+
+    def chat(self, session_id, message, timeout_ms, on_delta=None, cancel=None, system_preamble=""):
+        self.questions.append((session_id, message, system_preamble))
+        if on_delta is not None:
+            on_delta(self.reply[:5])
+            on_delta(self.reply[5:])
+        return self.reply
+
+
+class _ChatOpencodeWithSession(_FakeOpencode):
+    """已有一个运行会话（meta.json 里有 sessionId）时，对话必须复用它。"""
+
+    def __init__(self) -> None:
+        self.questions: list[tuple[str, str, str]] = []
+        self.start_calls = 0
+
+    def start(self, run_dir, agent_name="tu-shell-agent", model=None):
+        self.start_calls += 1
+        return "ses_不应该被调用"
+
+    def chat(self, session_id, message, timeout_ms, on_delta=None, cancel=None, system_preamble=""):
+        self.questions.append((session_id, message, system_preamble))
+        return "好的。"
+
+
+def test_ask_creates_a_session_and_streams_the_reply(qtbot, tmp_path):
+    """第一次提问要建立会话，回复流式追加到记录区，并且带上方案上下文。"""
+    window = _window(qtbot, tmp_path)
+    opencode = _ChattyOpencode()
+    controller = RunController(
+        opencode=opencode, toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("把 .log 清掉，但别动 logs/ 目录", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+    chat = window.center_pane.chat
+
+    chat.input.setPlainText("为什么第一轮失败了？")
+    chat.send_button.click()
+    qtbot.waitUntil(lambda: chat.send_button.isEnabled(), timeout=10_000)
+
+    text = chat.transcript_text()
+    assert "你：为什么第一轮失败了？" in text
+    assert "模型回复" in text
+    assert "先备份再删除" in text                 # 流式增量落进了记录区
+    assert opencode.sessions, "应当建立了一个对话会话"
+    # 新会话的第一句话带上方案上下文：否则模型不知道这个项目在干什么
+    assert "别动 logs/ 目录" in opencode.questions[0][2]
+
+
+def test_ask_reuses_the_existing_run_session(qtbot, tmp_path):
+    """已经有运行会话时，对话必须复用它（同一个上下文），而不是另起一个会话。"""
+    window = _window(qtbot, tmp_path)
+    opencode = _ChatOpencodeWithSession()
+    controller = RunController(
+        opencode=opencode, toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    run_dir = tmp_path / "runs" / "20260919-000000-aaaa"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        '{"outcome": "needs_human", "rounds": 1, "sessionId": "ses_运行里的"}', encoding="utf-8"
+    )
+    controller._run_dir = str(run_dir)
+    controller._session_id = "ses_运行里的"
+
+    window.center_pane.chat.input.setPlainText("解释一下这条报告")
+    window.center_pane.chat.send_button.click()
+    qtbot.waitUntil(lambda: window.center_pane.chat.send_button.isEnabled(), timeout=10_000)
+
+    assert opencode.start_calls == 0, "不该另起会话"
+    assert opencode.questions[0][0] == "ses_运行里的"
+    assert opencode.questions[0][2] == ""        # 复用会话时不重复灌上下文
+
+
+def test_extract_script_puts_it_in_the_center_pane_without_running_it(qtbot, tmp_path):
+    """「把最新脚本放进中栏」只放进中栏，不执行：执行仍要走改后重跑（shellcheck + 确认）。"""
+    window = _window(qtbot, tmp_path)
+    toolchain = _FakeToolchain()
+    RunController(
+        opencode=_ChattyOpencode(), toolchain=toolchain, window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    chat = window.center_pane.chat
+    chat.add_assistant("改好的版本：\n\n```bash\necho 来自对话的脚本\n```\n")
+
+    chat.extract_button.click()
+
+    assert "来自对话的脚本" in window.center_pane.current_text()
+    assert toolchain.executed == 0, "对话里的脚本绝不能被自动执行"
+    assert window.center_pane.tabs.currentIndex() == 0   # 切回「本轮」让用户看到它
+
+
+def test_assistant_delta_streams_into_the_chat_transcript(qtbot, tmp_path):
+    """运行期间模型的增量输出要落到对话记录里（原来只有状态栏一句"模型输出中…"）。"""
+    from tu_shell_agent.types import RunEvent
+
+    window = _window(qtbot, tmp_path)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+
+    controller._on_event(RunEvent("assistant_delta", 1, {"text": "#!/usr/bin/env bash\n"}))
+    controller._on_event(RunEvent("assistant_delta", 1, {"text": "echo hi\n"}))
+
+    text = window.center_pane.chat.transcript_text()
+    assert "第 1 轮 · 模型输出" in text
+    assert "echo hi" in text
+
+
+def test_extra_instruction_reaches_the_engine_prompt(qtbot, tmp_path):
+    """左栏的补充要求要真的进提示词（进不了的话那个框就是摆设）。"""
+    window = _window(qtbot, tmp_path)
+    seen: list[str] = []
+
+    class _Recording(_FakeOpencode):
+        def generate(self, session_id, message, schema, timeout_ms, on_delta=None, cancel=None):
+            seen.append(message)
+            return super().generate(session_id, message, schema, timeout_ms, on_delta, cancel)
+
+    controller = RunController(
+        opencode=_Recording(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"),
+    )
+    plan = tmp_path / "plan.md"
+    plan.write_text("清理日志", encoding="utf-8")
+    window.left_pane.set_plan(str(plan))
+    window.left_pane.extra_edit.setPlainText("这次别动 logs/ 目录")
+
+    with qtbot.waitSignal(controller.finished, timeout=15_000):
+        controller.start()
+
+    assert "## 补充要求" in seen[0]
+    assert "这次别动 logs/ 目录" in seen[0]
+    # 也要作为冻结输入落盘，方便事后查"这次为什么这么改"
+    assert (Path(controller._run_dir) / "extra.md").read_text(encoding="utf-8") == "这次别动 logs/ 目录"

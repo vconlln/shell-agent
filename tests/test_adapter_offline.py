@@ -79,6 +79,11 @@ class StubServe:
         self.requests: list[tuple[str, str, str]] = []
         self.unauthorized_paths: list[str] = []
         self.message_response: dict = {"info": {"structured": _structured()}}
+        # 自由对话的响应：没有 structured，正文在 parts 里
+        self.chat_response: dict = {
+            "info": {"id": "msg_1", "role": "assistant"},
+            "parts": [{"type": "text", "text": "这是模型的回答。"}],
+        }
         # 建会话的响应可替换：用来测 start() 失败时是否自我收尸（默认保持原行为）。
         self.session_response: tuple[int, Any] = (200, {"id": SESSION_ID, "title": None})
         self.on_message: Callable[[], None] | None = None
@@ -178,7 +183,13 @@ class StubServe:
                     hook = stub.on_message
                     if hook is not None:
                         hook()
-                    self._send_json(200, stub.message_response)
+                    # 带 format 的是结构化输出（generate），不带的是自由对话（chat）：
+                    # 真实 serve 两种情况的 payload 形状不同，桩必须一样地区分，
+                    # 否则测试会以为 chat 也能拿到 structured。
+                    if "format" in body:
+                        self._send_json(200, stub.message_response)
+                    else:
+                        self._send_json(200, stub.chat_response)
                     return
                 self._send_json(404, {"error": "not found"})
 
@@ -502,3 +513,63 @@ def test_resume_brings_up_serve_without_creating_a_session(adapter, stub, tmp_pa
     generated = adapter.generate(SESSION_ID, "接着修", SCHEMA, timeout_ms=5_000)
     assert generated.script
     assert stub.message_bodies[0]["parts"][0]["text"] == "接着修"
+
+
+# ── 自由对话（chat）与结构化输出（generate）是两条不同的路 ─────────────────
+
+
+def test_chat_sends_no_format_and_returns_plain_text(adapter, stub, tmp_path: Path):
+    """chat 不带 `format`，正文从 parts 里取。
+
+    这条区别是安全属性的一部分：带 format 的那条路产物必须填 script 字段、要过锚点契约、
+    最终由引擎执行；chat 只是说话，它写出来的脚本不会被自动执行。
+    """
+    session_id = adapter.start(str(tmp_path / "run"))
+
+    reply = adapter.chat(session_id, "刚才那条为什么失败？", timeout_ms=5_000)
+
+    assert reply == "这是模型的回答。"
+    body = stub.message_bodies[0]
+    assert "format" not in body, "chat 不能带结构化输出 schema"
+    assert body["parts"] == [{"type": "text", "text": "刚才那条为什么失败？"}]
+    assert body["agent"] == AGENT_NAME
+
+
+def test_chat_passes_preamble_and_streams_deltas(adapter, stub, tmp_path: Path):
+    """上下文前言拼在正文前；流式增量要回调出去（界面靠它做"正在说话"）。"""
+    session_id = adapter.start(str(tmp_path / "run"))
+    stub.chat_response = {"info": {}, "parts": []}          # 只有增量、没有 parts 的版本
+    deltas: list[str] = []
+
+    def push() -> None:
+        # 必须走 push_event（SSE 帧要有 data: 前缀与空行），直接塞裸 JSON 解析器不认
+        stub.push_event(
+            {
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": SESSION_ID,
+                    "messageID": "msg_1",
+                    "partID": "prt_1",
+                    "field": "text",
+                    "delta": "增量回答",
+                },
+            }
+        )
+
+    stub.on_message = push
+    reply = adapter.chat(
+        session_id, "问题", timeout_ms=5_000, on_delta=deltas.append, system_preamble="背景：方案是清理日志"
+    )
+
+    assert "背景：方案是清理日志" in stub.message_bodies[0]["parts"][0]["text"]
+    assert reply == "增量回答"      # parts 为空时用增量拼出来的兜底
+    assert "".join(deltas) == "增量回答"
+
+
+def test_generate_still_requires_structured_output(adapter, stub, tmp_path: Path):
+    """反向对照：generate 仍然只认 structured，不能被 chat 的响应形状蒙过去。"""
+    session_id = adapter.start(str(tmp_path / "run"))
+    stub.message_response = {"info": {}, "parts": [{"type": "text", "text": "闲聊"}]}
+
+    with pytest.raises(RuntimeError, match="未返回结构化输出"):
+        adapter.generate(session_id, "写脚本", SCHEMA, timeout_ms=5_000)

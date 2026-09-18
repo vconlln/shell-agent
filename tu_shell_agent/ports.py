@@ -45,6 +45,24 @@ class OpencodePort(Protocol):
         cancel: Any = None,
     ) -> GeneratedScript: ...
 
+    def chat(
+        self,
+        session_id: str,
+        message: str,
+        timeout_ms: int,
+        on_delta: Callable[[str], None] | None = None,
+        cancel: Any = None,
+        system_preamble: str = "",
+    ) -> str:
+        """自由对话：**不带结构化输出 schema**，返回模型的纯文本回复。
+
+        与 generate 的区别就在这一点上，而这个区别是安全属性的一部分：
+        - `generate` 走 schema，产物必须填 `script`，且要过锚点契约校验，最终由引擎执行；
+        - `chat` 只是说话。它产出的任何脚本都**不会自动执行** —— 要执行必须先进中栏、
+          再走"改后重跑"（shellcheck + 人工确认）。
+        """
+        ...
+
     def abort(self, session_id: str) -> None: ...
 
     def dispose(self) -> None: ...

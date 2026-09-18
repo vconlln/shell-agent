@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable
 
 import httpx
@@ -238,6 +239,89 @@ class OpencodeAdapter:
                 aborted.add(session_id)
                 self._abort_quietly(session_id)
                 return
+
+    def chat(
+        self,
+        session_id: str,
+        message: str,
+        timeout_ms: int,
+        on_delta: Callable[[str], None] | None = None,
+        cancel: Any = None,
+        system_preamble: str = "",
+    ) -> str:
+        """自由对话：不带 `format`，返回纯文本回复。
+
+        响应形状与结构化输出那条路不同：没有 `info.structured`，正文在 `parts` 里
+        （type == "text"）。所以这里既收 parts，也把流式增量拼起来做兜底 ——
+        有的版本只发增量、响应里的 parts 可能为空或被截断。
+
+        `system_preamble` 只在**没有对话历史**时有用，由调用方（界面）决定要不要带；
+        这里把它拼在正文前面，因为它就是这个应用里"给模型上下文"的唯一途径
+        （agent 定义是写死的硬规则，方案文档是随首轮消息发出去的）。
+        """
+        if self._client is None:
+            raise RuntimeError("适配器未启动")
+        text = f"{system_preamble.strip()}\n\n{message}" if system_preamble.strip() else message
+        collected: list[str] = []
+
+        def on_delta_wrapper(chunk: str) -> None:
+            collected.append(chunk)
+            if on_delta is not None:
+                on_delta(chunk)
+
+        self._on_delta = on_delta_wrapper
+        stop_watcher = threading.Event()
+        aborted_by_watchdog: set[str] = set()
+        watcher = threading.Thread(
+            target=self._watch_cancel,
+            args=(session_id, cancel, stop_watcher, aborted_by_watchdog),
+            daemon=True,
+        )
+        if cancel is not None:
+            watcher.start()
+        try:
+            try:
+                response = self._client.post(
+                    f"/session/{session_id}/message",
+                    json={
+                        "agent": AGENT_NAME,
+                        "parts": [{"type": "text", "text": text}],
+                    },
+                    timeout=timeout_ms / 1000.0,
+                )
+            except httpx.TimeoutException:
+                self._abort_quietly(session_id)
+                raise
+            response.raise_for_status()
+            if self._cancel_requested(cancel):
+                if session_id not in aborted_by_watchdog:
+                    self._abort_quietly(session_id)
+                raise RuntimeError("已取消")
+            payload = response.json()
+            info = payload.get("info") or {}
+            error = info.get("error")
+            if isinstance(error, dict) and error.get("name"):
+                detail = (error.get("data") or {}).get("message", "")
+                raise RuntimeError(f"opencode 返回错误 {error['name']}：{detail}")
+            parts_text = "".join(
+                part.get("text", "")
+                for part in (payload.get("parts") or [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            if parts_text:
+                return parts_text
+            # parts 为空（有的版本只通过 SSE 发增量，响应体里不带正文）：HTTP 响应与 SSE
+            # 是两条通道，增量可能比响应晚到几十毫秒，所以**有界地等**一下，而不是立刻
+            # 返回空串 —— 那会让界面显示一句空回答，看起来像模型没说话。
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not collected:
+                time.sleep(0.02)
+            return "".join(collected)
+        finally:
+            self._on_delta = None
+            stop_watcher.set()
+            if cancel is not None:
+                watcher.join(timeout=1.0)
 
     def abort(self, session_id: str) -> None:
         if self._client is not None:

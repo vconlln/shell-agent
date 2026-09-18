@@ -82,3 +82,49 @@ def test_shellcheck_summary_groups_by_code():
     )
     assert "SC2086 ×2" in summary
     assert "SC2045 ×1" in summary
+
+
+# ── 补充要求（用户在界面上临时追加的话）────────────────────────────────────
+
+
+def test_first_message_includes_extra_requirements_section():
+    """补充要求必须单独成段，并声明"与方案冲突时以本节为准"。
+
+    不声明优先级的话，模型面对"方案说要清空 logs/、补充要求说别动 logs/"时只能猜。
+    """
+    message = build_first_message(
+        skeleton="#!/usr/bin/env bash\n# @@TU:BODY@@\n",
+        anchors=("@@TU:BODY@@",),
+        plan="把 .log 清掉",
+        run_dir="/tmp/run",
+        extra="别动 logs/ 目录，这次只处理 .log",
+    )
+
+    assert "## 补充要求（本次运行临时追加，与方案冲突时以本节为准）" in message
+    assert "别动 logs/ 目录" in message
+    # 补充要求要在方案文档之后、运行目录之前（模型读的顺序：需求 → 追加 → 环境）
+    assert message.index("## 方案文档") < message.index("## 补充要求")
+    assert message.index("## 补充要求") < message.index("## 运行目录")
+
+
+def test_empty_extra_adds_nothing():
+    """没填补充要求时提示词一字不多（否则每轮都塞一个空段，白白占上下文）。"""
+    base = build_first_message(
+        skeleton="#!/usr/bin/env bash\n# @@TU:BODY@@\n", anchors=("@@TU:BODY@@",), plan="p", run_dir="/r"
+    )
+    with_empty = build_first_message(
+        skeleton="#!/usr/bin/env bash\n# @@TU:BODY@@\n", anchors=("@@TU:BODY@@",), plan="p",
+        run_dir="/r", extra="   \n  ",
+    )
+    assert base == with_empty
+    assert "补充要求" not in base
+
+
+def test_repair_message_also_carries_extra():
+    """修复轮同样要带上补充要求：用户是在"这次运行"里提的，不该只对第一轮生效。"""
+    evidence = FailureEvidence(round=1, stage="execute", execute=ExecuteEvidence(
+        exit_code=1, timed_out=False, stdout_tail="boom", stderr_tail="", duration_ms=5))
+    message = build_repair_message(
+        evidence=evidence, anchors=("@@TU:BODY@@",), skeleton="#!/usr/bin/env bash\n", extra="别动 logs/"
+    )
+    assert "## 补充要求" in message and "别动 logs/" in message

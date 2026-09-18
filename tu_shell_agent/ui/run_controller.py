@@ -44,7 +44,7 @@ from ..types import (
     RunConfig,
     RunEvent,
 )
-from .engine_worker import DetectWorker, EngineWorker
+from .engine_worker import ChatWorker, DetectWorker, EngineWorker
 from .widgets.confirm_dialog import ConfirmDialog
 
 # 引擎写 notes.md 时用的分隔（见 orchestrator.loop 的 _check_script 调用点）。
@@ -131,6 +131,9 @@ class RunController(QObject):
 
         self._worker: EngineWorker | None = None
         self._detect_worker: DetectWorker | None = None
+        self._chat_worker: ChatWorker | None = None
+        self._session_id = ""          # 当前 opencode 会话（续跑、对话共用同一个）
+        self._chat_preamble = ""       # 只在新会话的第一句话前带上（方案上下文）
         self._run_dir = ""
         self._config: RunConfig | None = None
         self._template: TemplateSpec | None = None
@@ -157,6 +160,11 @@ class RunController(QObject):
         window.selfcheck_page.recheck_requested.connect(self.recheck_environment)
         # 右栏报表明说"双击条目跳到中栏对应行"（规格 §12）：不接这根线，那句话就是空头承诺。
         window.right_pane.finding_activated.connect(window.center_pane.jump_to_line)
+        # 模型对话面板（对话只说话，不执行任何脚本）
+        chat = window.center_pane.chat
+        chat.send_requested.connect(self.ask)
+        chat.cancel_requested.connect(self.cancel_chat)
+        chat.script_extracted.connect(self._on_script_extracted)
         window.set_running(False)
 
     # ── 环境自检 ──────────────────────────────────────────────────
@@ -203,6 +211,7 @@ class RunController(QObject):
         # 所有控件读取都必须在**主线程**完成后再交给 worker：Qt 控件不是线程安全的，
         # 在 worker 线程里调 text() 属于未定义行为（最坏是堆损坏，而不是一个可见异常）。
         values = self._placeholder_values()
+        extra = self.window.left_pane.extra_instruction()
         run_dir = run_dir_for(config.run_root, make_run_id())
         RunStore(run_dir).init()
 
@@ -221,6 +230,7 @@ class RunController(QObject):
                     config=config,
                     ports=ports,
                     cancel=cancel,
+                    extra=extra,
                 )
             )
 
@@ -315,6 +325,99 @@ class RunController(QObject):
             )
 
         self._run(entry, run_dir, config, initial_script=(round_no, script))
+
+    # ── 模型对话 ──────────────────────────────────────────────────────────
+    def ask(self, message: str) -> None:
+        """把一句话发给当前 opencode 会话，回复流式追加到对话记录里。
+
+        没有会话时先建一个（`adapter.start` 会起 serve 并写本次运行的 agent 文件 ——
+        权限收敛点不会因为"只是聊天"而被跳过）。新会话的第一句话会带上方案上下文，
+        否则模型不知道这个项目在干什么。
+        """
+        chat = self.window.center_pane.chat
+        if self._chat_worker is not None and self._chat_worker.isRunning():
+            chat.add_note("上一句话还没回复完。")
+            return
+
+        if self._adapter is None and self._opencode is None:
+            try:
+                self._ensure_deps(self._config_from_ui())
+            except _DependencyMissing as error:
+                chat.add_error(str(error))
+                return
+        adapter = self._adapter if self._adapter is not None else self._opencode
+        if adapter is None or not hasattr(adapter, "chat"):
+            chat.add_error("当前注入的 opencode 适配器不支持自由对话（测试替身？）。")
+            return
+
+        if not self._session_id:
+            try:
+                if self._adapter is not None:
+                    run_dir = self._run_dir or self._new_chat_run_dir()
+                    self._run_dir = run_dir
+                    self._session_id = self._adapter.start(run_dir)
+                else:
+                    run_dir = self._run_dir or self._new_chat_run_dir()
+                    self._run_dir = run_dir
+                    self._session_id = adapter.start(run_dir, "tu-shell-writer", None)
+            except Exception as error:  # noqa: BLE001 - 起不来就如实说
+                chat.add_error(f"无法建立对话会话：{error}")
+                return
+            chat.set_status(f"对话会话：{self._session_id}")
+            plan = self.window.left_pane.plan_text().strip()
+            self._chat_preamble = (
+                "（上下文）我在用这个工具把方案文档变成 shell 脚本。方案文档如下，"
+                "接下来我会就脚本与报错向你提问：\n\n" + plan
+                if plan
+                else "（上下文）我在用这个工具把方案文档变成 shell 脚本，接下来会问你问题。"
+            )
+        else:
+            self._chat_preamble = ""
+
+        worker = ChatWorker(opencode=adapter, timeout_ms=self._config_from_ui().generate_timeout_ms)
+        worker.submit(self._session_id, message, self._chat_preamble)
+        self._chat_reply: list[str] = []
+        worker.delta.connect(chat.append_delta)
+        worker.done.connect(self._on_chat_done)
+        worker.failed.connect(self._on_chat_failed)
+        self._chat_worker = worker
+        chat.set_busy(True)
+        chat.begin_stream("模型回复")
+        worker.start()
+
+    def cancel_chat(self) -> None:
+        if self._chat_worker is not None:
+            self._chat_worker.cancel()
+
+    def _new_chat_run_dir(self) -> str:
+        """为"先聊天、还没跑过"的情形准备一个运行目录（会话与 agent 文件需要落处）。"""
+        config = self._config_from_ui()
+        run_dir = run_dir_for(config.run_root, make_run_id())
+        RunStore(run_dir).init()
+        return run_dir
+
+    def _on_chat_done(self, reply: str) -> None:
+        chat = self.window.center_pane.chat
+        if not reply.strip():
+            chat.add_note("模型返回了空回复。")
+        chat.set_busy(False)
+        chat.set_status("可以继续问；回复里的脚本可以点「把最新脚本放进中栏」再走改后重跑。")
+
+    def _on_chat_failed(self, message: str) -> None:
+        chat = self.window.center_pane.chat
+        chat.add_error(f"对话失败：{message}")
+        chat.set_busy(False)
+        chat.set_status("对话失败；上面是原始错误。")
+
+    def _on_script_extracted(self, script: str) -> None:
+        """把对话里抠出来的脚本放进中栏——**只放进去，不执行**。
+
+        之后它和手改的脚本走同一条路：shellcheck → 人工确认 → 执行。
+        """
+        round_no = max(int(self._read_meta().get("rounds") or 0), 1)
+        self.window.center_pane.show_round(round_no, script)
+        self.window.center_pane.tabs.setCurrentIndex(0)
+        self._status("已把对话里的脚本放进中栏；要跑它请点「改后重跑」")
 
     def cancel(self) -> None:
         if self._worker is None:
@@ -510,8 +613,18 @@ class RunController(QObject):
         self.events.emit(event)
 
         if event.type == "phase":
-            self._status(f"第 {event.round} 轮 · {payload.get('phase')}")
+            phase = payload.get("phase")
+            if phase in {"confirming", "checking", "executing", "settled"}:
+                self._stream_open = False   # 这一段输出结束，下次增量另起一段
+            self._status(f"第 {event.round} 轮 · {phase}")
         elif event.type == "assistant_delta":
+            # 增量文本原来是被丢掉的（只有状态栏一句"模型输出中…"）：生成一版要几十秒，
+            # 那几十秒里用户看不到模型在写什么。现在流式追加到「模型对话」页签。
+            chat = self.window.center_pane.chat
+            if not getattr(self, "_stream_open", False):
+                chat.begin_stream(f"第 {event.round} 轮 · 模型输出")
+                self._stream_open = True
+            chat.append_delta(payload.get("text") or "")
             self._status(f"第 {event.round} 轮 · 模型输出中…")
         elif event.type == "script":
             script = payload.get("script") or ""
@@ -563,6 +676,7 @@ class RunController(QObject):
 
     def _on_finished(self, result: LoopResult) -> None:
         self._last_result = result
+        self._session_id = str(self._read_meta().get("sessionId") or self._session_id)
         self._set_running(False)
         self._status(f"结论：{result.outcome}（{result.rounds} 轮）")
         self._dispose_adapter()
@@ -732,6 +846,13 @@ class RunController(QObject):
             detect.wait(3000)
             if detect.isRunning():
                 _ORPHANS.append(detect)
+
+        chat_worker = self._chat_worker
+        if chat_worker is not None and chat_worker.isRunning():
+            chat_worker.cancel()
+            chat_worker.wait(3000)
+            if chat_worker.isRunning():
+                _ORPHANS.append(chat_worker)
 
         worker = self._worker
         if worker is not None and worker.isRunning():

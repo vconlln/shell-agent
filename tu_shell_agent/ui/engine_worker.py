@@ -144,3 +144,53 @@ class DetectWorker(QThread):
             self.failed.emit(str(error))
             return
         self.done.emit(report)
+
+
+class ChatWorker(QThread):
+    """一次自由对话（或在既有会话里问一句话）。
+
+    为什么要单独一个 worker：chat 是一次 HTTP 往返（可能几十秒），放在主线程会把界面冻住。
+    与 EngineWorker 的区别是它**只说话**：不带结构化输出 schema、不产出 LoopResult、
+    也不会让任何脚本被执行 —— 对话里写出来的脚本要先进中栏，再走"改后重跑"
+    （shellcheck + 人工确认）才可能被执行。
+    """
+
+    delta = Signal(str)      # 流式增量（界面据此显示"正在说话"）
+    done = Signal(str)       # 完整回复
+    failed = Signal(str)     # 这一轮对话失败（网络/上游拒绝/取消）
+
+    def __init__(self, *, opencode: Any, timeout_ms: int, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._opencode = opencode
+        self._timeout_ms = timeout_ms
+        self._cancel = threading.Event()
+        self._request: tuple[str, str, str] | None = None
+
+    def submit(self, session_id: str, message: str, preamble: str = "") -> None:
+        """必须在 start() 之前调用。`preamble` 只在会话刚建立时用来交代上下文。"""
+        self._request = (session_id, message, preamble)
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def cancel_token(self) -> threading.Event:
+        return self._cancel
+
+    def run(self) -> None:  # noqa: D102 - QThread
+        if self._request is None:
+            self.failed.emit("ChatWorker.submit() 未被调用")
+            return
+        session_id, message, preamble = self._request
+        try:
+            reply = self._opencode.chat(
+                session_id,
+                message,
+                self._timeout_ms,
+                on_delta=self.delta.emit,
+                cancel=self._cancel,
+                system_preamble=preamble,
+            )
+        except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
+            self.failed.emit(str(error))
+            return
+        self.done.emit(reply or "")

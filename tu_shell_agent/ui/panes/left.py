@@ -113,6 +113,16 @@ class LeftPane(QWidget):
         layout.addWidget(_section("方案文档"))
         layout.addLayout(plan_row)
         layout.addWidget(self.plan_preview, 1)
+        layout.addWidget(_section("补充要求（本次运行临时追加）"))
+        self.extra_edit = QPlainTextEdit()
+        self.extra_edit.setObjectName("extraInstructionEdit")
+        self.extra_edit.setPlaceholderText(
+            "要额外叮嘱的话，例如：别动 logs/ 目录；先备份再删除。\n"
+            "会作为独立一段进提示词，与方案冲突时以这里为准；留空则一个字都不加。"
+        )
+        self.extra_edit.setFixedHeight(64)
+        layout.addWidget(self.extra_edit)
+
         layout.addWidget(_section("运行参数（仅本次）"))
         layout.addLayout(run_form)
         # 组件路径（opencode / Git Bash / shellcheck）只在设置页改，这里只读不自检
@@ -171,6 +181,10 @@ class LeftPane(QWidget):
     def plan_text(self) -> str:
         """方案正文；未选或读失败时为空串（预览区里显示的提示语不算正文）。"""
         return self._plan_text
+
+    def extra_instruction(self) -> str:
+        """用户临时追加的要求（可为空）。空串时提示词里不会多出一个空段落。"""
+        return self.extra_edit.toPlainText()
 
     # ---- 运行参数 -------------------------------------------------------------
 

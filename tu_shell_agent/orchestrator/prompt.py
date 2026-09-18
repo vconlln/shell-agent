@@ -28,7 +28,30 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 # 留在这里会让 adapter 反向 import orchestrator，违反单向分层。见 opencode_adapter/agent_file.py。
 
 
-def build_first_message(*, skeleton: str, anchors: tuple[str, ...], plan: str, run_dir: str) -> str:
+def extra_section(extra: str) -> list[str]:
+    """用户现场补充的要求，单独成段。
+
+    为什么不直接拼进方案文档：这两者的**权威性不同** —— 方案文档是"需求"，补充要求是
+    用户在这一次运行前临时追加的话（"这次别动 logs/ 目录"）。混在一段里，模型无法判断
+    冲突时听谁的；落盘时也分不清"原始方案"与"临时追加"。所以单独一段并写明优先级。
+    """
+    if not extra.strip():
+        return []
+    return [
+        "## 补充要求（本次运行临时追加，与方案冲突时以本节为准）",
+        extra.strip(),
+        "",
+    ]
+
+
+def build_first_message(
+    *,
+    skeleton: str,
+    anchors: tuple[str, ...],
+    plan: str,
+    run_dir: str,
+    extra: str = "",
+) -> str:
     anchor_lines = "\n".join(f"- {anchor}" for anchor in anchors) or "（本模板无锚点）"
     return "\n".join(
         [
@@ -43,6 +66,7 @@ def build_first_message(*, skeleton: str, anchors: tuple[str, ...], plan: str, r
             "## 方案文档",
             plan.strip(),
             "",
+            *extra_section(extra),
             "## 运行目录（脚本将在此目录下执行）",
             run_dir,
             "",
@@ -60,7 +84,11 @@ def shellcheck_summary(findings: list[ShellcheckFinding] | tuple[ShellcheckFindi
 
 
 def build_repair_message(
-    *, evidence: FailureEvidence, anchors: tuple[str, ...], skeleton: str
+    *,
+    evidence: FailureEvidence,
+    anchors: tuple[str, ...],
+    skeleton: str,
+    extra: str = "",
 ) -> str:
     lines: list[str] = [f"## 第 {evidence.round} 轮失败反馈（阶段：{evidence.stage}）", ""]
 
@@ -103,5 +131,6 @@ def build_repair_message(
 
     anchor_lines = "\n".join(f"- {anchor}" for anchor in anchors) or "（无）"
     lines.extend(["## 必须保留的锚点", anchor_lines, ""])
+    lines.extend(extra_section(extra))
     lines.append("只修复上述问题，保持锚点与模板结构不变，返回完整脚本。")
     return "\n".join(lines)
