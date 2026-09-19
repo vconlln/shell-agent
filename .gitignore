@@ -10,6 +10,7 @@ tools/
 
 # 引擎默认输出目录（可用 --run-root/--templates-dir 改到别处）
 .tu-runs/
+# 旧的本地模板目录：模板现在随仓库交付在 templates/ 下（见 README「仓库结构」）
 .tu-templates/
 
 # PyInstaller（Plan 2）

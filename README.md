@@ -87,6 +87,14 @@ Windows 上的 exe：把仓库拷过去，双击 `packaging\windows\build.bat`�
 - "改后重跑"与引擎**共用同一轮的产物目录**，用户手改的脚本会覆盖引擎那一轮的证据（`shellcheck.json` / `stdout.txt` 等），meta 里也没有"这次是 verify"的标记。
 - 时间线不含耗时；`duration_ms` 只在 succeeded 的 meta 里写。
 
+## 模板库
+
+模板（`index.json` + `<id>.tpl.sh`）随仓库交付在 **`templates/`** 目录下 —— 与代码一起版本化、
+可评审、可分享。源码检出运行时默认就用它；打包成 exe（或装到别处）时退回用户数据目录，
+因为 exe 的工作目录是"从哪双击就从哪"，跟着 CWD 走会让模板库忽有忽无。
+
+在设置页把「模板目录」留空即使用默认位置；CLI 的 `--templates-dir` 默认值同样指向它。
+
 ## 仓库结构
 
 ```

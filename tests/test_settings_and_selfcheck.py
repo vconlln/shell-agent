@@ -334,3 +334,27 @@ def test_model_field_round_trips(qtbot, tmp_path):
     assert page.model_combo.currentText() == "deepseek/deepseek-v4-pro", "刷新列表把选择弄丢了"
     page.collect()
     assert loaded.opencode_model == "deepseek/deepseek-v4-pro"
+
+
+def test_loaded_settings_can_be_saved_back_without_a_path():
+    """`load()` 之后必须还能 `save()`（不传路径）。
+
+    踩过：给设置加"历史取值收敛"（normalize）时，顺手把它放在了 `__post_init__` 里，
+    而里面有一行 `_loaded_from = None` —— 于是 `load()` 一调 normalize 就把来源路径清掉了，
+    之后点「保存」直接报"未指定保存路径"。取值收敛**只能动取值**。
+    """
+    from tu_shell_agent.ui.settings import AppSettings, default_settings_path
+
+    path = default_settings_path()
+    original = path.read_text(encoding="utf-8") if path.is_file() else None
+    try:
+        settings = AppSettings.load(path)
+        assert settings.loaded_from == path
+        settings.templates_dir = ""
+        settings.save()                                  # 不传路径：必须能用 load 记住的路径
+        assert AppSettings.load(path).loaded_from == path
+    finally:
+        if original is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(original, encoding="utf-8")

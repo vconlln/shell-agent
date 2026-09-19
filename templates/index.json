@@ -1,0 +1,45 @@
+{
+  "templates": [
+    {
+      "id": "single",
+      "name": "单命令执行",
+      "description": "最小骨架：shebang + set -euo pipefail + main()",
+      "trusted": false,
+      "placeholders": [],
+      "updatedAt": "2026-09-18T13:12:25.451874+00:00"
+    },
+    {
+      "id": "args-batch",
+      "name": "参数解析批处理",
+      "description": "getopts 解析、目录校验、usage",
+      "trusted": false,
+      "placeholders": [
+        {
+          "name": "script_name",
+          "default": null,
+          "description": null
+        },
+        {
+          "name": "work_dir",
+          "default": null,
+          "description": null
+        }
+      ],
+      "updatedAt": "2026-09-18T13:12:25.452002+00:00"
+    },
+    {
+      "id": "logged-errors",
+      "name": "带日志与错误处理",
+      "description": "log/die、trap ERR、mktemp 临时目录与退出清理",
+      "trusted": false,
+      "placeholders": [
+        {
+          "name": "log_prefix",
+          "default": null,
+          "description": null
+        }
+      ],
+      "updatedAt": "2026-09-18T13:12:25.452080+00:00"
+    }
+  ]
+}

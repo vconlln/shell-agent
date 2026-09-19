@@ -60,20 +60,22 @@ class AppSettings:
     acrylic_blur: int = 40
 
     def __post_init__(self) -> None:
+        # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：
+        # 它只是"这份设置从哪个文件读来的"记忆，一旦成为字段就会被 asdict() 写进 JSON。
+        self._loaded_from: Path | None = None
         self.normalize()
 
     def normalize(self) -> None:
         """把历史取值收敛到当前取值域。
 
+        **只动取值，不碰 `_loaded_from`**：`load()` 也会调它，如果这里把来源路径清掉，
+        `load()` 之后就再也 `save()` 不了（报"未指定保存路径"）—— 加这个方法的当天就踩到了。
+
         旧版本里"系统提供"与"界面自绘"是两个背景效果，现在合成一个「亚克力模糊」
-        （模糊来源自动选择），老的 `blur` 归到 `acrylic` —— 不然设置读进来之后
-        下拉里选不中任何一项。
+        （模糊来源自动选择），老的 `blur` 归到 `acrylic`：不然设置读进来之后下拉里选不中。
         """
         if self.backdrop == "blur":
             self.backdrop = "acrylic"
-        # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：
-        # 它只是"这份设置从哪个文件读来的"记忆，一旦成为字段就会被 asdict() 写进 JSON。
-        self._loaded_from: Path | None = None
 
     @classmethod
     def defaults_for(cls, path: Path) -> AppSettings:
@@ -129,13 +131,27 @@ class AppSettings:
         write_text_lf(target, json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n")
 
 
-def default_templates_dir() -> Path:
-    """模板库的默认位置：应用数据目录下的 templates/。
+def repo_templates_dir() -> Path | None:
+    """源码检出里随仓库交付的模板库（`<仓库根>/templates`）；不是检出就返回 None。
 
-    不用 CLI 那个 CWD 相对的 `.tu-templates`：打包成 exe 之后工作目录是"从哪双击就从哪"，
-    模板库会随启动位置忽有忽无。CLI 保持自己的默认值不变（它本来就从项目目录里跑）。
+    判据是"仓库根下同时有 pyproject.toml 与 templates/ 目录"：打包成 exe 之后
+    `__file__` 指向解包目录，那里不会有 pyproject.toml，于是自然落到用户数据目录。
     """
-    return default_settings_path().parent / "templates"
+    root = Path(__file__).resolve().parents[2]
+    if (root / "pyproject.toml").is_file() and (root / "templates").is_dir():
+        return root / "templates"
+    return None
+
+
+def default_templates_dir() -> Path:
+    """模板库的默认位置。
+
+    源码检出里用**仓库自带的 templates/**（模板随代码一起版本化、可评审、可分享）；
+    打包产物或装到别处时退回用户数据目录 —— 不用 CWD 相对路径：打包成 exe 之后
+    工作目录是"从哪双击就从哪"，模板库会随启动位置忽有忽无。
+    """
+    shipped = repo_templates_dir()
+    return shipped if shipped is not None else default_settings_path().parent / "templates"
 
 
 def default_settings_path() -> Path:

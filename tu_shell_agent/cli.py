@@ -46,7 +46,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--plan", required=True, help="方案文档路径")
     parser.add_argument("--template", default="single", help="模板 id（默认 single）")
     parser.add_argument("--run-root", default=str(Path.cwd() / ".tu-runs"))
-    parser.add_argument("--templates-dir", default=str(Path.cwd() / ".tu-templates"))
+    parser.add_argument("--templates-dir", default=str(default_templates_dir()))
     parser.add_argument("--opencode-path", default=None, help="覆盖 opencode 可执行文件路径（默认自动探测）")
     parser.add_argument("--bash-path", default=None, help="覆盖 bash 可执行文件路径（默认自动探测）")
     parser.add_argument("--shellcheck-path", default=None, help="覆盖 shellcheck 可执行文件路径（默认自动探测）")
