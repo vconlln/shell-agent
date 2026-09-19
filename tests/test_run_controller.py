@@ -936,7 +936,8 @@ class _SessionRecorderOpencode:
     def __init__(self) -> None:
         self.started: list[str] = []
         self.resumed: list[str] = []
-        self.replies: list[str] = []
+        self.replies: list[tuple[str, str]] = []
+        self.models: list[str] = []
         self.session_counter = 0
 
     def start(self, run_dir, agent_name="", model=None):
@@ -947,8 +948,9 @@ class _SessionRecorderOpencode:
     def resume(self, run_dir, model=None):
         self.resumed.append(str(run_dir))
 
-    def chat(self, session_id, message, timeout_ms, on_delta=None, cancel=None, system_preamble=""):
+    def chat(self, session_id, message, timeout_ms, on_delta=None, cancel=None, system_preamble="", model=""):
         self.replies.append((session_id, message))
+        self.models.append(model)
         return "好的"
 
     def abort(self, session_id):
@@ -1080,3 +1082,44 @@ def test_chat_session_id_is_written_into_the_folder(qtbot, tmp_path):
     meta = json.loads((Path(controller._run_dir) / "meta.json").read_text(encoding="utf-8"))
     assert meta["sessionId"] == controller._session_id
     assert meta["kind"] == "chat"
+
+
+def test_chat_model_can_be_chosen_per_conversation(qtbot, tmp_path):
+    """对话里能选模型：只影响这段对话，并写进目录（恢复时还用它）。
+
+    opencode 的 message 接口支持逐条指定模型，所以换模型不必重建会话、也不动 agent 文件。
+    """
+    import json
+
+    controller, opencode, window = _chat_controller(qtbot, tmp_path, tmp_path / "runs")
+    chat = window.chat_panel
+
+    chat.set_models(["deepseek/deepseek-v4-pro", "glms-3/glm-5.3"])
+    chat.model_combo.setEditText("glms-3/glm-5.3")
+    assert controller._chat_model == "glms-3/glm-5.3"
+
+    controller.ask("你好")
+    _wait_for_chat(qtbot, controller)
+    assert opencode.models[-1] == "glms-3/glm-5.3", "选中的模型没有带到这一条消息上"
+    meta = json.loads((Path(controller._run_dir) / "meta.json").read_text(encoding="utf-8"))
+    assert meta["model"] == "glms-3/glm-5.3"
+
+
+def test_restored_conversation_remembers_its_model(qtbot, tmp_path):
+    """恢复出来的会话要把当时用的模型带回下拉（目录里记着它）。"""
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    old_dir = run_root / "20260919-101010-aaaa"
+    old_dir.mkdir(parents=True)
+    write_session_meta(str(old_dir), "ses_old", kind="chat", model="glms-3/glm-5.3")
+    append_chat(str(old_dir), "user", "上次")
+
+    controller, opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    controller._on_session_selected(str(old_dir))
+    assert window.chat_panel.selected_model() == "glms-3/glm-5.3"
+    assert controller._chat_model == "glms-3/glm-5.3"
+
+    controller.ask("再问一句")
+    _wait_for_chat(qtbot, controller)
+    assert opencode.models[-1] == "glms-3/glm-5.3"

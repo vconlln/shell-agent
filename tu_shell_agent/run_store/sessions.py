@@ -168,6 +168,21 @@ def _session_in(run_dir: Path) -> SessionRef | None:
     )
 
 
+def write_session_model(run_dir: str, model: str) -> None:
+    """只更新目录里记的模型（会话 id 与 kind 不动）—— 对话里换模型后要让文件夹记住。"""
+    path = Path(run_dir) / META_NAME
+    current: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+        except (OSError, ValueError):
+            current = {}
+    current["model"] = model
+    write_text_lf(path, json.dumps(current, ensure_ascii=False, indent=2) + "\n")
+
+
 def write_session_meta(run_dir: str, session_id: str, *, kind: str, model: str = "") -> None:
     """把会话 id 落进目录的 `meta.json`（合并写，不覆盖引擎写过的其它字段）。"""
     path = Path(run_dir) / META_NAME

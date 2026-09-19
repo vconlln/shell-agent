@@ -51,6 +51,8 @@ class ChatPanel(QWidget):
     session_selected = Signal(str)    # 会话下拉选中（携带运行目录）
     sessions_refresh_requested = Signal()
     new_session_requested = Signal()
+    model_changed = Signal(str)        # 对话用的模型改了（provider/model，空 = 用会话默认）
+    models_requested = Signal()        # 需要可用模型列表（首次显示 / 点刷新）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -59,6 +61,7 @@ class ChatPanel(QWidget):
         # ── 会话条：从**文件夹**里扫出来的历史会话 ──────────────────────
         # 会话不再只在内存里：每个运行目录都记着它的 sessionId，这里直接列出来，
         # 选中就接着那一段聊（记录也会从目录里的 chat.jsonl 回填）。
+        self._models_requested_once = False
         self.session_combo = QComboBox()
         self.session_combo.setObjectName("chatSessionCombo")
         self.session_combo.setMinimumWidth(240)
@@ -70,6 +73,23 @@ class ChatPanel(QWidget):
         self.new_button.setObjectName("chatSessionNewButton")
         self.new_button.clicked.connect(lambda: self.new_session_requested.emit())
 
+        # 模型：只影响**这段对话**（opencode 的 message 接口支持逐条指定模型，
+        # 所以换模型不必重建会话、也不动 agent 文件）。
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("chatModelCombo")
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.setMinimumWidth(200)
+        self.model_combo.addItem("", "")
+        self.model_combo.lineEdit().setPlaceholderText("沿用会话模型")
+        self.model_combo.setToolTip(
+            "只影响这段对话（按条指定给 opencode）；生成脚本用的是「设置 → 模型」里的那个。"
+        )
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self.model_button = QPushButton("可用模型")
+        self.model_button.setObjectName("chatModelRefreshButton")
+        self.model_button.clicked.connect(lambda: self.models_requested.emit())
+
         session_row = QWidget()
         session_row.setObjectName("chatSessionRow")
         session_layout = QHBoxLayout(session_row)
@@ -78,6 +98,11 @@ class ChatPanel(QWidget):
         session_layout.addWidget(self.session_combo, 1)
         session_layout.addWidget(self.refresh_button)
         session_layout.addWidget(self.new_button)
+        model_layout_row = QHBoxLayout()
+        model_layout_row.setContentsMargins(0, 0, 0, 0)
+        model_layout_row.addWidget(QLabel("模型"))
+        model_layout_row.addWidget(self.model_combo, 1)
+        model_layout_row.addWidget(self.model_button)
 
         self.transcript = QPlainTextEdit()
         self.transcript.setObjectName("chatTranscript")
@@ -113,6 +138,7 @@ class ChatPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
+        layout.addLayout(model_layout_row)
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.input)
@@ -139,6 +165,50 @@ class ChatPanel(QWidget):
             self.session_combo.setCurrentIndex(index if index >= 0 else 0)
         finally:
             self.session_combo.blockSignals(False)
+
+    def set_models(self, models) -> None:
+        """铺可用模型列表；**保留当前选择**（刷新不该把已选的模型弄丢）。"""
+        current = self.model_combo.currentText().strip()
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            self.model_combo.addItem("", "")
+            for model in models:
+                self.model_combo.addItem(str(model), str(model))
+            index = self.model_combo.findText(current)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+            else:
+                self.model_combo.setEditText(current)
+        finally:
+            self.model_combo.blockSignals(False)
+
+    def set_model(self, model: str) -> None:
+        """外部（恢复会话/新建会话）设定当前模型，不触发 model_changed。"""
+        text = (model or "").strip()
+        self.model_combo.blockSignals(True)
+        try:
+            index = self.model_combo.findText(text)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+            else:
+                self.model_combo.setEditText(text)
+        finally:
+            self.model_combo.blockSignals(False)
+
+    def selected_model(self) -> str:
+        return self.model_combo.currentText().strip()
+
+    def _on_model_changed(self, text: str) -> None:
+        self.model_changed.emit(text.strip())
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """第一次显示时才去问可用模型：跑一次 `opencode models` 是子进程，
+        没必要在启动路径上付这个代价（设置页的字体列表同理）。"""
+        super().showEvent(event)
+        if not self._models_requested_once:
+            self._models_requested_once = True
+            self.models_requested.emit()
 
     def selected_session(self) -> str:
         return str(self.session_combo.currentData() or "")

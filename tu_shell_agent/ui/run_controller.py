@@ -50,6 +50,7 @@ from ..run_store.sessions import (
     scan_sessions,
     session_in,
     write_session_meta,
+    write_session_model,
 )
 from .engine_worker import ChatWorker, DetectWorker, EngineWorker
 from .widgets.confirm_dialog import ConfirmDialog
@@ -139,12 +140,14 @@ class RunController(QObject):
         self._worker: EngineWorker | None = None
         self._detect_worker: DetectWorker | None = None
         self._chat_worker: ChatWorker | None = None
+        self._models_worker: Any = None
         self._session_id = ""          # 当前 opencode 会话（续跑、对话共用同一个）
         self._chat_preamble = ""       # 只在新会话的第一句话前带上（方案上下文）
         self._run_dir = ""
         self._serve_dir = ""           # 当前 serve 起在哪个目录（会话按目录隔离）
         # 用户点了「新对话」：下一次提问**不要**又自动恢复最近那段（否则点了等于没点）
         self._force_new_chat = False
+        self._chat_model = ""          # 这段对话用的模型（provider/model，空 = 沿用会话）
         self._config: RunConfig | None = None
         self._template: TemplateSpec | None = None
         self._plan_text = ""
@@ -176,6 +179,8 @@ class RunController(QObject):
         chat.cancel_requested.connect(self.cancel_chat)
         chat.script_extracted.connect(self._on_script_extracted)
         chat.session_selected.connect(self._on_session_selected)
+        chat.model_changed.connect(self._on_chat_model_changed)
+        chat.models_requested.connect(self._on_models_requested)
         chat.sessions_refresh_requested.connect(self.refresh_sessions)
         chat.new_session_requested.connect(self._on_new_session)
         window.set_running(False)
@@ -410,8 +415,22 @@ class RunController(QObject):
         self._force_new_chat = False
         append_chat(self._run_dir, "user", message)
 
+        # 没有指定过模型时，退回设置里那个（用户在下拉里的选择优先：那是显式选择）
+        if not self._chat_model:
+            self._chat_model = str(self._config_from_ui().model or "")
+            if self._chat_model:
+                self.window.chat_panel.set_model(self._chat_model)
+        if self._run_dir and self._chat_model:
+            # 记下这段对话实际用的模型：恢复时要把它带回下拉
+            write_session_model(self._run_dir, self._chat_model)
+
         worker = ChatWorker(opencode=adapter, timeout_ms=self._config_from_ui().generate_timeout_ms)
-        worker.submit(self._session_id, message, self._chat_preamble)
+        worker.submit(
+            self._session_id,
+            message,
+            self._chat_preamble,
+            self._chat_model or str(self._config_from_ui().model or ""),
+        )
         self._chat_reply: list[str] = []
         worker.delta.connect(chat.append_delta)
         worker.done.connect(self._on_chat_done)
@@ -447,6 +466,8 @@ class RunController(QObject):
         self._chat_preamble = ""
         self._serve_dir = ""          # 目录换了，serve 要按新目录重起
         chat.load_history(read_chat(reference.run_dir))
+        self._chat_model = reference.model or ""
+        chat.set_model(self._chat_model)
         chat.set_status(f"已切换到 {reference.label()}（会话 {reference.session_id}）")
 
     def _on_new_session(self) -> None:
@@ -457,6 +478,8 @@ class RunController(QObject):
         self._serve_dir = ""
         self._force_new_chat = True
         chat = self.window.chat_panel
+        self._chat_model = ""
+        chat.set_model("")
         chat.clear_history()
         chat.set_status("下一句话将开始一段新对话。")
 
@@ -476,6 +499,34 @@ class RunController(QObject):
             return
         resume(run_dir, self._config_from_ui().model)
         self._serve_dir = run_dir
+
+    def _on_chat_model_changed(self, model: str) -> None:
+        """用户在下拉里换了模型：只影响这段对话，并写进目录（下次恢复还用它）。"""
+        self._chat_model = model.strip()
+        if self._run_dir and self._chat_model:
+            write_session_model(self._run_dir, self._chat_model)
+        self.window.chat_panel.set_status(
+            f"这段对话将使用 {self._chat_model}。" if self._chat_model
+            else "这段对话沿用会话自己的模型。"
+        )
+
+    def _on_models_requested(self) -> None:
+        """拉可用模型列表填进对话面板的下拉（子进程调用放线程里）。"""
+        from .engine_worker import ModelsWorker
+
+        chat = self.window.chat_panel
+        worker = ModelsWorker(str(getattr(self.settings, "opencode_path", "") or ""))
+        self._models_worker = worker
+
+        def on_done(models: object) -> None:
+            chat.set_models([str(item) for item in (models or [])])
+
+        def on_failed(message: str) -> None:
+            chat.set_status(f"取可用模型失败：{message}")
+
+        worker.done.connect(on_done)
+        worker.failed.connect(on_failed)
+        worker.start()
 
     def _new_chat_run_dir(self) -> str:
         """为"先聊天、还没跑过"的情形准备一个运行目录（会话与 agent 文件需要落处）。"""

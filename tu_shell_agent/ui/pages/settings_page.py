@@ -86,7 +86,8 @@ class SettingsPage(QWidget):
         model_layout.addWidget(self.model_combo, 1)
         model_layout.addWidget(self.model_refresh_button)
         self.model_hint = QLabel(
-            "留空则使用 opencode 的默认模型。若 opencode 未配置默认模型，将使用其免费档；"
+            "生成脚本用这个模型；模型对话可在「模型对话」面板里单独选。"
+            "留空则使用 opencode 的默认模型 —— 若 opencode 未配置默认模型，将使用其免费档；"
             "免费档仅限官方客户端，本应用的调用会被拒绝。"
         )
         self.model_hint.setObjectName("modelHint")
@@ -195,7 +196,7 @@ class SettingsPage(QWidget):
         outer.addWidget(scrollable(content))
         models_group = QGroupBox("模型")
         models_form = QFormLayout(models_group)
-        models_form.addRow("生成与对话", model_row)
+        models_form.addRow("生成脚本用", model_row)
         models_form.addRow("", self.model_hint)
 
         layout.addWidget(components)

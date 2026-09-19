@@ -54,3 +54,17 @@ def list_models(opencode_path: str = "opencode", *, timeout_s: float = DEFAULT_T
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         raise RuntimeError(f"`opencode models` 退出码 {completed.returncode}：{detail[-1] if detail else '无输出'}")
     return parse_models(completed.stdout)
+
+
+def split_model(reference: str) -> tuple[str, str] | None:
+    """`provider/model` → `(provider, model)`；格式不对时返回 None。
+
+    opencode 的模型 id 里可能带斜杠（`provider/org/model`），所以只按**第一个**斜杠切。
+    """
+    text = (reference or "").strip()
+    if "/" not in text:
+        return None
+    provider, _, model = text.partition("/")
+    if not provider.strip() or not model.strip():
+        return None
+    return provider.strip(), model.strip()

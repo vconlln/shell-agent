@@ -188,11 +188,15 @@ class ChatWorker(QThread):
         self._opencode = opencode
         self._timeout_ms = timeout_ms
         self._cancel = threading.Event()
-        self._request: tuple[str, str, str] | None = None
+        self._request: tuple[str, str, str, str] | None = None
 
-    def submit(self, session_id: str, message: str, preamble: str = "") -> None:
-        """必须在 start() 之前调用。`preamble` 只在会话刚建立时用来交代上下文。"""
-        self._request = (session_id, message, preamble)
+    def submit(self, session_id: str, message: str, preamble: str = "", model: str = "") -> None:
+        """必须在 start() 之前调用。
+
+        `preamble` 只在会话刚建立时用来交代上下文；`model` 是**这一条消息**要用的模型
+        （`provider/model`），留空表示沿用会话/agent 文件里的那个。
+        """
+        self._request = (session_id, message, preamble, model)
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -204,7 +208,10 @@ class ChatWorker(QThread):
         if self._request is None:
             self.failed.emit("ChatWorker.submit() 未被调用")
             return
-        session_id, message, preamble = self._request
+        session_id, message, preamble, model = self._request
+        # 只带非空模型：替身（测试）与旧调用方的 chat() 可能没有这个形参，
+        # 无条件传会把它们全部打断。
+        extra = {"model": model} if model else {}
         try:
             reply = self._opencode.chat(
                 session_id,
@@ -213,6 +220,7 @@ class ChatWorker(QThread):
                 on_delta=self.delta.emit,
                 cancel=self._cancel,
                 system_preamble=preamble,
+                **extra,
             )
         except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
             self.failed.emit(str(error))

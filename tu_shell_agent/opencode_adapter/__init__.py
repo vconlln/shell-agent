@@ -10,6 +10,7 @@ import httpx
 
 from ..types import GeneratedScript
 from .agent_file import AGENT_NAME, write_agent_file
+from .models import split_model
 from .events import SseParser, delta_text, event_text, is_permission_ask
 from .server import LOOPBACK_OPTIONS, ServeHandle, basic_auth_header, start_serve
 
@@ -248,6 +249,7 @@ class OpencodeAdapter:
         on_delta: Callable[[str], None] | None = None,
         cancel: Any = None,
         system_preamble: str = "",
+        model: str = "",
     ) -> str:
         """自由对话：不带 `format`，返回纯文本回复。
 
@@ -281,12 +283,18 @@ class OpencodeAdapter:
             watcher.start()
         try:
             try:
+                payload: dict[str, Any] = {
+                    "agent": AGENT_NAME,
+                    "parts": [{"type": "text", "text": text}],
+                }
+                # 逐条指定模型：opencode 的 message 接口接受 `model: {providerID, modelID}`，
+                # 于是"换模型"不必重启 serve、也不必动 agent 文件 —— 对话里可以随时换。
+                reference = split_model(model)
+                if reference is not None:
+                    payload["model"] = {"providerID": reference[0], "modelID": reference[1]}
                 response = self._client.post(
                     f"/session/{session_id}/message",
-                    json={
-                        "agent": AGENT_NAME,
-                        "parts": [{"type": "text", "text": text}],
-                    },
+                    json=payload,
                     timeout=timeout_ms / 1000.0,
                 )
             except httpx.TimeoutException:
