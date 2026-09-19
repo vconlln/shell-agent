@@ -892,3 +892,36 @@ def test_extra_instruction_reaches_the_engine_prompt(qtbot, tmp_path):
     assert "这次别动 logs/ 目录" in seen[0]
     # 也要作为冻结输入落盘，方便事后查"这次为什么这么改"
     assert (Path(controller._run_dir) / "extra.md").read_text(encoding="utf-8") == "这次别动 logs/ 目录"
+
+
+def test_selected_model_reaches_the_engine(qtbot, tmp_path):
+    """设置里选的模型必须真的传进引擎。
+
+    这是用户实际踩到的坑：不传模型时 opencode 会用它的默认模型；而 opencode 没配默认模型时
+    会落到免费档（`opencode/*-free`），免费档只允许官方客户端 → 经 serve 的调用被拒，
+    报 "OpenCode's free tier can only be used from within OpenCode"。
+    所以"模型有没有传到 RunConfig"必须有用例钉住。
+    """
+    from tu_shell_agent.ui.settings import AppSettings
+
+    controller = _controller(qtbot, tmp_path)
+    controller.settings = AppSettings(opencode_model="deepseek/deepseek-v4-pro")
+
+    config = controller._config_from_ui()
+    assert config.model == "deepseek/deepseek-v4-pro"
+
+    # 留空 = 不指定（交给 opencode 自己的默认模型），不能变成空字符串
+    controller.settings = AppSettings(opencode_model="")
+    assert controller._config_from_ui().model is None
+
+
+def test_chat_failure_carries_actionable_advice(qtbot, tmp_path):
+    """已知的 provider 报错要附上"该怎么办"，而不是只把原文丢给用户。"""
+    controller = _controller(qtbot, tmp_path)
+    controller._on_chat_failed(
+        "opencode 返回错误 APIError：Error from provider (Console): "
+        "OpenCode's free tier can only be used from within OpenCode"
+    )
+    transcript = controller.window.chat_panel.transcript.toPlainText()
+    assert "设置 → 模型" in transcript
+    assert "免费档" in transcript

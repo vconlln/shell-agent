@@ -121,6 +121,30 @@ class EngineWorker(QThread):
         return self._confirm(round_no, script_path, script, trusted)
 
 
+class ModelsWorker(QThread):
+    """取 opencode 可用模型列表（`opencode models`）。
+
+    放线程里：要起一个子进程，在 UI 线程里跑会把窗口冻住；而且这一条是"用户点一下才做"
+    的事，没必要预取。外部世界的调用放在适配器层（`opencode_adapter.models`），
+    界面这里只负责线程与信号。
+    """
+
+    done = Signal(object)   # list[str]：provider/model
+    failed = Signal(str)
+
+    def __init__(self, opencode_path: str = "", parent: Any = None) -> None:
+        super().__init__(parent)
+        self._opencode_path = opencode_path
+
+    def run(self) -> None:  # noqa: D102 - QThread
+        try:
+            from ..opencode_adapter.models import list_models
+
+            self.done.emit(list_models(self._opencode_path or "opencode"))
+        except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
+            self.failed.emit(str(error))
+
+
 class DetectWorker(QThread):
     """环境探测也放线程里：`detect_all` 会起若干子进程（各自跑一次 `--version`），
     在 UI 线程里跑会把窗口冻住好几秒 —— 用户还以为程序挂了。

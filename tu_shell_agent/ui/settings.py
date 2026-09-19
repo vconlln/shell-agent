@@ -43,6 +43,10 @@ class AppSettings:
     opencode_path: str = ""
     bash_path: str = ""
     shellcheck_path: str = ""
+    # 生成与对话使用的模型，形如 `provider/model`（例：deepseek/deepseek-v4-pro）。
+    # 留空 = 用 opencode 自己的默认模型 —— 注意 opencode 未配置默认模型时会落到它的
+    # 免费档（`opencode/*-free`），而免费档只允许官方客户端调用，经 serve 的 API 调用会被拒绝。
+    opencode_model: str = ""
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：
     # 与其它设置同一个文件，用户能直接看、能删、能抄给同事。
     layout: str = ""

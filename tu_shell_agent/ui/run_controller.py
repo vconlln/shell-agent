@@ -355,11 +355,15 @@ class RunController(QObject):
                 if self._adapter is not None:
                     run_dir = self._run_dir or self._new_chat_run_dir()
                     self._run_dir = run_dir
-                    self._session_id = self._adapter.start(run_dir)
+                    self._session_id = self._adapter.start(
+                        run_dir, "tu-shell-writer", self._config_from_ui().model
+                    )
                 else:
                     run_dir = self._run_dir or self._new_chat_run_dir()
                     self._run_dir = run_dir
-                    self._session_id = adapter.start(run_dir, "tu-shell-writer", None)
+                    self._session_id = adapter.start(
+                        run_dir, "tu-shell-writer", self._config_from_ui().model
+                    )
             except Exception as error:  # noqa: BLE001 - 起不来就如实说
                 chat.add_error(f"无法建立对话会话：{error}")
                 return
@@ -404,10 +408,13 @@ class RunController(QObject):
         chat.set_status("可以继续问；回复里的脚本可以点「把最新脚本放进中栏」再走改后重跑。")
 
     def _on_chat_failed(self, message: str) -> None:
+        from ..opencode_adapter.errors import explain_provider_error
+
         chat = self.window.chat_panel
-        chat.add_error(f"对话失败：{message}")
+        hint = explain_provider_error(message)
+        chat.add_error(f"对话失败：{message}" + (f"\n{hint}" if hint else ""))
         chat.set_busy(False)
-        chat.set_status("对话失败；上面是原始错误。")
+        chat.set_status("对话失败；上面是原始错误。" + ("已附上处理建议。" if hint else ""))
 
     def _on_script_extracted(self, script: str) -> None:
         """把对话里抠出来的脚本放进中栏——**只放进去，不执行**。
@@ -546,11 +553,15 @@ class RunController(QObject):
     # ── 输入装配 ──────────────────────────────────────────────────
     def _config_from_ui(self) -> RunConfig:
         config = self.window.left_pane.to_run_config()
-        if config.run_root:
-            return config
-        # 左栏没填就退到构造参数给的运行根（"改后重跑"常常没走左栏的校验）。
-        # 用 replace 而不是 `RunConfig(**config.__dict__)`：RunConfig 是 slots 数据类，没有 __dict__。
-        return replace(config, run_root=self._run_root)
+        if not config.run_root:
+            # 左栏没填就退到构造参数给的运行根（"改后重跑"常常没走左栏的校验）。
+            # 用 replace 而不是 `RunConfig(**config.__dict__)`：RunConfig 是 slots 数据类，没有 __dict__。
+            config = replace(config, run_root=self._run_root)
+        # 模型来自设置页（provider/model）。**不能省**：留空时 opencode 若没配默认模型，
+        # 会落到它自己的免费档，而免费档只允许官方客户端调用 —— 经 serve 的 API 调用会得到
+        # "OpenCode's free tier can only be used from within OpenCode"。
+        model = str(getattr(self.settings, "opencode_model", "") or "").strip()
+        return replace(config, model=model or None)
 
     def _prefill_inputs(self) -> None:
         """把设置里的运行根填进左栏（只在用户还没填时），再交给 `validate()` 判。
@@ -693,8 +704,12 @@ class RunController(QObject):
         两个信号**二选一**（每次运行恰好一个）。等待结论的调用方要同时听两个，
         否则引擎异常时它会一直等不到——这正是加这个信号的原因。
         """
+        from ..opencode_adapter.errors import explain_provider_error
+
         self._set_running(False)
-        self._status(f"引擎异常：{message}")
+        # 生成阶段撞上 provider 报错时，同样给一句可操作的建议（与对话那条路一致）
+        hint = explain_provider_error(message)
+        self._status(f"引擎异常：{message}" + (f"\n{hint}" if hint else ""))
         self._dispose_adapter()
         self._sync_buttons()
         self.failed.emit(message)

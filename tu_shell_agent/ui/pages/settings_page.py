@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from pathlib import Path
 
@@ -66,6 +67,32 @@ class SettingsPage(QWidget):
         components_form.addRow("opencode", self.opencode_path_edit)
         components_form.addRow("Git Bash", self.bash_path_edit)
         components_form.addRow("shellcheck", self.shellcheck_path_edit)
+
+        # ── 模型 ────────────────────────────────────────────────────
+        # 必须显式选：opencode 自己没配默认模型时会落到免费档，而免费档只允许官方客户端，
+        # 经 serve 的 API 调用会被拒（用户实际遇到的就是这条）。
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("modelCombo")
+        self.model_combo.setEditable(True)                 # 列表取不到时也能手输
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.addItem("", "")
+        self.model_combo.lineEdit().setPlaceholderText("provider/model，如 deepseek/deepseek-v4-pro")
+        self.model_refresh_button = QPushButton("检测可用模型")
+        self.model_refresh_button.setObjectName("modelRefreshButton")
+        self.model_refresh_button.clicked.connect(self._refresh_models)
+        model_row = QWidget()
+        model_layout = QHBoxLayout(model_row)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.addWidget(self.model_combo, 1)
+        model_layout.addWidget(self.model_refresh_button)
+        self.model_hint = QLabel(
+            "留空则使用 opencode 的默认模型。若 opencode 未配置默认模型，将使用其免费档；"
+            "免费档仅限官方客户端，本应用的调用会被拒绝。"
+        )
+        self.model_hint.setObjectName("modelHint")
+        self.model_hint.setProperty("role", "muted")
+        self.model_hint.setWordWrap(True)
+        self._models_worker: Any = None
 
         self.run_root_edit = QLineEdit()
         self.run_root_edit.setPlaceholderText("每次运行的产物目录（脚本 / 输出 / meta.json）")
@@ -166,7 +193,13 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scrollable(content))
+        models_group = QGroupBox("模型")
+        models_form = QFormLayout(models_group)
+        models_form.addRow("生成与对话", model_row)
+        models_form.addRow("", self.model_hint)
+
         layout.addWidget(components)
+        layout.addWidget(models_group)
         layout.addWidget(run_defaults)
         layout.addWidget(checks)
         # 外观
@@ -225,6 +258,7 @@ class SettingsPage(QWidget):
             self.backdrop_combo,
             self.wallpaper_edit,
             self.acrylic_blur_spin,
+            self.model_combo,
         ):
             widget.blockSignals(True)
         try:
@@ -233,12 +267,18 @@ class SettingsPage(QWidget):
             self.backdrop_combo.setCurrentIndex(max(0, _select_by_data))
             self.wallpaper_edit.setText(str(getattr(settings, "acrylic_wallpaper", "") or ""))
             self.acrylic_blur_spin.setValue(int(getattr(settings, "acrylic_blur", 40) or 0))
+            model = str(getattr(settings, "opencode_model", "") or "")
+            if self.model_combo.findText(model) >= 0:
+                self.model_combo.setCurrentIndex(self.model_combo.findText(model))
+            else:
+                self.model_combo.setEditText(model)
         finally:
             for widget in (
                 self.ui_scale_spin,
                 self.backdrop_combo,
                 self.wallpaper_edit,
                 self.acrylic_blur_spin,
+                self.model_combo,
             ):
                 widget.blockSignals(False)
         self._refresh_backdrop_hint()
@@ -280,6 +320,45 @@ class SettingsPage(QWidget):
         """按 userData 选中（字体名可能不在列表里 —— 那就是被卸载了，退回"自动"）。"""
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _refresh_models(self) -> None:
+        """点「检测可用模型」：起线程跑 `opencode models`，回来后填进下拉（保留当前选择）。"""
+        from ..engine_worker import ModelsWorker
+
+        self.model_refresh_button.setEnabled(False)
+        self.model_hint.setText("正在检测可用模型…")
+        worker = ModelsWorker(self.opencode_path_edit.text().strip())
+        self._models_worker = worker
+
+        def on_done(models: object) -> None:
+            self._fill_models([str(item) for item in (models or [])])
+            self.model_refresh_button.setEnabled(True)
+            self.model_hint.setText(f"检测到 {len(models or [])} 个模型，请选择一个已配置凭据的。")
+
+        def on_failed(message: str) -> None:
+            self.model_refresh_button.setEnabled(True)
+            self.model_hint.setText(f"检测失败：{message}")
+
+        worker.done.connect(on_done)
+        worker.failed.connect(on_failed)
+        worker.start()
+
+    def _fill_models(self, models: list[str]) -> None:
+        """把模型列表铺进下拉，**保留用户当前输入**（列表刷新不该把已选的模型弄丢）。"""
+        current = self.model_combo.currentText().strip()
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            self.model_combo.addItem("", "")
+            for model in models:
+                self.model_combo.addItem(model, model)
+            index = self.model_combo.findText(current)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+            else:
+                self.model_combo.setEditText(current)
+        finally:
+            self.model_combo.blockSignals(False)
 
     def _pick_wallpaper(self) -> None:
         """选一张壁纸图片。只在点击时弹对话框 —— 无头测试不会走到这里。"""
@@ -334,6 +413,7 @@ class SettingsPage(QWidget):
         settings.backdrop = str(self.backdrop_combo.currentData() or "off")
         settings.acrylic_wallpaper = self.wallpaper_edit.text().strip()
         settings.acrylic_blur = int(self.acrylic_blur_spin.value())
+        settings.opencode_model = self.model_combo.currentText().strip()
         return settings
 
     def save(self) -> Path | None:

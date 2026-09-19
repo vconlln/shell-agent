@@ -312,3 +312,25 @@ def test_selfcheck_warning_keeps_the_box_open(qtbot):
     )
     assert "提示" in page.status_label.text()
     assert page.text.isVisible() is True
+
+
+def test_model_field_round_trips(qtbot, tmp_path):
+    """模型字段要能存能读、能在设置页铺回来；列表刷新不能把已选的模型弄丢。"""
+    from tu_shell_agent.ui.settings import AppSettings
+
+    settings = AppSettings()
+    settings.opencode_model = "deepseek/deepseek-v4-pro"
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+    assert loaded.opencode_model == "deepseek/deepseek-v4-pro"
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.set_settings(loaded)
+    assert page.model_combo.currentText() == "deepseek/deepseek-v4-pro"
+
+    page._fill_models(["opencode/big-pickle", "deepseek/deepseek-v4-pro"])
+    assert page.model_combo.currentText() == "deepseek/deepseek-v4-pro", "刷新列表把选择弄丢了"
+    page.collect()
+    assert loaded.opencode_model == "deepseek/deepseek-v4-pro"
