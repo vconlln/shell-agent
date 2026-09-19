@@ -57,6 +57,29 @@ def apply_to(window: Any) -> None:
         theme_module.restack_viewports(window)
 
 
+def erase_damage(widget: Any, event: Any) -> None:
+    """把这次要重绘的区域**擦掉**，再让正常绘制往上叠。
+
+    为什么必须擦：窗口半透明（`WA_TranslucentBackground`）时，它的底色是**带 alpha** 的，
+    正常绘制是"混合"而不是"覆盖"。滚动或重排后只重绘一块区域时，上一次留下的像素会透过来 ——
+    屏幕上就是**重影**（用户报的"半透明又成这种重影的了"）。
+    擦除用 `CompositionMode_Source`：它是"替换"，不受 alpha 影响。
+    """
+    from PySide6.QtGui import QColor, QPainter
+
+    painter = QPainter(widget)
+    painter.save()
+    try:
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(event.rect(), QColor(0, 0, 0, 0))
+    finally:
+        # **必须恢复**：合成模式是画笔状态，会跟着这次绘制一路传下去 ——
+        # 留在 Source 上，后面所有绘制都变成"替换"，半透明就整体失效
+        # （实测：留在 Source 上时窗口渲染不再与背景混合，透出 0%）。
+        painter.restore()
+        painter.end()
+
+
 def enable_translucent(window: Any) -> None:
     """让窗口背景可以半透明（底色自身的 alpha 由主题负责）。"""
     from PySide6.QtCore import Qt

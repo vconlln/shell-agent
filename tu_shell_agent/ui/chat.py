@@ -81,7 +81,7 @@ class ChatPanel(QWidget):
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.setMinimumWidth(200)
         self.model_combo.addItem("", "")
-        self.model_combo.lineEdit().setPlaceholderText("沿用会话模型")
+        self.model_combo.lineEdit().setPlaceholderText("使用会话模型")
         self.model_combo.setToolTip(
             "只影响这段对话（按条指定给 opencode）；生成脚本用的是「设置 → 模型」里的那个。"
         )
@@ -106,13 +106,13 @@ class ChatPanel(QWidget):
         self.transcript.setReadOnly(True)
         self.transcript.setMinimumHeight(120)
         self.transcript.setPlaceholderText(
-            "这里显示你与模型的对话；运行期间的模型输出也会流式追加在这里。"
+            "显示与模型的对话；运行期间的模型输出也会追加在此处。"
         )
 
         self.input = QPlainTextEdit()
         self.input.setObjectName("chatInput")
         self.input.setPlaceholderText(
-            "问它：这条报告是什么意思 / 为什么第二轮失败了 / 把脚本改成先备份再删除…（Ctrl+Enter 发送）"
+            "输入问题，例如：该报告的含义 / 第二轮失败的原因 / 将脚本改为先备份再删除。（Ctrl+Enter 发送）"
         )
         self.input.setFixedHeight(72)
 
@@ -159,7 +159,7 @@ class ChatPanel(QWidget):
             for item in sessions:
                 self.session_combo.addItem(item.label(), item.run_dir)
             if not sessions:
-                self.session_combo.addItem("（未发现可恢复的会话）", "")
+                self.session_combo.addItem("未发现可恢复的会话", "")
             index = self.session_combo.findData(current_run_dir) if current_run_dir else -1
             self.session_combo.setCurrentIndex(index if index >= 0 else 0)
         finally:

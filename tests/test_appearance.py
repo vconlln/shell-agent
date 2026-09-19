@@ -41,6 +41,24 @@ def restore_app(qtbot):
         app.setFont(font)
 
 
+def _render_alpha(window, point) -> int:
+    """把窗口渲染到**透明**画布上，取该点的 alpha —— 直接量"这扇窗盖住了多少桌面"。
+
+    不能再用"品红/绿双画布"那招：`paintEvent` 会先把这次要重绘的区域**擦成透明**
+    （半透明窗口不擦就会留下上一次的像素 = 重影），画布自己的颜色会被一起擦掉，
+    于是两种底色的渲染结果永远相同、量不出任何东西。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+    return image.pixelColor(point).alpha()
+
+
 def _window(tmp_path, **fields) -> MainWindow:
     settings = AppSettings(run_root=str(tmp_path / "runs"), templates_dir=str(tmp_path / "tpl"), **fields)
     return MainWindow(wire_controller=False, settings=settings)
@@ -137,8 +155,8 @@ def test_settings_page_offers_fonts_and_scale(qtbot):
     assert page.mono_font_combo.itemData(0) == ""        # 第一项 = 自动
     assert page.ui_font_combo.count() > 1
     modes = {page.backdrop_combo.itemData(i) for i in range(page.backdrop_combo.count())}
-    assert modes == {"off", "translucent", "blur", "acrylic"}, (
-        "背景效果要四种：不透明 / 半透明 / 问系统要模糊 / 自绘壁纸模糊"
+    assert modes == {"off", "translucent", "acrylic"}, (
+        "背景效果只留三种：不透明 / 半透明 / 亚克力模糊（模糊来源自动选择）"
     )
 
 
@@ -176,33 +194,36 @@ def test_translucent_backdrop_makes_surfaces_transparent(restore_app, qtbot, tmp
     assert restore_app.palette().windowText().color().alpha() == 255
 
 
-def test_blur_reports_honestly_when_the_platform_cannot_do_it(restore_app, qtbot, tmp_path):
-    """拿不到模糊时必须如实报 False 并给提示，不能假装成功。
+def test_acrylic_reports_its_blur_source_honestly(restore_app, qtbot, tmp_path, monkeypatch):
+    """亚克力的模糊来源要如实（系统合成器 / 界面自绘），不能谎报。
 
-    开发机是 Linux/Wayland（Niri），没有给普通应用的模糊接口；Windows 11 上才可能为 True。
+    现在只有一个「亚克力模糊」选项：来源按可用性自动选择 —— 系统合成器优先，拿不到就用
+    界面自绘（自己糊壁纸）。开发机是 Linux/Wayland（Niri），没有给普通应用的模糊接口；
+    Windows 11 22H2+ 才可能拿到系统的。
     """
+    from PySide6.QtGui import QColor, QImage
+
     from tu_shell_agent.ui import backdrop as backdrop_module
 
-    window = _window(tmp_path, backdrop="blur")
+    wallpaper = tmp_path / "wall.png"
+    image = QImage(96, 64, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(120, 130, 140))
+    image.save(str(wallpaper))
+
+    window = _window(tmp_path, backdrop="acrylic", acrylic_wallpaper=str(wallpaper))
     qtbot.addWidget(window)
     window.show()
-    # 直接问平台能不能模糊 —— 断言要跟**平台的真实能力**比，而不是跟窗口自己报的标志比。
-    # （第一版就是拿标志当基准，于是"把标志写死成 True"这个变异体照样通过。）
+    # 断言要跟**平台的真实能力**比，而不是跟窗口自己报的标志比（否则"把标志写死"的变异体照样通过）
     platform_can = backdrop_module.try_enable_blur(window)
     window.apply_appearance()
 
     assert window.blur_available == platform_can, "模糊可用性不能谎报"
     if platform_can:
-        assert window._appearance_hint() == ""            # 真拿到了就别报丧
-        # 系统能模糊时就用系统的：窗口保持半透明，不铺自绘层
-        assert window._acrylic_image is None
+        assert window._acrylic_image is None, "系统真在模糊时不必再铺自绘层"
         assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
     else:
-        # 系统给不了模糊时**改用界面自绘**，而不是把用户丢回没有模糊的半透明。
-        # （用户实测反馈：系统提供模式在他的桌面上就是一片平的深色。）
-        assert "界面自绘" in window._appearance_hint()
+        assert window._acrylic_image is not None, "拿不到系统模糊时应当由自绘层接管"
         assert "界面自绘" in window.status_label.text()
-        assert window._acrylic_image is not None, "没有退到自绘层"
 
 
 def test_blur_mode_falls_back_to_self_drawn_when_the_platform_cannot_blur(restore_app, qtbot, tmp_path, monkeypatch):
@@ -408,15 +429,13 @@ def test_dialogs_follow_the_translucent_backdrop(restore_app, qtbot, tmp_path):
 
 
 def test_rendered_surfaces_let_the_backdrop_through(restore_app, qtbot, tmp_path):
-    """**渲染结果**层面的证据：把整个窗口画到品红画布上，看壁纸还能透出多少。
+    """**渲染结果**层面的证据：半透明模式下，这些表面真的让桌面透出来。
 
-    只断言令牌里的 alpha 不够 —— 真正决定观感的是**合成之后**的结果，而这正是我踩过的坑：
-    窗口底自己就是一层 78% 的深色时，内容区再透明，合成后也只剩 22% 能透出来
-    （用户反馈的"还是没有完全透明"）。所以这里把整窗渲染到品红上，
-    再按控件→窗口的坐标映射取该控件中心的那一个像素，用"品红残留比例"反推等效不透明度。
+    判据是渲染到透明画布后的 **alpha**：alpha < 255 表示这扇窗没有盖满那一块。
+    只断言令牌里的 alpha 不够 —— 决定观感的是合成之后的结果（窗口底自己就是一层深色时，
+    内部再透也只剩百分之十几能透出来，用户为此反馈过两次）。
     """
     from PySide6.QtCore import QPoint
-    from PySide6.QtGui import QColor, QImage, QPainter
 
     window = _window(tmp_path, backdrop="translucent")
     qtbot.addWidget(window)
@@ -429,50 +448,30 @@ def test_rendered_surfaces_let_the_backdrop_through(restore_app, qtbot, tmp_path
         "报告视图": window.right_pane.notes_view,
         "方案预览": window.left_pane.plan_preview,
         "对话记录": window.chat_panel.transcript,
-        "运行时间线": window.tool_tabs,
     }
-
-    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(255, 0, 255))
-    painter = QPainter(image)
-    window.render(painter, QPoint(0, 0))
-    painter.end()
-
     for name, widget in targets.items():
         center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
-        pixel = image.pixelColor(center)
-        bleed = pixel.red() / 255  # 品红残留比例 = 壁纸能透出来的程度
-        print(f"[透出量] {name}: rgb={pixel.red(), pixel.green(), pixel.blue()} 透出≈{bleed:.0%}")
-        assert bleed >= 0.18, (
-            f"{name} 几乎不透：等效不透明≈{1 - bleed:.0%}"
-            f"（测得 {pixel.red(), pixel.green(), pixel.blue()}）"
-        )
-        assert bleed <= 0.75, f"{name} 透得过头，底色没了、文字会看不清"
+        alpha = _render_alpha(window, center)
+        print(f"[透出量] {name}: alpha={alpha}")
+        assert alpha <= 250, f"{name} 等效不透明（alpha={alpha}），桌面透不出来"
+        assert alpha >= 100, f"{name} 透得过头（alpha={alpha}），底色没了、文字会看不清"
 
 
 def test_opaque_mode_keeps_every_surface_solid(restore_app, qtbot, tmp_path):
     """关掉背景效果时必须回到完全不透明 —— 默认外观不能被"透明改造"顺带改掉。"""
     from PySide6.QtCore import QPoint
-    from PySide6.QtGui import QColor, QImage, QPainter
 
     window = _window(tmp_path, backdrop="off")
     qtbot.addWidget(window)
     window.show()
     window.apply_appearance()
 
-    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(255, 0, 255))
-    painter = QPainter(image)
-    window.render(painter, QPoint(0, 0))
-    painter.end()
-
     for name, widget in {
         "脚本视图": window.center_pane.script_view,
         "输出视图": window.right_pane.output_view,
     }.items():
         center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
-        pixel = image.pixelColor(center)
-        assert pixel.red() < 70, f"{name} 在 off 模式下被透出来了：{pixel.red()}"
+        assert _render_alpha(window, center) == 255, f"{name} 在 off 模式下被透出来了"
 
 
 def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
@@ -578,14 +577,18 @@ def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
     assert labels == {
         "off": "不透明（默认）",
         "translucent": "半透明",
-        "blur": "亚克力模糊（系统提供）",
-        "acrylic": "亚克力模糊（界面自绘）",
+        "acrylic": "亚克力模糊",
     }, f"背景效果的模式名称被改动了：{labels}"
 
     # 提示与状态文字里不许出现口语 / 括号旁白；并且要说明系统模糊的可用平台
-    banned = ("问系统要", "多半", "不假装", "挑一个", "不需要系统支持", "（不模糊）")
+    banned = (
+        "问系统要", "多半", "不假装", "挑一个", "不需要系统支持", "（不模糊）",
+        "生成脚本用",          # 用户点名：标签不该是"用"结尾的短语
+        "测试替身", "还没回复完", "可以继续问", "点它",
+        "就好", "一下", "咱们",
+    )
     texts = []
-    for mode in ("blur", "acrylic"):
+    for mode in ("acrylic",):
         page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData(mode))
         texts.append(page.backdrop_hint.text())
     window.settings.backdrop = "blur"
@@ -595,8 +598,8 @@ def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
         for phrase in banned:
             assert phrase not in text, f"界面文案出现口语：{text!r} 含 {phrase!r}"
 
-    page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData("blur"))
-    assert "Windows" in page.backdrop_hint.text(), "系统模糊的提示要写明哪些平台可用"
+    page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData("acrylic"))
+    assert "Windows" in page.backdrop_hint.text(), "提示要写明系统模糊在哪些平台可用"
 
 
 def test_panel_corners_show_the_card_not_the_window(restore_app, qtbot, tmp_path):

@@ -100,6 +100,13 @@ class ConfirmDialog(QDialog):
 
         backdrop_module.apply_to(self)
 
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """半透明窗口：先把重绘区域擦掉再画正常内容，否则会留下上一次的像素（重影）。"""
+        from .. import backdrop as backdrop_module
+
+        backdrop_module.erase_damage(self, event)
+        super().paintEvent(event)
+
     @staticmethod
     def ask(round_no: int, script_path: str, script: str, parent: QWidget | None = None) -> bool:
         """模态弹窗并返回是否获批。唯一会阻塞的地方 —— 只在主线程、且只在执行前调用。"""

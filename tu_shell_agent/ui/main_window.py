@@ -71,8 +71,13 @@ class MainWindow(QMainWindow):
         self._acrylic_timer = QTimer(self)
         self._acrylic_timer.setInterval(60_000)
         self._acrylic_timer.timeout.connect(self._poll_acrylic_wallpaper)
+        # 滚动条一动就整窗重绘：半透明窗口只重绘一条带时，旧像素会留下来形成重影
+        # （用户报的"半透明又成这种重影的了"）。整窗重绘 + paintEvent 里的擦除，
+        # 才能保证那块区域回到"全新绘制"的样子。
+        self._wire_scroll_repaints()
         # 系统模糊不可用时自绘层会接管（见 apply_appearance）
         self._acrylic_fallback = False
+        self._effective_backdrop = "off"
 
         self.left_pane = LeftPane()
         self.left_pane.setObjectName("leftPane")
@@ -206,6 +211,15 @@ class MainWindow(QMainWindow):
         if wire_controller:
             self._wire_controller()
 
+    def _wire_scroll_repaints(self) -> None:
+        """任何滚动条动一下就让整窗重绘一次（半透明窗口防重影，见 paintEvent 的说明）。"""
+        from PySide6.QtWidgets import QAbstractScrollArea
+
+        for area in self.findChildren(QAbstractScrollArea):
+            for bar in (area.verticalScrollBar(), area.horizontalScrollBar()):
+                if bar is not None:
+                    bar.valueChanged.connect(lambda _value: self.update())
+
     # ── 外观（缩放 / 字体 / 背景效果）────────────────────────────────
     def apply_appearance(self) -> None:
         """把外观设置装到应用与窗口上；保存设置后也会调它（热更新，不用重启）。
@@ -216,16 +230,23 @@ class MainWindow(QMainWindow):
           （同一套观感，只是模糊由界面自己算），两者都拿不到才退化为半透明。
         """
         mode = str(getattr(self.settings, "backdrop", "off") or "off")
+        # 只有三种背景效果：不透明 / 半透明 / 亚克力。亚克力的**模糊来源自动选择**：
+        # 系统合成器（Windows 11 的 DWM）优先，拿不到就用界面自绘（自己糊壁纸），
+        # 两者都不可用才退化为半透明。以前"系统提供"与"界面自绘"是两个选项，用户在实际
+        # 使用中发现它们在他的机器上完全一样 —— 那是冗余，合成一个。
         self.blur_available = False
         effective = mode
-        if mode == "blur":
+        if mode == "acrylic":
             self.blur_available = backdrop_module.try_enable_blur(self)
-            if not self.blur_available:
-                # 系统给不了模糊 —— 换成自绘，而不是把用户丢回没有模糊的半透明。
-                # 用户实测反馈过："系统提供"在他的桌面上就是一片平的深色，没有毛玻璃。
-                effective = "acrylic"
-        # 自绘层是否因为系统模糊不可用而接管（供 _refresh_acrylic 判断）
-        self._acrylic_fallback = mode == "blur" and effective == "acrylic"
+            # 系统合成器给不了模糊，就得靠自绘 —— 而自绘需要一张壁纸。没有壁纸时
+            # 明确退化为半透明（不然会是一块不透明的深色，比半透明还差）。
+            if not self.blur_available and acrylic_module.find_wallpaper(
+                str(getattr(self.settings, "acrylic_wallpaper", "") or "")
+            ) is None:
+                effective = "translucent"
+        self._acrylic_fallback = mode == "acrylic" and not self.blur_available
+        # 生效模式（可能是退化后的）：后面铺层、轮询、提示都按它判断
+        self._effective_backdrop = effective
 
         app = QApplication.instance()
         if app is not None:
@@ -245,12 +266,12 @@ class MainWindow(QMainWindow):
                 backdrop_module.apply_to(widget)
 
         acrylic_ready = self._refresh_acrylic()
-        if mode == "blur" and not self.blur_available:
-            self.set_status(
-                "系统模糊不可用，已改用界面自绘模糊。"
-                if acrylic_ready
-                else "系统模糊不可用，且未找到壁纸图片，已退化为半透明。"
-            )
+        if mode == "acrylic" and effective == "translucent":
+            self.set_status("未找到壁纸图片，已退化为半透明。请在设置的「亚克力壁纸」中指定。")
+        elif mode == "acrylic" and not acrylic_ready:
+            self.set_status("未找到壁纸图片，已退化为半透明。请在设置的「亚克力壁纸」中指定。")
+        elif mode == "acrylic" and self._acrylic_fallback:
+            self.set_status("模糊来源：界面自绘（系统合成器不可用）。")
         # 亚克力（自绘）：不向系统要任何东西，自己把壁纸模糊好铺在窗口最底层。
         # **每次都要调**：从亚克力切走时也得把那一层撤掉，否则换了背景效果却还是那张壁纸。
         if effective == "acrylic":
@@ -266,11 +287,16 @@ class MainWindow(QMainWindow):
         设置里没填壁纸时自动找当前壁纸（DMS / KDE / hyprpaper / ~/Pictures 最新一张）。
         找不到就返回 False，外面会如实提示 —— 不假装模糊成功了。
         """
-        mode = str(getattr(self.settings, "backdrop", "off") or "off")
-        # 系统模糊不可用时（blur 模式）由自绘层接管 —— 观感一致，只是模糊由界面自己算
-        if mode != "acrylic" and not (mode == "blur" and getattr(self, "_acrylic_fallback", False)):
+        mode = getattr(self, "_effective_backdrop", None) or str(
+            getattr(self.settings, "backdrop", "off") or "off"
+        )
+        # 亚克力模式下：系统合成器给不了模糊时，由自绘层接管（观感一致，模糊由界面自己算）
+        if mode != "acrylic":
             self._acrylic_image = None
             return False
+        if getattr(self, "blur_available", False):
+            self._acrylic_image = None      # 系统真的在模糊，不必再铺一层
+            return True
         wallpaper = acrylic_module.find_wallpaper(
             str(getattr(self.settings, "acrylic_wallpaper", "") or "")
         )
@@ -286,8 +312,10 @@ class MainWindow(QMainWindow):
 
     def _poll_acrylic_wallpaper(self) -> None:
         """壁纸换了吗？换了就重新模糊（桌面轮换壁纸时模糊层不该停在旧图上）。"""
-        mode = str(getattr(self.settings, "backdrop", "off") or "off")
-        if mode != "acrylic" and not (mode == "blur" and getattr(self, "_acrylic_fallback", False)):
+        mode = getattr(self, "_effective_backdrop", None) or str(
+            getattr(self.settings, "backdrop", "off") or "off"
+        )
+        if mode != "acrylic":
             self._acrylic_timer.stop()
             return
         found = acrylic_module.find_wallpaper(
@@ -301,7 +329,11 @@ class MainWindow(QMainWindow):
 
         顺序不能反：壁纸在最底层、深色底在它上面，才是毛玻璃的观感；反过来壁纸会把
         底色整块盖掉（那就是一张普通背景图，不是亚克力了）。
+
+        第一件事是**擦掉这次要重绘的区域**：半透明窗口的底色带 alpha，正常绘制是混合而不是
+        覆盖，滚动/重排后只重绘一块时会留下上一次的像素 —— 那就是用户看到的"重影"。
         """
+        backdrop_module.erase_damage(self, event)
         image = getattr(self, "_acrylic_image", None)
         if image is not None:
             painter = QPainter(self)
@@ -322,13 +354,8 @@ class MainWindow(QMainWindow):
 
     def _appearance_hint(self) -> str:
         """给设置页/状态栏用的一句话说明（测试与用户都看这句）。"""
-        if self.settings.backdrop == "blur" and not getattr(self, "blur_available", False):
-            return (
-                "系统模糊不可用，已改用界面自绘模糊"
-                if getattr(self, "_acrylic_image", None) is not None
-                else "系统模糊不可用，已退化为半透明"
-            )
-        if self.settings.backdrop == "acrylic" and getattr(self, "_acrylic_image", None) is None:
+        if self.settings.backdrop == "acrylic" and getattr(self, "_acrylic_image", None) is None \
+                and not getattr(self, "blur_available", False):
             return "未找到壁纸图片，已退化为半透明"
         return ""
 

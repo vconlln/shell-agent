@@ -45,3 +45,57 @@ def test_session_row_keeps_only_the_session_controls(qtbot):
 
     _x4, model_button_y = _top_left(panel, panel.model_button)
     assert model_button_y > session_y + 20, "「可用模型」按钮不该还在顶部那行"
+
+
+def test_scrolling_repaints_the_whole_window(qtbot):
+    """滚动条一动就要整窗重绘。
+
+    半透明窗口只重绘"滚动露出的那一条"时，旧像素会留在后备存储里 —— 屏幕上是重影
+    （用户报的"半透明又成这种重影的了"）。所以把滚动与整窗重绘绑在一起。
+    """
+    from PySide6.QtCore import QEvent, QObject
+
+    class _Counter(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.paints = 0
+
+        def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+            if event.type() == QEvent.Type.Paint:
+                self.paints += 1
+            return False
+
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.settings import AppSettings
+
+    window = MainWindow(wire_controller=False, settings=AppSettings())
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    window.tool_tabs.setCurrentWidget(window.settings_page)
+
+    from PySide6.QtWidgets import QScrollArea
+
+    area = window.settings_page.findChild(QScrollArea)
+    bar = area.verticalScrollBar()
+    assert bar.maximum() > 0, "设置页内容没超出一屏，这条用例失去意义"
+
+    counter = _Counter()
+    window.installEventFilter(counter)
+    before = counter.paints
+    bar.setValue(min(bar.maximum(), 30))
+    for _ in range(20):
+        qtbot.wait(5)
+    counter.paints = counter.paints
+    assert counter.paints > before, "滚动之后窗口没有重绘"
+
+
+def test_old_blur_setting_migrates_to_acrylic(qtbot, tmp_path):
+    """旧设置里的 `blur`（"系统提供"）要归到合成后的「亚克力模糊」，否则界面里选不中。"""
+    import json
+
+    from tu_shell_agent.ui.settings import AppSettings
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"backdrop": "blur"}), encoding="utf-8")
+    assert AppSettings.load(path).backdrop == "acrylic"

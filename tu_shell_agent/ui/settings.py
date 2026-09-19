@@ -54,12 +54,23 @@ class AppSettings:
     ui_scale: float = 1.0            # 界面缩放：字号与所有尺寸一起放大
     ui_font: str = ""                # 空 = 系统默认字体
     mono_font: str = ""              # 空 = 自动选择可用的等宽字体
-    backdrop: str = "off"            # off / translucent / blur（系统合成器） / acrylic（界面自绘模糊）
+    backdrop: str = "off"            # off / translucent / acrylic（模糊来源自动选择）
     # 亚克力（自绘）：壁纸图片路径（留空 = 自动找当前壁纸）与模糊强度
     acrylic_wallpaper: str = ""
     acrylic_blur: int = 40
 
     def __post_init__(self) -> None:
+        self.normalize()
+
+    def normalize(self) -> None:
+        """把历史取值收敛到当前取值域。
+
+        旧版本里"系统提供"与"界面自绘"是两个背景效果，现在合成一个「亚克力模糊」
+        （模糊来源自动选择），老的 `blur` 归到 `acrylic` —— 不然设置读进来之后
+        下拉里选不中任何一项。
+        """
+        if self.backdrop == "blur":
+            self.backdrop = "acrylic"
         # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：
         # 它只是"这份设置从哪个文件读来的"记忆，一旦成为字段就会被 asdict() 写进 JSON。
         self._loaded_from: Path | None = None
@@ -97,6 +108,8 @@ class AppSettings:
             if not _type_matches(spec.default, value):
                 continue                          # 类型也被手改坏了（"3" 这种）就当没写，用默认值兜住
             setattr(settings, key, value)
+        # 直接 setattr 绕过了 __post_init__，所以这里要显式收敛一次历史取值
+        settings.normalize()
         return settings
 
     @property

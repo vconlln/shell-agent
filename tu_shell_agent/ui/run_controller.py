@@ -266,7 +266,7 @@ class RunController(QObject):
         meta = self._read_meta()
         session_id = meta.get("sessionId")
         if not session_id:
-            self._status("没有可续跑的会话（meta.json 里没有 sessionId）")
+            self._status("该运行未记录会话，无法续跑。")
             return
         config = self._config_from_ui()
         run_dir = self._run_dir
@@ -354,7 +354,7 @@ class RunController(QObject):
         """
         chat = self.window.chat_panel
         if self._chat_worker is not None and self._chat_worker.isRunning():
-            chat.add_note("上一句话还没回复完。")
+            chat.add_note("上一条提问尚未返回，请等待或取消。")
             return
 
         if self._adapter is None and self._opencode is None:
@@ -365,7 +365,7 @@ class RunController(QObject):
                 return
         adapter = self._adapter if self._adapter is not None else self._opencode
         if adapter is None or not hasattr(adapter, "chat"):
-            chat.add_error("当前注入的 opencode 适配器不支持自由对话（测试替身？）。")
+            chat.add_error("当前 opencode 适配器不支持对话。")
             return
 
         # 没有会话时先看看**磁盘上**有没有可恢复的：对话目录与运行目录都记着 sessionId，
@@ -459,7 +459,7 @@ class RunController(QObject):
         reference = session_in(run_dir)
         chat = self.window.chat_panel
         if reference is None:
-            chat.set_status("这个目录里没有可恢复的会话（缺 sessionId）。")
+            chat.set_status("该目录未记录会话，无法恢复。")
             return
         self._run_dir = reference.run_dir
         self._session_id = reference.session_id
@@ -481,7 +481,7 @@ class RunController(QObject):
         self._chat_model = ""
         chat.set_model("")
         chat.clear_history()
-        chat.set_status("下一句话将开始一段新对话。")
+        chat.set_status("下一条提问将开始新对话。")
 
     def _restore_latest_session(self) -> bool:
         """没有任何会话时，自动接上磁盘上最近的一段**对话**（运行会话由运行本身接管）。"""
@@ -539,7 +539,7 @@ class RunController(QObject):
         if self._run_dir:
             append_chat(self._run_dir, "model", reply)
         chat.set_busy(False)
-        chat.set_status("可以继续问；回复里的脚本可以点「把最新脚本放进中栏」再走改后重跑。")
+        chat.set_status("回复中的脚本可经「把最新脚本放进中栏」进行改后重跑。")
 
     def _on_chat_failed(self, message: str) -> None:
         from ..opencode_adapter.errors import explain_provider_error
@@ -870,7 +870,7 @@ class RunController(QObject):
             self._chat_preamble = ""
             self._serve_dir = ""
             chat_panel.load_history(read_chat(run_dir))
-            chat_panel.set_status(f"已接上该运行的会话（{session_id}）")
+            chat_panel.set_status(f"当前会话：该运行的会话（{session_id}）")
         center = self.window.center_pane
         right = self.window.right_pane
         # 回放前必须先清空：否则上一次运行的轮次会被当成"这一轮的上一轮"，对比页会给出

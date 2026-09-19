@@ -86,9 +86,9 @@ class SettingsPage(QWidget):
         model_layout.addWidget(self.model_combo, 1)
         model_layout.addWidget(self.model_refresh_button)
         self.model_hint = QLabel(
-            "生成脚本用这个模型；模型对话可在「模型对话」面板里单独选。"
-            "留空则使用 opencode 的默认模型 —— 若 opencode 未配置默认模型，将使用其免费档；"
-            "免费档仅限官方客户端，本应用的调用会被拒绝。"
+            "用于生成 shell 脚本；模型对话的模型在「模型对话」面板中单独设置。"
+            "留空时使用 opencode 的默认模型。opencode 未配置默认模型时将使用其免费档，"
+            "而免费档仅限官方客户端调用。"
         )
         self.model_hint.setObjectName("modelHint")
         self.model_hint.setProperty("role", "muted")
@@ -147,8 +147,7 @@ class SettingsPage(QWidget):
         self.backdrop_combo.setObjectName("backdropCombo")
         self.backdrop_combo.addItem("不透明（默认）", "off")
         self.backdrop_combo.addItem("半透明", "translucent")
-        self.backdrop_combo.addItem("亚克力模糊（系统提供）", "blur")
-        self.backdrop_combo.addItem("亚克力模糊（界面自绘）", "acrylic")
+        self.backdrop_combo.addItem("亚克力模糊", "acrylic")
 
         # 自绘亚克力的两个旋钮：用哪张壁纸、模糊多强。留空 = 自动找当前壁纸。
         self.wallpaper_edit = QLineEdit()
@@ -194,9 +193,9 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scrollable(content))
-        models_group = QGroupBox("模型")
+        models_group = QGroupBox("脚本生成")
         models_form = QFormLayout(models_group)
-        models_form.addRow("生成脚本用", model_row)
+        models_form.addRow("模型", model_row)
         models_form.addRow("", self.model_hint)
 
         layout.addWidget(components)
@@ -381,20 +380,14 @@ class SettingsPage(QWidget):
         from .. import acrylic as acrylic_module
 
         mode = self.backdrop_combo.currentData()
-        if mode == "acrylic":
-            # 自绘模式：不依赖系统合成器，只取决于能否取到壁纸图片
-            found = acrylic_module.find_wallpaper(self.wallpaper_edit.text().strip())
-            self.backdrop_hint.setText(
-                f"由界面自行模糊壁纸，不依赖系统合成器。当前壁纸：{Path(found).name}" if found
-                else "未找到壁纸图片，请在「亚克力壁纸」中指定；未指定时使用半透明。"
-            )
-            return
-        if mode != "blur":
+        if mode != "acrylic":
             self.backdrop_hint.setText("")
             return
+        found = acrylic_module.find_wallpaper(self.wallpaper_edit.text().strip())
         self.backdrop_hint.setText(
-            "由系统合成器提供模糊（Windows 11 22H2 及以上版本）。"
-            "当前平台不可用时自动改用界面自绘模糊，两者都不可用才退化为半透明。"
+            "模糊来源按可用性自动选择：系统合成器（Windows 11 22H2 及以上版本）、"
+            "界面自绘；两者均不可用时使用半透明。"
+            + (f"当前壁纸：{Path(found).name}" if found else "未检测到壁纸图片，自绘模糊需要指定一张。")
         )
 
     def collect(self) -> AppSettings:

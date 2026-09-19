@@ -102,6 +102,25 @@ def _window(tmp_path, **fields) -> MainWindow:
     return MainWindow(wire_controller=False, settings=settings)
 
 
+def _alpha_at(window: MainWindow, point) -> int:
+    """渲染到**透明**画布上取该点 alpha：直接量"这扇窗盖住了多少桌面"。
+
+    不能用"两种底色的渲染互相比较"那招：`paintEvent` 会先把重绘区域擦成透明
+    （半透明窗口不擦就会留下上一次的像素 = 重影），画布颜色会被一并擦掉。
+    """
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(image)
+    painter.drawImage(0, 0, QImage())          # 占位，实际由 window.render 绘制
+    painter.end()
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+    return image.pixelColor(point).alpha()
+
+
 def _render(window: MainWindow, background: tuple[int, int, int]) -> QImage:
     image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(QColor(*background))
@@ -148,10 +167,9 @@ def test_acrylic_without_a_wallpaper_degrades_to_plain_translucency(restore_app,
     assert window._acrylic_image is None
     assert "未找到壁纸图片" in window.status_label.text()
     assert "未找到壁纸图片" in window._appearance_hint()
-
-    over_magenta = _render(window, (255, 0, 255))
-    point = QPoint(1100, 700)
-    assert over_magenta.pixelColor(point).red() > 40, "退化后应当还能透出桌面"
+    # 退化目标必须是**半透明**（不是"一块不透明的深色"）：生效模式跟着退，窗口重新可透
+    assert window._effective_backdrop == "translucent"
+    assert _alpha_at(window, QPoint(1100, 700)) < 255, "退化后应当还能透出桌面"
 
 
 def test_leaving_acrylic_mode_drops_the_layer(restore_app, qtbot, tmp_path):
