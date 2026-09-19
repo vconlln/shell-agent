@@ -501,7 +501,14 @@ QHeaderView::section {{
 /* ── 页签：Codex 的胶囊式，去掉原生边框与底部横线 ─────────────── */
 {containers_transparent_rule}
 QTabWidget::pane {{ border: 1px solid {_color('border_light', colors)}; border-radius: {sized('radius_lg', scale)}; top: -1px; }}
-QTabBar {{ qproperty-drawBase: 0; }}
+/* 页签条的底色**必须显式给**（否则由调色板自己刷，画出来是方角的一大块 ——
+   用户截图圈的就是它：页签条整条比周围多叠一层，69% vs 46%，而且是直角矩形）。
+   显式上色 + 圆角，才和下面的面板圆角对得上。 */
+QTabBar {{
+    qproperty-drawBase: 0;
+    background-color: {_color('bg_elevated', colors)};
+    border-radius: {sized('radius_lg', scale)};
+}}
 QTabBar::tab {{
     background: transparent;
     color: {_color('fg_tertiary', colors)};

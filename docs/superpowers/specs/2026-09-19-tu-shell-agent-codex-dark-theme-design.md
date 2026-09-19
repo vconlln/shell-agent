@@ -395,3 +395,15 @@ Qt 只能**裁切**（内容被切掉一部分）而不是继续压扁。要彻�
 断言每个表面至少透出 18%、至多 75%）、`test_opaque_mode_keeps_every_surface_solid`
 （off 模式不许被透出来）、`test_dialogs_follow_the_translucent_backdrop`
 （对话框要带 `WA_TranslucentBackground`，关掉后新开的对话框要回到不透明）。
+
+
+### 修订九补记：页签条那一条"方角底色"
+
+用户圈出「工具区」的页签条：整条底色是直角矩形。实测原因 —— `QTabBar` 原来没写底色，
+由调色板自绘（Fusion 风格填充 + 类框架），条内等效不透明度 **69%**、条外只有 46%，
+所以它是一条比周围更实、更亮的方角块。改法：给 `QTabBar` 显式写 `background-color: bg_elevated`
+与 `border-radius: radius_lg`，圆角就与下面的面板对得上（页签本身仍是胶囊）。
+
+测试 `test_tab_strip_background_is_rounded`：条内取"页签上方的内边距"处的纯底色，
+断言它是半透明的（不是调色板刷的不透明块）且与角落不同色。变异体验证：撤掉那条
+`border-radius`，用例立刻转红。

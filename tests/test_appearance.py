@@ -436,3 +436,36 @@ def test_opaque_mode_keeps_every_surface_solid(restore_app, qtbot, tmp_path):
         center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
         pixel = image.pixelColor(center)
         assert pixel.red() < 70, f"{name} 在 off 模式下被透出来了：{pixel.red()}"
+
+
+def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
+    """页签条整条的底色也要是圆角。
+
+    它原来由调色板自绘：整条比周围多叠一层（实测条内 69%、条外 46%），而且是**直角矩形** ——
+    用户截图圈出来的就是这一块。现在改成显式上色 + 圆角，角落里露出的应当是父底色。
+    """
+    from PySide6.QtCore import QPoint
+
+    window = _window(tmp_path, backdrop="translucent")
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.apply_appearance()
+
+    bar = window.tool_tabs.tabBar()
+    image = window.grab().toImage()
+
+    def pixel(offset):
+        point = bar.mapTo(window, bar.rect().topLeft() + offset)
+        color = image.pixelColor(point)
+        return (color.red(), color.green(), color.blue(), color.alpha())
+
+    # 条内纯底色取样：页签上方的内边距，不会落在文字或选中药丸上
+    strip = max(
+        (pixel(QPoint(x, y)) for y in (2, 3) for x in (bar.width() // 3, bar.width() // 2)),
+        key=lambda c: sum(c[:3]),
+    )
+    corner = pixel(QPoint(1, 1))
+
+    assert strip[3] < 255, "页签条应当是半透明的显式底色，而不是调色板刷的不透明块"
+    assert strip != corner, "页签条角落与条内同色 → 还是直角矩形"
