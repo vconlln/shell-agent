@@ -194,13 +194,45 @@ def test_blur_reports_honestly_when_the_platform_cannot_do_it(restore_app, qtbot
     assert window.blur_available == platform_can, "模糊可用性不能谎报"
     if platform_can:
         assert window._appearance_hint() == ""            # 真拿到了就别报丧
+        # 系统能模糊时就用系统的：窗口保持半透明，不铺自绘层
+        assert window._acrylic_image is None
+        assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
     else:
-        assert "不可用" in window._appearance_hint()
-        assert "不可用" in window.status_label.text()
-    # 无论模糊成不成，半透明都要生效（模糊是叠加在半透明之上的）
-    assert window.testAttribute(
-        __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.WidgetAttribute.WA_TranslucentBackground
-    ) is True
+        # 系统给不了模糊时**改用界面自绘**，而不是把用户丢回没有模糊的半透明。
+        # （用户实测反馈：系统提供模式在他的桌面上就是一片平的深色。）
+        assert "界面自绘" in window._appearance_hint()
+        assert "界面自绘" in window.status_label.text()
+        assert window._acrylic_image is not None, "没有退到自绘层"
+
+
+def test_blur_mode_falls_back_to_self_drawn_when_the_platform_cannot_blur(restore_app, qtbot, tmp_path, monkeypatch):
+    """系统模糊不可用 + 有壁纸 → 自绘接管；没有壁纸 → 才退化为半透明。"""
+    from tu_shell_agent.ui import acrylic as acrylic_module
+    from tu_shell_agent.ui import backdrop as backdrop_module
+    from PySide6.QtGui import QColor, QImage
+
+    if backdrop_module.try_enable_blur(_window(tmp_path, backdrop="blur")):
+        pytest.skip("当前平台真的能模糊，这条退化路径不适用")
+
+    wallpaper = tmp_path / "wall.png"
+    image = QImage(80, 60, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(120, 130, 140))
+    image.save(str(wallpaper))
+
+    window = _window(tmp_path, backdrop="blur", acrylic_wallpaper=str(wallpaper))
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+    assert window._acrylic_fallback is True
+    assert window._acrylic_image is not None, "有壁纸时应当由自绘层接管"
+
+    monkeypatch.setattr(acrylic_module, "find_wallpaper", lambda *a, **k: None)
+    bare = _window(tmp_path, backdrop="blur")
+    qtbot.addWidget(bare)
+    bare.show()
+    bare.apply_appearance()
+    assert bare._acrylic_image is None
+    assert "半透明" in bare.status_label.text()
 
 
 def test_appearance_settings_round_trip(tmp_path):

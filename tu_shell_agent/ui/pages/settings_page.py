@@ -393,8 +393,8 @@ class SettingsPage(QWidget):
             self.backdrop_hint.setText("")
             return
         self.backdrop_hint.setText(
-            "由系统合成器提供模糊。Windows 11 22H2 及以上版本可用；"
-            "不可用时自动退化为半透明。"
+            "由系统合成器提供模糊（Windows 11 22H2 及以上版本）。"
+            "当前平台不可用时自动改用界面自绘模糊，两者都不可用才退化为半透明。"
         )
 
     def collect(self) -> AppSettings:
