@@ -281,6 +281,15 @@ class MainWindow(QMainWindow):
         if mode == "acrylic" and not acrylic_ready:
             self.set_status("未找到壁纸图片，已退化为半透明。请在设置的「亚克力壁纸」中指定。")
 
+    def _window_background_color(self):
+        """窗口自己的底色（含 alpha）——重绘前用它重填受损区域，见 backdrop.erase_damage。"""
+        from PySide6.QtGui import QColor
+
+        from .theme import backdrop_colors
+
+        value = backdrop_colors(str(getattr(self, "_effective_backdrop", "off") or "off"))["bg"]
+        return QColor(*value) if isinstance(value, tuple) else QColor(str(value))
+
     def _refresh_acrylic(self) -> bool:
         """按当前设置准备/清掉"模糊壁纸"图层；返回是否真的铺上了壁纸。
 
@@ -333,7 +342,7 @@ class MainWindow(QMainWindow):
         第一件事是**擦掉这次要重绘的区域**：半透明窗口的底色带 alpha，正常绘制是混合而不是
         覆盖，滚动/重排后只重绘一块时会留下上一次的像素 —— 那就是用户看到的"重影"。
         """
-        backdrop_module.erase_damage(self, event)
+        backdrop_module.erase_damage(self, event, self._window_background_color())
         image = getattr(self, "_acrylic_image", None)
         if image is not None:
             painter = QPainter(self)

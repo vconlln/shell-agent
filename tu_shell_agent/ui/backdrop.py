@@ -40,38 +40,38 @@ def apply_to(window: Any) -> None:
     """把"当前背景模式"应用到某个顶层窗口（主窗口与所有对话框都走这里）。"""
     from . import theme as theme_module
 
-    if _current_mode in ("translucent", "blur"):
-        enable_translucent(window)
-        theme_module.unstack_viewports(window)
-        theme_module.thin_containers(window)
-    elif _current_mode == "acrylic":
-        # 自绘亚克力**不需要**窗口半透明：模糊壁纸是铺在窗口自己最底层的一层不透明内容，
-        # 窗口保持不透明反而更对 —— 窗口一透明，下拉列表/菜单这些浮层会跟着继承透明，
-        # 字体下拉一打开字就浮在壁纸上（用户反馈的"看不见字"就是这么来的）。
-        # 半透明的观感全部由 QSS 里那些带 alpha 的表面提供，够用。
-        disable_translucent(window)
+    if _current_mode in ("translucent", "acrylic"):
+        # 亚克力也让窗口保持半透明：自绘那层模糊壁纸本来就不透明，铺上去之后桌面上什么都看不见，
+        # 但它保证了**两种模式之间的切换不需要重建窗口**（见 _set_translucent 的说明）。
+        # 下拉列表/菜单的可读性由浮层守卫单独钉住（ui/theme.py 的 _PopupKeeper），
+        # 不依赖"窗口不透明"。
+        _set_translucent(window, True)
         theme_module.unstack_viewports(window)
         theme_module.thin_containers(window)
     else:
-        disable_translucent(window)
+        _set_translucent(window, False)
         theme_module.restack_viewports(window)
 
 
-def erase_damage(widget: Any, event: Any) -> None:
-    """把这次要重绘的区域**擦掉**，再让正常绘制往上叠。
+def erase_damage(widget: Any, event: Any, color: Any = None) -> None:
+    """把这次要重绘的区域**重填成窗口底色**，再让正常绘制往上叠。
 
-    为什么必须擦：窗口半透明（`WA_TranslucentBackground`）时，它的底色是**带 alpha** 的，
+    为什么必须重填：窗口半透明（`WA_TranslucentBackground`）时，它的底色是**带 alpha** 的，
     正常绘制是"混合"而不是"覆盖"。滚动或重排后只重绘一块区域时，上一次留下的像素会透过来 ——
     屏幕上就是**重影**（用户报的"半透明又成这种重影的了"）。
-    擦除用 `CompositionMode_Source`：它是"替换"，不受 alpha 影响。
+    重填用 `CompositionMode_Source`：它是"替换"，不受 alpha 影响。
+
+    填的是**窗口自己的底色**（不是透明）：填透明会把 Qt 在 paintEvent 之前画好的窗口底色
+    一并抹掉，边角处就成了"没有背景的窟窿"。
     """
     from PySide6.QtGui import QColor, QPainter
 
+    fill = color if color is not None else QColor(0, 0, 0, 0)
     painter = QPainter(widget)
     painter.save()
     try:
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        painter.fillRect(event.rect(), QColor(0, 0, 0, 0))
+        painter.fillRect(event.rect(), fill)
     finally:
         # **必须恢复**：合成模式是画笔状态，会跟着这次绘制一路传下去 ——
         # 留在 Source 上，后面所有绘制都变成"替换"，半透明就整体失效
@@ -80,20 +80,38 @@ def erase_damage(widget: Any, event: Any) -> None:
         painter.end()
 
 
-def enable_translucent(window: Any) -> None:
-    """让窗口背景可以半透明（底色自身的 alpha 由主题负责）。"""
+def _set_translucent(window: Any, want: bool) -> None:
+    """设置"窗口背景可半透明"，**并在窗口已经显示时重建它**。
+
+    踩过的坑（用户报的"半透明都没有透明效果了"）：`WA_TranslucentBackground` 必须在窗口
+    被创建之前设好 —— 窗口已经在屏幕上时再改这个属性不会生效，Qt 的窗口后端早已定型。
+    所以从「不透明」切到「半透明」时属性是设上了、窗口却还是不透。
+    办法是隐藏再显示一次，强制按新属性重建窗口；下次显示前设属性的常规路径不受影响
+    （启动时 apply_appearance 本来就在 show() 之前跑）。
+    """
     from PySide6.QtCore import Qt
 
-    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-    # 无边框会让半透明的圆角真正生效；这里不动窗口边框（用户还要拖窗口），
-    # 只把"自动填充背景"关掉，避免不透明底色把 alpha 覆盖掉。
-    window.setAutoFillBackground(False)
+    attribute = Qt.WidgetAttribute.WA_TranslucentBackground
+    if window.testAttribute(attribute) == want:
+        window.setAutoFillBackground(False) if want else None
+        return
+    window.setAttribute(attribute, want)
+    if want:
+        # 不动窗口边框（用户还要拖窗口），只关掉"自动填充背景"，
+        # 免得它用不透明底色把 alpha 盖掉。
+        window.setAutoFillBackground(False)
+    if window.isVisible():
+        window.hide()
+        window.show()
+
+
+def enable_translucent(window: Any) -> None:
+    """让窗口背景可以半透明（底色自身的 alpha 由主题负责）。"""
+    _set_translucent(window, True)
 
 
 def disable_translucent(window: Any) -> None:
-    from PySide6.QtCore import Qt
-
-    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    _set_translucent(window, False)
 
 
 def try_enable_blur(window: Any) -> bool:

@@ -717,3 +717,35 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
                 continue
             break
     assert not problems, "；".join(problems)
+
+
+def test_switching_background_modes_actually_toggles_window_translucency(restore_app, qtbot, tmp_path):
+    """切换背景效果必须真的改变**窗口**的半透明状态。
+
+    用户报的"半透明都没有透明效果了"就是这里：`WA_TranslucentBackground` 必须在窗口被创建
+    之前设好，窗口已经在屏幕上时再改不生效 —— 从「不透明」切回「半透明」时属性设上了、
+    窗口却还是不透。所以 `_set_translucent` 在窗口可见时会隐藏再显示一次，强制重建。
+    """
+    from PySide6.QtCore import Qt
+
+    attribute = Qt.WidgetAttribute.WA_TranslucentBackground
+    window = _window(tmp_path, backdrop="off")
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+    assert window.testAttribute(attribute) is False
+
+    for mode, expected in (("translucent", True), ("acrylic", True), ("off", False), ("translucent", True)):
+        window.settings.backdrop = mode
+        window.apply_appearance()
+        assert window.testAttribute(attribute) is expected, f"{mode} 模式下窗口半透明状态不对"
+        assert window.isVisible(), f"{mode} 模式切换后窗口不可见了（重建窗口时要重新显示）"
+
+    # 亚克力也保持半透明窗口：它靠自绘层盖住桌面，且这样两种模式互切不必重建窗口
+    window.settings.backdrop = "acrylic"
+    window.apply_appearance()
+    assert window._acrylic_image is not None
+    window.settings.backdrop = "translucent"
+    window.apply_appearance()
+    assert window._acrylic_image is None, "切回半透明后自绘层必须撤掉"
+    assert window.testAttribute(attribute) is True
