@@ -345,8 +345,16 @@ QToolTip {{
    但在当前代码里再也复现不出来（两种写法取色完全相同），所以没有对应的测试。 */
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
-QPlainTextEdit:read-only QScrollBar, QTextBrowser QScrollBar {{ background: {css('bg_under')}; }}
-QPlainTextEdit:!read-only QScrollBar, QTextEdit:!read-only QScrollBar {{ background: {css('bg_input')}; }}
+/* 轨道底色按**控件名**点名，不用 `:read-only`：
+   实测 `QPlainTextEdit:read-only QScrollBar` 会把伪状态判在**滚动条自己**身上（它永远不是只读），
+   于是只读视图的滚动条被涂成"可编辑输入框"的 #121317 —— 117 个像素混在深色底里，
+   看起来就是圆角旁边一小块长方形深色（用户报的"尖尖的黑色"）。 */
+QPlainTextEdit#outputView QScrollBar, QPlainTextEdit#scriptView QScrollBar,
+QPlainTextEdit#notesView QScrollBar, QPlainTextEdit#chatTranscript QScrollBar,
+QTextBrowser#compareView QScrollBar, QPlainTextEdit#planPreview QScrollBar
+{{ background: {css('bg_under')}; }}
+QPlainTextEdit#extraInstructionEdit QScrollBar, QPlainTextEdit#chatInput QScrollBar
+{{ background: {css('bg_input')}; }}
 QListWidget QScrollBar, QTreeWidget QScrollBar, QTableWidget QScrollBar,
 QScrollArea QScrollBar {{ background: {css('bg_elevated')}; }}
 QScrollBar::handle {{ background-color: {css('border_heavy')}; border-radius: 4px; min-height: 28px; }}

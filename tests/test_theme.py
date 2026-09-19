@@ -310,3 +310,48 @@ def test_single_line_controls_refuse_to_shrink_below_a_usable_height(themed_app,
 
     assert combo.height() >= 24, f"下拉框在挤压下缩到了 {combo.height()}px"
     assert spin.height() >= 24, f"微调框在挤压下缩到了 {spin.height()}px"
+
+
+def test_read_only_view_scrollbar_uses_the_read_only_surface(themed_app, qtbot):
+    """只读视图的滚动条轨道必须是**只读底色**，不能混进"可编辑输入框"的颜色。
+
+    用户报的"深色圆角旁边有一点点长方形的尖尖黑色"就是它：`QPlainTextEdit:read-only QScrollBar`
+    这种后代选择器，Qt 会把伪状态判在**滚动条自己**身上（滚动条永远不是只读），于是只读输出框的
+    滚动条被涂成可编辑输入框的 #121317 —— 与周围的 #0b0c0e 差一档，成了一条长方形色块。
+    修复前实测条带里有 117 个这样的像素。
+
+    用真实 RightPane + 长内容（触发滚动条）验证，因为这个色块只在真实布局里出现。
+    """
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from tu_shell_agent.ui.panes.right import RightPane
+
+    apply_theme(themed_app)
+    pane = RightPane()
+    host = QWidget()
+    host.setObjectName("paneCard")
+    qtbot.addWidget(host)
+    host.resize(460, 700)
+    layout = QVBoxLayout(host)
+    layout.addWidget(pane)
+    host.show()
+    qtbot.waitExposed(host)
+
+    view = pane.output_view
+    assert view.isReadOnly(), "这条用例针对只读视图"
+    view.setPlainText("\n".join(f"第 {index} 行输出" for index in range(300)))
+    qtbot.wait(50)
+    bar = view.verticalScrollBar()
+    assert bar.isVisible(), "内容放不下时应当出现滚动条"
+
+    image = host.grab().toImage()
+    strip = [
+        QColor(image.pixel(view.mapTo(host, QPoint(x, y)).x(), view.mapTo(host, QPoint(x, y)).y())).name()
+        for y in range(view.height())
+        for x in range(view.width() - bar.width(), view.width())
+    ]
+    assert strip, "没取到样本"
+    assert TOKENS["bg_input"] not in strip, (
+        f"只读视图的滚动条区域混进了可编辑输入框的底色 {TOKENS['bg_input']}"
+        f"（共 {strip.count(TOKENS['bg_input'])} 个像素）—— 那是一条长方形色块"
+    )
