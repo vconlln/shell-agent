@@ -153,6 +153,9 @@ class MainWindow(QMainWindow):
             self._on_blocking_level_changed
         )
         self.settings_page.saved.connect(self._on_settings_saved)
+        # 外观控件改动 → 立即应用（只改内存，不落盘；落盘仍由"保存"负责）。
+        # 没有这一步，用户改完缩放要先去点"保存"才看得到效果，体感就是"改了不管用"。
+        self.settings_page.appearance_changed.connect(self._preview_appearance)
 
         # 把手宽度写进代码而不是只靠 QSS：样式表没加载时（或换主题时）它会退回 Qt 默认的
         # 4px，而 4px 抓不住 —— 用户"不能调节竖向的长度"就是这么来的。命中目标不能依赖样式。
@@ -222,6 +225,11 @@ class MainWindow(QMainWindow):
                 self.set_status(
                     "当前桌面不支持窗口模糊（模糊由窗口管理器提供），已退化为半透明"
                 )
+
+    def _preview_appearance(self) -> None:
+        """即时预览：把设置页当前的控件值收进内存再应用一次外观（**不写文件**）。"""
+        self.settings_page.collect()
+        self.apply_appearance()
 
     def _appearance_hint(self) -> str:
         """给设置页/状态栏用的一句话说明（测试与用户都看这句）。"""

@@ -47,6 +47,7 @@ class SettingsPage(QWidget):
     """设置页的控件与读写逻辑；控件本身就是对外契约（测试与控制器按属性名取）。"""
 
     saved = Signal(str)          # 保存成功后的文件路径（状态栏/控制器可用）
+    appearance_changed = Signal()  # 外观控件改动（缩放/字体/背景）—— 立即预览，不必等保存
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -123,6 +124,13 @@ class SettingsPage(QWidget):
         self.backdrop_hint.setObjectName("backdropHint")
         self.backdrop_hint.setProperty("role", "muted")
         self.backdrop_hint.setWordWrap(True)
+
+        # 外观改了要**立刻看到**：用户改缩放/字体时代价最小的反馈就是马上变。
+        # 保存仍然只由"保存"按钮负责落盘（预览只改内存里的绑定对象）。
+        self.ui_scale_spin.valueChanged.connect(lambda _v: self.appearance_changed.emit())
+        self.ui_font_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
+        self.mono_font_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
+        self.backdrop_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
 
         self.save_button = QPushButton("保存")
         self.status_label = QLabel()

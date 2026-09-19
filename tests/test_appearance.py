@@ -212,3 +212,26 @@ def test_appearance_settings_round_trip(tmp_path):
         1.25, "Noto Sans", "JetBrains Mono", "translucent",
     )
     assert json.loads(path.read_text(encoding="utf-8"))["ui_scale"] == 1.25
+
+
+def test_appearance_applies_immediately_without_saving(restore_app, qtbot, tmp_path):
+    """改外观控件要**立刻**生效，不必先点"保存"。
+
+    用户反馈"我改了缩放之后不管用"——原因就是原来只在"保存"回调里应用外观。
+    预览只改内存；落盘仍由"保存"负责（这一点下面的文件断言锁住）。
+    """
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path)
+    settings.run_root = str(tmp_path / "runs")
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+    qtbot.wait(30)
+
+    before = restore_app.font().pointSizeF()
+    window.settings_page.ui_scale_spin.setValue(1.3)      # 只改控件，不点保存
+    qtbot.wait(50)
+
+    assert restore_app.font().pointSizeF() > before, "改缩放后没有立刻生效"
+    assert not path.exists(), "预览不该写文件（落盘仍由「保存」负责）"
