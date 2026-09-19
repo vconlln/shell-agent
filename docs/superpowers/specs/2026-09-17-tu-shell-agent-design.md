@@ -446,3 +446,30 @@ opencode 自己的库里当然还有那些会话，但把"我们的目录"与"op
 - 只影响这段对话；选择会写进该目录的 `meta.json`（`write_session_model`），
   恢复会话时带回下拉 —— 于是"哪段对话用的哪个模型"是可查的；
 - 设置页那一栏因此改名为「生成脚本用」，并写明对话可以单独选。
+
+### §19 补记二：一次真实的闪退 —— 还在跑的 QThread 被销毁
+
+用户报"选模型直接闪退"，日志只有一行、进程 SIGABRT（`coredumpctl` 确认）：
+
+```
+QThread: Destroyed while thread '' is still running
+```
+
+两个成因，都是"线程对象没人管"：
+
+1. **引用被覆盖**：`self._models_worker = ModelsWorker(...)` 这种单个字段，第二次请求
+   （打开面板触发一次 + 点「可用模型」又一次）一赋值，前一个还在跑的 QThread 就失去了最后
+   一个引用，被 Python GC 掉 —— Qt 随即 abort；
+2. **退出时还在跑**：关窗/退出时线程没结束，析构同样 abort。
+
+修法（`ui/workers.py`）：
+
+- `track(worker)` 把线程集中登记在**模块级名单**里（不再散落在各对象的字段上），
+  `finished` 时摘除；`running()` 按线程自身状态判断，不依赖排队投递的信号；
+- `wait_all(timeout)` 用于 `RunController.shutdown()`（3s）；
+- `wait_or_exit(timeout)` 是退出前的最后一道闸，由 `app.py` 在事件循环结束后调用：
+  等不到就 `os._exit(0)` —— 宁可跳过解释器清理，也不能让进程崩在退出路径上。
+
+测试 `tests/test_workers.py` 6 条：不丢引用、重复 track 幂等、超时如实上报、
+以及两条**子进程**用例把闸门行为钉住（睡 1s 的线程必须被等到；睡 10s 的线程必须
+在远小于 10s 内退出且退出码为 0）。变异验证：把闸门改成直接返回，第一条立刻转红。

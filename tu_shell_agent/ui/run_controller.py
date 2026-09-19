@@ -140,7 +140,7 @@ class RunController(QObject):
         self._worker: EngineWorker | None = None
         self._detect_worker: DetectWorker | None = None
         self._chat_worker: ChatWorker | None = None
-        self._models_worker: Any = None
+
         self._session_id = ""          # 当前 opencode 会话（续跑、对话共用同一个）
         self._chat_preamble = ""       # 只在新会话的第一句话前带上（方案上下文）
         self._run_dir = ""
@@ -511,22 +511,19 @@ class RunController(QObject):
         )
 
     def _on_models_requested(self) -> None:
-        """拉可用模型列表填进对话面板的下拉（子进程调用放线程里）。"""
+        """拉可用模型列表填进对话面板的下拉（子进程调用放线程里）。
+
+        **必须走 workers.track 托管**：直接挂在一个字段上，第二次请求就会把还在跑的
+        那个覆盖掉，QThread 被 GC 时 Qt 直接 abort（用户报的"选模型直接闪退"）。
+        """
         from .engine_worker import ModelsWorker
+        from .workers import track
 
         chat = self.window.chat_panel
         worker = ModelsWorker(str(getattr(self.settings, "opencode_path", "") or ""))
-        self._models_worker = worker
-
-        def on_done(models: object) -> None:
-            chat.set_models([str(item) for item in (models or [])])
-
-        def on_failed(message: str) -> None:
-            chat.set_status(f"取可用模型失败：{message}")
-
-        worker.done.connect(on_done)
-        worker.failed.connect(on_failed)
-        worker.start()
+        worker.done.connect(lambda models: chat.set_models([str(item) for item in (models or [])]))
+        worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
+        track(worker)
 
     def _new_chat_run_dir(self) -> str:
         """为"先聊天、还没跑过"的情形准备一个运行目录（会话与 agent 文件需要落处）。"""
@@ -1030,6 +1027,13 @@ class RunController(QObject):
                 self._status("引擎线程未在超时内结束；已保留它以免退出时崩溃")
                 return
         self._dispose_adapter()
+        # 托管线程（可用模型列表这类短命线程）：等它们结束。
+        # 等不到的留给模块级名单继续持有引用，最后一道闸是 workers.wait_or_exit()。
+        from .workers import wait_all
+
+        still = wait_all(3000)
+        if still:
+            _ORPHANS.extend(still)
 
 
 class _DependencyMissing(RuntimeError):

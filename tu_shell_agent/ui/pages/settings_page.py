@@ -93,7 +93,7 @@ class SettingsPage(QWidget):
         self.model_hint.setObjectName("modelHint")
         self.model_hint.setProperty("role", "muted")
         self.model_hint.setWordWrap(True)
-        self._models_worker: Any = None
+
 
         self.run_root_edit = QLineEdit()
         self.run_root_edit.setPlaceholderText("每次运行的产物目录（脚本 / 输出 / meta.json）")
@@ -328,8 +328,9 @@ class SettingsPage(QWidget):
 
         self.model_refresh_button.setEnabled(False)
         self.model_hint.setText("正在检测可用模型…")
+        from ..workers import track
+
         worker = ModelsWorker(self.opencode_path_edit.text().strip())
-        self._models_worker = worker
 
         def on_done(models: object) -> None:
             self._fill_models([str(item) for item in (models or [])])
@@ -342,7 +343,7 @@ class SettingsPage(QWidget):
 
         worker.done.connect(on_done)
         worker.failed.connect(on_failed)
-        worker.start()
+        track(worker)      # 托管：引用被覆盖 / 退出时还在跑都会让 Qt abort（见 ui/workers.py）
 
     def _fill_models(self, models: list[str]) -> None:
         """把模型列表铺进下拉，**保留用户当前输入**（列表刷新不该把已选的模型弄丢）。"""

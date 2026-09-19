@@ -52,7 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     # 免得窗口先冻住几秒。放在这里而不是 MainWindow 里，是为了让构造窗口本身不产生副作用。
     if window.controller is not None:
         window.controller.recheck_environment()
-    return app.exec()
+    exit_code = app.exec()
+    # 退出前的最后一道闸：还有托管线程没结束就立刻退出进程。
+    # Qt 在析构"还在跑的 QThread"时会 abort（coredump 确认过 SIGABRT），
+    # 而窗口的 closeEvent 不一定走得到（比如被直接销毁）。
+    from .workers import wait_or_exit
+
+    wait_or_exit()
+    return exit_code
 
 
 if __name__ == "__main__":
