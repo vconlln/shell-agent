@@ -128,6 +128,10 @@ def test_settings_page_offers_fonts_and_scale(qtbot):
 
     page = SettingsPage()
     qtbot.addWidget(page)
+    # 字体列表是**延迟填充**的（2100+ 字族 × 两个下拉，建一次很贵），所以要先显示出来
+    page.show()
+    qtbot.waitExposed(page)
+
     assert page.ui_scale_spin.minimum() <= 1.0 <= page.ui_scale_spin.maximum()
     assert page.ui_font_combo.itemData(0) == ""          # 第一项 = 系统默认
     assert page.mono_font_combo.itemData(0) == ""        # 第一项 = 自动

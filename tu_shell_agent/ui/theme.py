@@ -485,14 +485,30 @@ def apply_theme(
     - `backdrop` 见 `backdrop_colors()`；窗口级的半透明与平台模糊由 `ui/backdrop.py` 处理。
     """
     app.setStyle("Fusion")          # 原生样式会带来各自的立体感，Fusion 才吃调色板
-    app.setPalette(build_palette(backdrop=backdrop))
-    app.setStyleSheet(
-        build_stylesheet(scale=scale, ui_font=ui_font, mono_font=mono_font, backdrop=backdrop)
-    )
+
     font = QFont()
     if ui_font:
         font.setFamily(ui_font)
     font.setPointSizeF(scaled_font_size(scale))
+    palette = build_palette(backdrop=backdrop)
+    sheet = build_stylesheet(
+        scale=scale, ui_font=ui_font, mono_font=mono_font, backdrop=backdrop
+    )
+
+    # **幂等短路**：内容完全一样时不要再设一遍 —— `setStyleSheet` 会重新 polish 进程里
+    # 所有活着的控件树，代价随窗口数增长（实测把整套测试从 47s 拖到 332s）。
+    # 设置真的变了（或第一次装）才会走到下面三行。
+    current = app.font()
+    if (
+        app.styleSheet() == sheet
+        and app.palette() == palette
+        and current.family() == font.family()
+        and current.pointSizeF() == font.pointSizeF()
+    ):
+        return
+
+    app.setPalette(palette)
+    app.setStyleSheet(sheet)
     app.setFont(font)
 
 

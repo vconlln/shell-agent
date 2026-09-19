@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from ..widgets.scroll import form_container, scrollable
+from functools import lru_cache
+
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QComboBox,
@@ -33,6 +35,12 @@ BLOCKING_LEVELS = ("error", "warning", "info", "style")
 _DEFAULT_BLOCKING_LEVEL = "info"      # 与 types.RunConfig 的默认值一致
 
 _TIMEOUT_MAX_MS = 3_600_000      # 1 小时；再长的等待不该由界面默默容忍，而是让人去改脚本
+
+
+@lru_cache(maxsize=1)
+def font_families() -> tuple[str, ...]:
+    """系统字体族（进程内只枚举一次）。"""
+    return tuple(QFontDatabase.families())
 
 
 class SettingsPage(QWidget):
@@ -98,13 +106,12 @@ class SettingsPage(QWidget):
         self.ui_font_combo.setObjectName("uiFontCombo")
         self.mono_font_combo = QComboBox()
         self.mono_font_combo.setObjectName("monoFontCombo")
-        for combo, auto_label in (
-            (self.ui_font_combo, "系统默认"),
-            (self.mono_font_combo, "自动（挑一个可用的等宽字体）"),
-        ):
-            combo.addItem(auto_label, "")
-            for family in QFontDatabase.families():
-                combo.addItem(family, family)
+        # 字体列表**延迟到真正显示时才填**：本机 2100+ 个字族，两个下拉就是 4200 多次
+        # addItem —— 每建一次设置页都付这个代价，实测把整套测试从 47s 拖到 332s。
+        # 而设置页平时躲在工具区页签里，绝大多数时候根本不需要这份列表。
+        self.ui_font_combo.addItem("系统默认", "")
+        self.mono_font_combo.addItem("自动（挑一个可用的等宽字体）", "")
+        self._fonts_populated = False
 
         self.backdrop_combo = QComboBox()
         self.backdrop_combo.setObjectName("backdropCombo")
@@ -178,6 +185,21 @@ class SettingsPage(QWidget):
         self.blocking_combo.setCurrentText(level)
         path = settings.loaded_from
         self.status_label.setText(f"保存位置：{path}" if path is not None else "尚未确定保存位置")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """第一次显示时才把字体列表填上（见 __init__ 里的说明）。"""
+        super().showEvent(event)
+        if not self._fonts_populated:
+            self._fonts_populated = True
+            self._populate_font_combos()
+
+    def _populate_font_combos(self) -> None:
+        """填字体下拉，并保住当前选中项（用户可能已经选过、或设置里存着值）。"""
+        for combo in (self.ui_font_combo, self.mono_font_combo):
+            wanted = str(combo.currentData() or "")
+            for family in font_families():
+                combo.addItem(family, family)
+            self._select_by_data(combo, wanted)
 
     @staticmethod
     def _select_by_data(combo: QComboBox, value: str) -> None:
