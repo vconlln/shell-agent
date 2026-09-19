@@ -565,3 +565,120 @@ def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
 
     page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData("blur"))
     assert "Windows" in page.backdrop_hint.text(), "系统模糊的提示要写明哪些平台可用"
+
+
+def test_panel_corners_show_the_card_not_the_window(restore_app, qtbot, tmp_path):
+    """面板圆角外露出的必须是**卡片色**，不能是更深的窗口底色。
+
+    用户圈出「校验与输出」栏里"几个深黑的色角"，根因：折叠区块的外壳与内容容器是纯布局容器，
+    但 Qt 给它们标了 `WA_StyledBackground` —— `不透明` 模式下没有对应 QSS 规则时，Qt 用调色板的
+    Window 色（窗口底色 #101114）填充，于是在每个面板圆角外露出一圈比卡片（#17181c）更深的楔形，
+    看起来就是一块深黑的小方角。
+    """
+    window = _window(tmp_path, backdrop="off", ui_scale=0.8)
+    qtbot.addWidget(window)
+    window.resize(1400, 950)
+    window.show()
+    window.apply_appearance()
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(255, 0, 255))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+
+    card = (23, 24, 28)          # bg_elevated：卡片
+    window_bg = (16, 17, 20)     # bg：窗口底色（更深的那个）
+    for name, widget in (
+        ("报告视图", window.right_pane.notes_view),
+        ("输出视图", window.right_pane.output_view),
+        ("校验报告", window.right_pane.findings_tree),
+    ):
+        origin = widget.mapTo(window, widget.rect().topLeft())
+        # 面板左上角外侧那一小块（圆角切开的位置）
+        colors = {
+            tuple(image.pixelColor(origin.x() + dx, origin.y() + dy).getRgb()[:3])
+            for dx in range(0, 11)
+            for dy in range(0, 9)
+        }
+        assert window_bg not in colors, (
+            f"{name} 的圆角外出现了窗口底色 {window_bg} —— 那就是角上的深黑方块"
+        )
+        assert card in colors, f"{name} 的圆角外没看到卡片色 {card}（取样区域可能不对）"
+
+
+def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot, tmp_path):
+    """通用判据：每个圆角面板的角上只允许出现**它自己的底色、它背后的底色、以及两者与描边的混色**。
+
+    这是"深黑色角"那一类问题的克星（用户报过一次）。成因有两条，都不是"圆角没生效"：
+    1. 纯容器被 Qt 标了 `WA_StyledBackground`，没有 QSS 规则时它会用调色板的 Window 色填充；
+    2. `QHeaderView::section` 自带底色。
+    两者都是**子控件/容器，不会被父控件的圆角裁剪** —— 于是角上露出一块既不属于面板、
+    也不属于它背后那层的颜色，看上去就是一块深黑的小方角。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    window = _window(tmp_path, backdrop="off", ui_scale=0.8)
+    qtbot.addWidget(window)
+    window.resize(1400, 950)
+    window.show()
+    window.apply_appearance()
+
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(255, 0, 255))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+
+    def rgb(x: int, y: int) -> tuple[int, int, int]:
+        return tuple(image.pixelColor(x, y).getRgb()[:3])
+
+    def between(color, first, second) -> bool:
+        return all(
+            min(first[index], second[index]) - 2 <= color[index] <= max(first[index], second[index]) + 2
+            for index in range(3)
+        )
+
+    border = (43, 45, 51)      # 1px 描边与底色的混色属于正常渲染
+    panels = {
+        "脚本视图": window.center_pane.script_view,
+        "时间线": window.center_pane.timeline,
+        "方案预览": window.left_pane.plan_preview,
+        "额外说明": window.left_pane.extra_edit,
+        "校验报告": window.right_pane.findings_tree,
+        "输出视图": window.right_pane.output_view,
+        "报告视图": window.right_pane.notes_view,
+        "对话记录": window.chat_panel.transcript,
+        "历史列表": window.history_page.list_widget,
+        "模板列表": window.templates_pane.list_widget,
+    }
+    problems: list[str] = []
+    for name, widget in panels.items():
+        rect = widget.rect()
+        if rect.width() < 20 or rect.height() < 16:
+            continue
+        origin = widget.mapTo(window, rect.topLeft())
+        if origin.x() < 8 or origin.y() < 8:
+            continue
+        fill = rgb(origin.x() + 6, origin.y() + 6)
+        outside = rgb(origin.x() - 6, origin.y() + 6)
+        for dx in range(0, 9):
+            for dy in range(0, 7):
+                color = rgb(origin.x() + dx, origin.y() + dy)
+                allowed = (
+                    color in (fill, outside)
+                    or between(color, fill, outside)
+                    or between(color, fill, border)
+                    or between(color, outside, border)
+                )
+                if not allowed:
+                    problems.append(f"{name} 的角上出现了 {color}（自底色 {fill}／背后 {outside}）")
+                    break
+            else:
+                continue
+            break
+    assert not problems, "；".join(problems)

@@ -466,8 +466,7 @@ def build_stylesheet(
     containers_transparent_rule = (
         """QSplitter, QStackedWidget, QScrollArea, QTabWidget::pane,
 #leftPane, #centerPane, #rightPane, #toolTabs, #centerTabs,
-#settingsPage, #selfCheckPage, #historyPage, #templatesPage, #chatPanel, #wallpaperPage,
-CollapsibleSection, #sectionBody {
+#settingsPage, #selfCheckPage, #historyPage, #templatesPage, #chatPanel, #wallpaperPage {
     background: transparent;
 }"""
         if backdrop != "off"
@@ -486,6 +485,14 @@ QWidget {{
     font-size: {sized('font_size', scale)};
 }}
 QMainWindow, QDialog {{ background-color: {_color('bg', colors)}; }}
+
+/* 折叠区块的外壳与其内容容器**任何模式下都不上色**。
+   它们被 Qt 标了 WA_StyledBackground，off 模式（没有 QSS 规则）时会用调色板的
+   Window 色填充 —— 于是面板圆角外露出一圈**比卡片更深的窗口底色**，
+   看起来就是"每个角上一块深黑的小方角"（用户报的就是这个）。 */
+CollapsibleSection, #sectionBody, #findingsBody, #outputBody, #notesBody {{
+    background: transparent;
+}}
 QLabel {{ background: transparent; }}
 
 /* 分区小标题：Codex 的那种"小号大写、字距略宽、次级色" */
@@ -602,8 +609,15 @@ QListWidget::item:selected, QTreeWidget::item:selected {{
     background-color: {_color('bg_selected', colors)};
     color: {_color('fg', colors)};
 }}
+/* 表头：`QHeaderView` 自己的视口会用调色板 Base 铺满（= 窗口底色），
+   而它是列表/树的**子控件、不会被父控件的圆角裁剪** —— 于是在面板的左上/右上角
+   露出一块比卡片更深的方块（用户截图上圈的"深黑小角"里就有它）。
+   所以表头**整体透明**，让下面那块圆角面板自己显示。 */
+QHeaderView, QHeaderView QWidget {{
+    background: transparent;
+}}
 QHeaderView::section {{
-    background-color: {_color('bg', colors)};
+    background: transparent;      /* 底色交给下面的面板：表头是子控件，不会被圆角裁剪 */
     color: {_color('fg_tertiary', colors)};
     border: none;
     border-bottom: 1px solid {_color('border_light', colors)};
