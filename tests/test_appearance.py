@@ -235,3 +235,38 @@ def test_appearance_applies_immediately_without_saving(restore_app, qtbot, tmp_p
 
     assert restore_app.font().pointSizeF() > before, "改缩放后没有立刻生效"
     assert not path.exists(), "预览不该写文件（落盘仍由「保存」负责）"
+
+
+def test_saved_font_survives_opening_the_settings_page(restore_app, qtbot, tmp_path):
+    """已保存的字体在**打开设置页之后**必须还在（用户报的"有时生效有时不生效"）。
+
+    真实场景是跨重启的：上次选了字体 → 存盘 → 下次启动，`set_settings` 先把值放进控件
+    （但字体列表还没填充，下拉里只有"自动"一项）→ 用户点开设置页 → 延迟填充发生。
+    丢设置的原因（a）是本用例锁住的：填充前用 `combo.currentData()` 当"当前值"，拿到的永远是
+    空串（那时下拉里只有"自动"一项）→ 填完把选择重置回"自动"。
+    另有一处防御性处理（填充时 blockSignals）**在本流程里等价、测不出来**：因为"自动"项已经占了
+    index 0，addItem 不会引发 currentIndexChanged。留着它是防将来列表为空时才填充的情形，
+    不声称它修了什么。
+    用例必须**先有已保存的字体、再看设置页** —— 第一版是在显示之后才选字体，变异体根本触发不到。
+    """
+    target = "DejaVu Sans Mono"
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path)
+    settings.run_root = str(tmp_path / "runs")
+    settings.mono_font = target              # 模拟"上次已经选过并保存"
+    settings.save()
+
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+
+    # 点开设置页（延迟填充在这里发生）
+    window.tool_tabs.setCurrentWidget(window.settings_page)
+    qtbot.waitExposed(window.settings_page)
+    qtbot.wait(30)
+
+    combo = window.settings_page.mono_font_combo
+    assert combo.count() > 1, "显示之后字体列表应当已填充"
+    assert combo.currentData() == target, "打开设置页把已保存的字体重置了"
+    assert settings.mono_font == target, "设置里的字体被即时预览冲掉了"

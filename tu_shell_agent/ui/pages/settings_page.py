@@ -202,12 +202,27 @@ class SettingsPage(QWidget):
             self._populate_font_combos()
 
     def _populate_font_combos(self) -> None:
-        """填字体下拉，并保住当前选中项（用户可能已经选过、或设置里存着值）。"""
-        for combo in (self.ui_font_combo, self.mono_font_combo):
-            wanted = str(combo.currentData() or "")
-            for family in font_families():
-                combo.addItem(family, family)
-            self._select_by_data(combo, wanted)
+        """填字体下拉，并**从设置里**恢复选中项。
+
+        两个坑（都会表现为"外观设置有时生效有时不生效"，实测踩到）：
+        1. 不能在填充**前**用 `combo.currentData()` 当"当前值" —— 那时下拉里只有"自动"一项，
+           拿到的永远是空串，填完就把用户选的字体重置回"自动"；
+        2. 填充期间顺手 `blockSignals`：在"列表里已经有自动项"的当前流程里它与不屏蔽等价
+           （addItem 不改变索引，不会触发 currentIndexChanged），留着是防将来列表为空时才填充
+           的情形 —— 那时会触发即时预览，而预览的 `collect()` 会把中间态写进设置。
+        """
+        desired = (
+            str(getattr(self._settings, "ui_font", "") or ""),
+            str(getattr(self._settings, "mono_font", "") or ""),
+        )
+        for combo, wanted in zip((self.ui_font_combo, self.mono_font_combo), desired):
+            combo.blockSignals(True)
+            try:
+                for family in font_families():
+                    combo.addItem(family, family)
+                self._select_by_data(combo, wanted)
+            finally:
+                combo.blockSignals(False)
 
     @staticmethod
     def _select_by_data(combo: QComboBox, value: str) -> None:
