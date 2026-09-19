@@ -46,6 +46,11 @@ class AppSettings:
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：
     # 与其它设置同一个文件，用户能直接看、能删、能抄给同事。
     layout: str = ""
+    # ── 外观（2026-09-19 用户要求）──────────────────────────────────────
+    ui_scale: float = 1.0            # 界面缩放：字号与所有尺寸一起放大
+    ui_font: str = ""                # 空 = 系统默认字体
+    mono_font: str = ""              # 空 = 自动挑一个可用的等宽字体
+    backdrop: str = "off"            # off / translucent / blur（blur 拿不到时退化为半透明）
 
     def __post_init__(self) -> None:
         # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：

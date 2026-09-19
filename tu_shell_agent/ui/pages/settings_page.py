@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import sys
+
 from pathlib import Path
 
 from PySide6.QtCore import Signal
 from ..widgets.scroll import form_container, scrollable
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -82,6 +86,37 @@ class SettingsPage(QWidget):
         checks_form = QFormLayout(checks)
         checks_form.addRow("阻断级别", self.blocking_combo)
 
+        # ── 外观 ──────────────────────────────────────────────────────
+        self.ui_scale_spin = QDoubleSpinBox()
+        self.ui_scale_spin.setObjectName("uiScaleSpin")
+        self.ui_scale_spin.setRange(0.8, 1.6)
+        self.ui_scale_spin.setSingleStep(0.05)
+        self.ui_scale_spin.setDecimals(2)
+        self.ui_scale_spin.setSuffix(" ×")
+
+        self.ui_font_combo = QComboBox()
+        self.ui_font_combo.setObjectName("uiFontCombo")
+        self.mono_font_combo = QComboBox()
+        self.mono_font_combo.setObjectName("monoFontCombo")
+        for combo, auto_label in (
+            (self.ui_font_combo, "系统默认"),
+            (self.mono_font_combo, "自动（挑一个可用的等宽字体）"),
+        ):
+            combo.addItem(auto_label, "")
+            for family in QFontDatabase.families():
+                combo.addItem(family, family)
+
+        self.backdrop_combo = QComboBox()
+        self.backdrop_combo.setObjectName("backdropCombo")
+        self.backdrop_combo.addItem("不透明（默认）", "off")
+        self.backdrop_combo.addItem("半透明", "translucent")
+        self.backdrop_combo.addItem("亚克力模糊（系统支持时）", "blur")
+
+        self.backdrop_hint = QLabel()
+        self.backdrop_hint.setObjectName("backdropHint")
+        self.backdrop_hint.setProperty("role", "muted")
+        self.backdrop_hint.setWordWrap(True)
+
         self.save_button = QPushButton("保存")
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
@@ -94,6 +129,16 @@ class SettingsPage(QWidget):
         layout.addWidget(components)
         layout.addWidget(run_defaults)
         layout.addWidget(checks)
+        # 外观
+        appearance = QGroupBox("外观")
+        appearance_form = QFormLayout(appearance)
+        appearance_form.addRow("界面缩放", self.ui_scale_spin)
+        appearance_form.addRow("界面字体", self.ui_font_combo)
+        appearance_form.addRow("等宽字体（脚本/报告/输出）", self.mono_font_combo)
+        appearance_form.addRow("背景效果", self.backdrop_combo)
+        appearance_form.addRow("", self.backdrop_hint)
+        layout.addWidget(appearance)
+
         layout.addWidget(self.save_button)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
@@ -134,6 +179,24 @@ class SettingsPage(QWidget):
         path = settings.loaded_from
         self.status_label.setText(f"保存位置：{path}" if path is not None else "尚未确定保存位置")
 
+    @staticmethod
+    def _select_by_data(combo: QComboBox, value: str) -> None:
+        """按 userData 选中（字体名可能不在列表里 —— 那就是被卸载了，退回"自动"）。"""
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _refresh_backdrop_hint(self) -> None:
+        """如实说明模糊能不能用：拿不到就别让用户以为开了。"""
+        from .. import backdrop as backdrop_module
+
+        if self.backdrop_combo.currentData() != "blur":
+            self.backdrop_hint.setText("")
+            return
+        self.backdrop_hint.setText(
+            "模糊由窗口管理器提供：" + ("当前平台看起来支持（保存后生效）"
+            if sys.platform == "win32" else "当前桌面多半不支持，保存后会退化为半透明（不模糊）")
+        )
+
     def collect(self) -> AppSettings:
         """控件 → `AppSettings`（**不落盘**）。直接写回绑定对象，免得丢掉 load() 记住的路径。"""
         settings = self._settings
@@ -146,6 +209,10 @@ class SettingsPage(QWidget):
         settings.generate_timeout_ms = self.generate_timeout_spin.value()
         settings.execute_timeout_ms = self.execute_timeout_spin.value()
         settings.blocking_level = self.blocking_combo.currentText()
+        settings.ui_scale = round(float(self.ui_scale_spin.value()), 2)
+        settings.ui_font = str(self.ui_font_combo.currentData() or "")
+        settings.mono_font = str(self.mono_font_combo.currentData() or "")
+        settings.backdrop = str(self.backdrop_combo.currentData() or "off")
         return settings
 
     def save(self) -> Path | None:

@@ -6,6 +6,7 @@ import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -24,7 +25,9 @@ from .pages.history import HistoryPage
 from .pages.selfcheck import SelfCheckPage
 from .chat import ChatPanel
 from .pages.settings_page import SettingsPage
+from . import backdrop as backdrop_module
 from .settings import AppSettings, default_settings_path, default_templates_dir
+from .theme import apply_theme
 from ..template_store.store import TemplateStore
 
 
@@ -187,6 +190,44 @@ class MainWindow(QMainWindow):
         self.controller = None
         if wire_controller:
             self._wire_controller()
+
+    # ── 外观（缩放 / 字体 / 背景效果）────────────────────────────────
+    def apply_appearance(self) -> None:
+        """把外观设置装到应用与窗口上；保存设置后也会调它（热更新，不用重启）。
+
+        - 缩放/字体/配色走 `apply_theme`（全局样式表 + 调色板 + 基础字号）；
+        - 半透明需要窗口属性（`WA_TranslucentBackground`）；
+        - 亚克力模糊只能问平台要（Windows 的 DWM / KDE 的 KWin），拿不到就**如实说明**并
+          只保留半透明 —— 不假装模糊成功了。
+        """
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(
+                app,
+                scale=float(getattr(self.settings, "ui_scale", 1.0) or 1.0),
+                ui_font=str(getattr(self.settings, "ui_font", "") or ""),
+                mono_font=str(getattr(self.settings, "mono_font", "") or ""),
+                backdrop=str(getattr(self.settings, "backdrop", "off") or "off"),
+            )
+        wants_effect = self.settings.backdrop in ("translucent", "blur")
+        if wants_effect:
+            backdrop_module.enable_translucent(self)
+        else:
+            backdrop_module.disable_translucent(self)
+
+        self.blur_available = False
+        if self.settings.backdrop == "blur":
+            self.blur_available = backdrop_module.try_enable_blur(self)
+            if not self.blur_available:
+                self.set_status(
+                    "当前桌面不支持窗口模糊（模糊由窗口管理器提供），已退化为半透明"
+                )
+
+    def _appearance_hint(self) -> str:
+        """给设置页/状态栏用的一句话说明（测试与用户都看这句）。"""
+        if self.settings.backdrop == "blur" and not getattr(self, "blur_available", False):
+            return "模糊不可用：当前桌面不支持，已退化为半透明"
+        return ""
 
     # ── 布局记忆 ────────────────────────────────────────────────────
     def _splitter_state(self) -> dict[str, list[int]]:

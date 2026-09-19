@@ -36,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
     apply_theme(app)
 
     window = MainWindow()
+    # 外观（缩放/字体/背景效果）在窗口建好后装：半透明与平台模糊都需要窗口已经存在。
+    # 主题本身在此之前已装过一次（apply_theme），这里按设置再精确应用一遍。
     window.show()
+    window.apply_appearance()
     if self_test:
         # 走一遍真实构造与绘制路径（无头后端下无副作用）后立刻返回。
         # 必须在 recheck_environment 之前返回：它会起子进程探测三件套，在打包冒烟里既慢，
