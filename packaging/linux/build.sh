@@ -65,6 +65,18 @@ else
     exit 1
 fi
 
+# 插件抽查：PyInstaller 漏收 Qt 插件时**不会报错**，而后果是"窗口起不来"或
+# "自绘模糊读不了壁纸、悄悄退化成半透明"。两个平台抽查同一组能力（平台插件 + jpeg 解码）。
+PLUGINS="$REPO_ROOT/dist/linux/tu-shell-agent/_internal/PySide6/Qt/plugins"
+for required in "platforms/libqxcb.so" "platforms/libqwayland.so" "imageformats/libqjpeg.so"; do
+    if [[ ! -f "$PLUGINS/$required" ]]; then
+        echo "缺 Qt 插件：$required" >&2
+        echo "  平台插件缺失会导致窗口起不来；imageformats 缺失会让自绘模糊静默失效。" >&2
+        exit 1
+    fi
+done
+echo "插件抽查通过：platforms（xcb + wayland）与 imageformats/jpeg 都在"
+
 echo
 echo "============================================================"
 echo " 产物：$APP"

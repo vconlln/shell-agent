@@ -74,3 +74,73 @@ def test_linux_build_script_is_executable():
 
     script = Path(__file__).resolve().parent.parent / "packaging" / "linux" / "build.sh"
     assert os.access(script, os.X_OK), "packaging/linux/build.sh 没有可执行位"
+
+
+def test_self_test_fails_when_the_image_pipeline_is_broken(monkeypatch):
+    """自检要能拦住"自绘模糊静默失效"。
+
+    打包最容易出的静默故障就是漏收 Qt 的 `imageformats` 插件：PyInstaller 不报错，
+    界面上只是"亚克力悄悄退化成半透明"，只有手动切一遍背景效果才发现。
+    所以自检里必须有一步真的走一遍"图片 → 模糊 → 铺层"，这里把那一环打断，自检必须转成失败。
+    """
+    from tu_shell_agent.ui import acrylic as acrylic_module
+
+    monkeypatch.setattr(acrylic_module, "backdrop_image", lambda *a, **k: None)
+    assert main(["--self-test"]) == 1
+
+
+def test_self_test_fails_when_a_backdrop_mode_cannot_be_built(monkeypatch):
+    """令牌表缺键这类"只在某个模式下才崩"的错误，也要在自检里现形。"""
+    from tu_shell_agent.ui import theme as theme_module
+
+    real = theme_module.build_stylesheet
+
+    def broken(*, scale=1.0, ui_font="", mono_font="", backdrop="off"):
+        if backdrop == "blur":
+            raise KeyError("bg_menu")
+        return real(scale=scale, ui_font=ui_font, mono_font=mono_font, backdrop=backdrop)
+
+    monkeypatch.setattr(theme_module, "build_stylesheet", broken)
+    assert main(["--self-test"]) == 1
+
+
+def test_build_scripts_check_the_same_qt_plugins():
+    """两个平台的打包脚本要抽查**同一组能力**的 Qt 插件。
+
+    抽查的意义：漏收插件时 PyInstaller 不报错 —— 少平台插件窗口起不来，少 imageformats
+    则自绘模糊静默失效（退化成半透明）。两边抽查同一组，才不会出现"Linux 产物好着、
+    Windows 产物少了 jpeg 解码"这种只有用户才会遇到的不一致。
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    sh = (repo / "packaging" / "linux" / "build.sh").read_text(encoding="utf-8")
+    bat = (repo / "packaging" / "windows" / "build.bat").read_text(encoding="utf-8")
+
+    assert "platforms/libqxcb.so" in sh and "imageformats/libqjpeg.so" in sh
+    assert re.search(r"platforms\\qwindows\.dll", bat), "Windows 脚本没抽查平台插件"
+    assert re.search(r"imageformats\\qjpeg\.dll", bat), "Windows 脚本没抽查 jpeg 解码插件"
+    for label, script in (("build.sh", sh), ("build.bat", bat)):
+        assert "抽查" in script, f"{label} 里没有插件抽查这一步"
+
+
+def test_ui_layer_keeps_its_platform_branches_in_one_place():
+    """界面层的平台分支只允许出现在两个文件里（两版一致性靠这条守住）。
+
+    外观、布局、主题、会话、模型这些代码一旦长出 `sys.platform` 分支，Windows 与 Linux
+    就会开始漂移 —— 而 Windows 侧在开发机上根本跑不到。允许的两个文件：
+      - `ui/backdrop.py`：窗口半透明与系统模糊（DWM / KWin）
+      - `ui/acrylic.py`：Windows 壁纸探测（注册表 + 主题缓存）
+    """
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    allowed = {"backdrop.py", "acrylic.py"}
+    offenders: list[str] = []
+    for path in sorted((repo / "tu_shell_agent" / "ui").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for marker in ("sys.platform", "os.name ==", "platform.system("):
+            if marker in text and path.name not in allowed:
+                offenders.append(f"{path.relative_to(repo)} 用了 {marker}")
+    assert not offenders, "界面层出现了平台分支：" + "；".join(offenders)

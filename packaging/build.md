@@ -246,3 +246,46 @@ opencode auth login
 ```
 
 否则手测会卡在"第一次生成就失败"，看起来像打包坏了。
+
+---
+
+## 9. 两个平台的一致性（2026-09-19 增补）
+
+用户要求"保证 Windows 版本和 Linux 版本一样"。分三层说清楚：**哪些是共享的、哪些天生不同、
+以及怎么用自动化守住共享的那部分**。
+
+### 9.1 共享的东西（同一份代码，没有平台分支）
+
+| 方面 | 说明 |
+| --- | --- |
+| 界面与外观 | 主题、布局、圆角、半透明、浮层、亚克力自绘、会话与模型面板全在 `tu_shell_agent/ui/`，**只有两个文件允许出现平台分支**：`backdrop.py`（窗口半透明与系统模糊）、`acrylic.py`（Windows 壁纸探测） |
+| 打包 spec / 入口 | `packaging/tu-shell-agent.spec` + `packaging/entry.py`，两个平台共用 |
+| 一键脚本的四步 | 建 venv → 装依赖 → PyInstaller → **产物自检**，两边的步骤与参数一一对应 |
+| 产物自检 | `--self-test` 两边跑同一套检查：构造并绘制主窗口、四种背景效果的样式表与调色板、**自绘模糊跑一遍"图片 → 模糊 → 铺层"**、各模式窗口渲染非空 |
+| 插件抽查 | 两边都查"平台插件 + `imageformats/jpeg`" |
+
+### 9.2 天生不同、且**故意**不同的地方
+
+| 差异 | 原因 | 会不会导致观感不同 |
+| --- | --- | --- |
+| 模糊来源 | Windows 11 22H2+ 有 DWM，就用系统的（能糊到窗口背后的真实内容）；其它平台拿不到，改用**界面自绘**（糊壁纸） | 不会：退化链一致 —— **系统 → 界面自绘 → 半透明**，两边最终都有毛玻璃；只有"模糊从哪来"不同 |
+| 字体 | `界面字体` 默认"系统默认" | 会有细微差别（Windows 是 Segoe UI、Linux 是桌面字体）。要完全一致就在设置里显式指定同一个字体 |
+| 自检时的显示后端 | Linux 用 `QT_QPA_PLATFORM=offscreen`（无头），Windows 直接开窗 | 不会：检查内容相同 |
+| 读产物退出码 | spec 里 `console=False`，Windows 产物是 GUI 子系统 exe，必须 `start /wait` 才拿得到退出码 | 不会 |
+
+### 9.3 自动化守住的地方（`tests/test_app_self_test.py`）
+
+- `test_platform_build_scripts_point_at_the_shared_spec_and_their_own_dist`：共用 spec、各写各的
+  `--distpath`、都跑 `--self-test`；批处理必须 CRLF、命令行必须纯 ASCII。
+- `test_build_scripts_check_the_same_qt_plugins`：两边抽查同一组插件（平台插件 + jpeg 解码）。
+- `test_self_test_fails_when_the_image_pipeline_is_broken` /
+  `..._when_a_backdrop_mode_cannot_be_built`：把图片链路或某个背景效果打断，自检必须返回 1 ——
+  也就是"漏收 imageformats 插件"这类静默故障不会再溜过去。
+- `test_ui_layer_keeps_its_platform_branches_in_one_place`：界面层的平台分支只允许出现在
+  那两个文件里；别处一长出来就会红。
+
+### 9.4 仍然只能在 Windows 上确认的（见 §6.1）
+
+DWM 模糊是否真的生效、多 DPI 缩放、中文字体与 `✓ ⚠` 符号、Git Bash / `taskkill` / UTF-8 输出、
+中文与含空格路径。这些在开发机上（Linux）跑不到，脚本与自检已经把"能在 Linux 上发现的"
+那一半全部自动化了。

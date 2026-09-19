@@ -71,9 +71,18 @@ rem 这里不设 QT_QPA_PLATFORM：Windows 上直接开窗更接近真实使用�
 start /wait "" "%APP%" --self-test
 echo self-test exit=%ERRORLEVEL%
 if not "%ERRORLEVEL%"=="0" goto :selftest_failed
+
+rem ---- 插件抽查：PyInstaller 漏收 Qt 插件时不会报错，后果是"窗口起不来"或
+rem      "自绘模糊读不了壁纸、悄悄退化成半透明"。与 Linux 脚本抽查同一组能力。
+set "PLUGINS=dist\windows\tu-shell-agent\_internal\PySide6\Qt\plugins"
+if not exist "%PLUGINS%\platforms\qwindows.dll" goto :missing_plugins
+if not exist "%PLUGINS%\imageformats\qjpeg.dll" goto :missing_plugins
+echo 插件抽查通过：platforms 与 imageformats/jpeg 都在
 echo.
 echo ============================================================
 echo  产物：%CD%\%APP%
+echo  exe 体积（字节）：
+for %%F in ("%APP%") do echo   %%~zF
 echo  双击它即可打开界面
 echo  生成脚本需要 opencode 已登录：先跑一次  opencode auth login
 echo  手测清单见 packaging\build.md 第 6 节
@@ -88,6 +97,11 @@ goto :fail
 
 :selftest_failed
 echo *** 自检没有返回 0：产物能生成但起不来，对照 packaging\build.md 第 3 节排错 ***
+goto :fail
+
+:missing_plugins
+echo *** 缺 Qt 插件：platforms\qwindows.dll 缺失会导致窗口起不来；
+echo     imageformats\qjpeg.dll 缺失会让自绘模糊静默失效 ***
 goto :fail
 
 :fail
