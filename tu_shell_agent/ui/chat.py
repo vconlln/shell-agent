@@ -16,6 +16,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -47,10 +48,36 @@ class ChatPanel(QWidget):
     send_requested = Signal(str)      # 用户点了发送（携带输入内容）
     cancel_requested = Signal()
     script_extracted = Signal(str)    # "把最新脚本放进中栏"（携带脚本正文）
+    session_selected = Signal(str)    # 会话下拉选中（携带运行目录）
+    sessions_refresh_requested = Signal()
+    new_session_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("chatPanel")
+
+        # ── 会话条：从**文件夹**里扫出来的历史会话 ──────────────────────
+        # 会话不再只在内存里：每个运行目录都记着它的 sessionId，这里直接列出来，
+        # 选中就接着那一段聊（记录也会从目录里的 chat.jsonl 回填）。
+        self.session_combo = QComboBox()
+        self.session_combo.setObjectName("chatSessionCombo")
+        self.session_combo.setMinimumWidth(240)
+        self.session_combo.currentIndexChanged.connect(self._on_session_changed)
+        self.refresh_button = QPushButton("扫描历史会话")
+        self.refresh_button.setObjectName("chatSessionRefreshButton")
+        self.refresh_button.clicked.connect(lambda: self.sessions_refresh_requested.emit())
+        self.new_button = QPushButton("新对话")
+        self.new_button.setObjectName("chatSessionNewButton")
+        self.new_button.clicked.connect(lambda: self.new_session_requested.emit())
+
+        session_row = QWidget()
+        session_row.setObjectName("chatSessionRow")
+        session_layout = QHBoxLayout(session_row)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.addWidget(QLabel("会话"))
+        session_layout.addWidget(self.session_combo, 1)
+        session_layout.addWidget(self.refresh_button)
+        session_layout.addWidget(self.new_button)
 
         self.transcript = QPlainTextEdit()
         self.transcript.setObjectName("chatTranscript")
@@ -85,6 +112,7 @@ class ChatPanel(QWidget):
         buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(session_row)
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.input)
@@ -97,6 +125,43 @@ class ChatPanel(QWidget):
         self.set_busy(False)
 
     # ── 对外 ──────────────────────────────────────────────────────────────
+    # ── 会话 ──────────────────────────────────────────────────────────────
+    def set_sessions(self, sessions, current_run_dir: str = "") -> None:
+        """铺会话列表；`current_run_dir` 是当前正在用的那段，选中它但不触发切换。"""
+        self.session_combo.blockSignals(True)
+        try:
+            self.session_combo.clear()
+            for item in sessions:
+                self.session_combo.addItem(item.label(), item.run_dir)
+            if not sessions:
+                self.session_combo.addItem("（未发现可恢复的会话）", "")
+            index = self.session_combo.findData(current_run_dir) if current_run_dir else -1
+            self.session_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.session_combo.blockSignals(False)
+
+    def selected_session(self) -> str:
+        return str(self.session_combo.currentData() or "")
+
+    def _on_session_changed(self, _index: int) -> None:
+        run_dir = self.selected_session()
+        if run_dir:
+            self.session_selected.emit(run_dir)
+
+    def clear_history(self) -> None:
+        self.transcript.clear()
+
+    def load_history(self, entries) -> None:
+        """把磁盘上的对话记录回填进面板（角色 → 说话人，与实时追加同一套呈现）。"""
+        self.clear_history()
+        from ..run_store.sessions import ROLE_LABELS
+
+        for entry in entries:
+            speaker = ROLE_LABELS.get(entry.role, entry.role)
+            stamp = f"（{entry.when}）" if entry.when else ""
+            self._append_raw(f"\n{speaker}{stamp}：{entry.text}\n")
+        self.transcript.ensureCursorVisible()
+
     def set_busy(self, busy: bool) -> None:
         self.send_button.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)

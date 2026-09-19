@@ -44,6 +44,13 @@ from ..types import (
     RunConfig,
     RunEvent,
 )
+from ..run_store.sessions import (
+    append_chat,
+    read_chat,
+    scan_sessions,
+    session_in,
+    write_session_meta,
+)
 from .engine_worker import ChatWorker, DetectWorker, EngineWorker
 from .widgets.confirm_dialog import ConfirmDialog
 
@@ -135,6 +142,9 @@ class RunController(QObject):
         self._session_id = ""          # 当前 opencode 会话（续跑、对话共用同一个）
         self._chat_preamble = ""       # 只在新会话的第一句话前带上（方案上下文）
         self._run_dir = ""
+        self._serve_dir = ""           # 当前 serve 起在哪个目录（会话按目录隔离）
+        # 用户点了「新对话」：下一次提问**不要**又自动恢复最近那段（否则点了等于没点）
+        self._force_new_chat = False
         self._config: RunConfig | None = None
         self._template: TemplateSpec | None = None
         self._plan_text = ""
@@ -165,6 +175,9 @@ class RunController(QObject):
         chat.send_requested.connect(self.ask)
         chat.cancel_requested.connect(self.cancel_chat)
         chat.script_extracted.connect(self._on_script_extracted)
+        chat.session_selected.connect(self._on_session_selected)
+        chat.sessions_refresh_requested.connect(self.refresh_sessions)
+        chat.new_session_requested.connect(self._on_new_session)
         window.set_running(False)
 
     # ── 环境自检 ──────────────────────────────────────────────────
@@ -350,6 +363,11 @@ class RunController(QObject):
             chat.add_error("当前注入的 opencode 适配器不支持自由对话（测试替身？）。")
             return
 
+        # 没有会话时先看看**磁盘上**有没有可恢复的：对话目录与运行目录都记着 sessionId，
+        # 重启不该等于"忘掉上次聊到哪"（用户明确要求按文件夹找回历史会话）。
+        if not self._session_id and not self._force_new_chat:
+            self._restore_latest_session()
+
         if not self._session_id:
             try:
                 if self._adapter is not None:
@@ -364,6 +382,14 @@ class RunController(QObject):
                     self._session_id = adapter.start(
                         run_dir, "tu-shell-writer", self._config_from_ui().model
                     )
+                self._serve_dir = run_dir
+                # 会话 id 与"这是一段对话"落进目录：重启后靠它把这段找回来
+                write_session_meta(
+                    run_dir,
+                    self._session_id,
+                    kind="chat",
+                    model=str(self._config_from_ui().model or ""),
+                )
             except Exception as error:  # noqa: BLE001 - 起不来就如实说
                 chat.add_error(f"无法建立对话会话：{error}")
                 return
@@ -377,6 +403,12 @@ class RunController(QObject):
             )
         else:
             self._chat_preamble = ""
+
+        # 恢复出来的会话要保证 serve 起在**它自己的目录**里：opencode 的会话按项目目录隔离，
+        # 在别的目录起 serve 会看不到那段会话。
+        self._ensure_serve_for(self._run_dir)
+        self._force_new_chat = False
+        append_chat(self._run_dir, "user", message)
 
         worker = ChatWorker(opencode=adapter, timeout_ms=self._config_from_ui().generate_timeout_ms)
         worker.submit(self._session_id, message, self._chat_preamble)
@@ -393,6 +425,58 @@ class RunController(QObject):
         if self._chat_worker is not None:
             self._chat_worker.cancel()
 
+    # ── 历史会话（按目录检索）────────────────────────────────────────────
+    def refresh_sessions(self) -> list:
+        """扫运行根目录，把可恢复的会话铺进对话面板的下拉。"""
+        sessions = scan_sessions(self._session_root())
+        self.window.chat_panel.set_sessions(sessions, self._run_dir)
+        return sessions
+
+    def _session_root(self) -> str:
+        return self._run_root or self._config_from_ui().run_root
+
+    def _on_session_selected(self, run_dir: str) -> None:
+        """切到某个目录的会话：连记录一起回填，接下来就在那段会话里继续问。"""
+        reference = session_in(run_dir)
+        chat = self.window.chat_panel
+        if reference is None:
+            chat.set_status("这个目录里没有可恢复的会话（缺 sessionId）。")
+            return
+        self._run_dir = reference.run_dir
+        self._session_id = reference.session_id
+        self._chat_preamble = ""
+        self._serve_dir = ""          # 目录换了，serve 要按新目录重起
+        chat.load_history(read_chat(reference.run_dir))
+        chat.set_status(f"已切换到 {reference.label()}（会话 {reference.session_id}）")
+
+    def _on_new_session(self) -> None:
+        """丢弃当前会话，下一条消息会开一段新对话。"""
+        self._session_id = ""
+        self._run_dir = ""
+        self._chat_preamble = ""
+        self._serve_dir = ""
+        self._force_new_chat = True
+        chat = self.window.chat_panel
+        chat.clear_history()
+        chat.set_status("下一句话将开始一段新对话。")
+
+    def _restore_latest_session(self) -> bool:
+        """没有任何会话时，自动接上磁盘上最近的一段**对话**（运行会话由运行本身接管）。"""
+        for reference in scan_sessions(self._session_root()):
+            if reference.kind == "chat":
+                self._on_session_selected(reference.run_dir)
+                return True
+        return False
+
+    def _ensure_serve_for(self, run_dir: str) -> None:
+        """保证 serve 起在指定目录（opencode 的会话按项目目录隔离），不新建会话。"""
+        adapter = self._adapter if self._adapter is not None else self._opencode
+        resume = getattr(adapter, "resume", None)
+        if adapter is None or resume is None or not run_dir or self._serve_dir == run_dir:
+            return
+        resume(run_dir, self._config_from_ui().model)
+        self._serve_dir = run_dir
+
     def _new_chat_run_dir(self) -> str:
         """为"先聊天、还没跑过"的情形准备一个运行目录（会话与 agent 文件需要落处）。"""
         config = self._config_from_ui()
@@ -404,6 +488,8 @@ class RunController(QObject):
         chat = self.window.chat_panel
         if not reply.strip():
             chat.add_note("模型返回了空回复。")
+        if self._run_dir:
+            append_chat(self._run_dir, "model", reply)
         chat.set_busy(False)
         chat.set_status("可以继续问；回复里的脚本可以点「把最新脚本放进中栏」再走改后重跑。")
 
@@ -413,6 +499,8 @@ class RunController(QObject):
         chat = self.window.chat_panel
         hint = explain_provider_error(message)
         chat.add_error(f"对话失败：{message}" + (f"\n{hint}" if hint else ""))
+        if self._run_dir:
+            append_chat(self._run_dir, "error", message)
         chat.set_busy(False)
         chat.set_status("对话失败；上面是原始错误。" + ("已附上处理建议。" if hint else ""))
 
@@ -723,6 +811,18 @@ class RunController(QObject):
             return
         meta = snapshot.get("meta") or {}
         script = snapshot.get("script") or ""
+        # 历史运行的会话也接上：opencode 的会话 id 就写在那次运行的 meta.json 里，
+        # 于是"看一眼历史"之后可以直接就着那一段继续问（以前只有「继续修复」用它）。
+        run_dir = str(snapshot.get("run_dir") or "")
+        session_id = str(meta.get("sessionId") or "")
+        if run_dir and session_id:
+            chat_panel = self.window.chat_panel
+            self._run_dir = run_dir
+            self._session_id = session_id
+            self._chat_preamble = ""
+            self._serve_dir = ""
+            chat_panel.load_history(read_chat(run_dir))
+            chat_panel.set_status(f"已接上该运行的会话（{session_id}）")
         center = self.window.center_pane
         right = self.window.right_pane
         # 回放前必须先清空：否则上一次运行的轮次会被当成"这一轮的上一轮"，对比页会给出
@@ -825,6 +925,7 @@ class RunController(QObject):
     def _dispose_adapter(self) -> None:
         adapter = self._adapter
         self._adapter = None
+        self._serve_dir = ""
         # 释放后必须把两个端口一起清掉：只清 adapter 会让下一次运行继续用已经关掉的
         # opencode 服务端（表现为"第二次运行莫名失败"）。
         if adapter is not None:

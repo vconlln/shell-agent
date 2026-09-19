@@ -925,3 +925,158 @@ def test_chat_failure_carries_actionable_advice(qtbot, tmp_path):
     transcript = controller.window.chat_panel.transcript.toPlainText()
     assert "设置 → 模型" in transcript
     assert "免费档" in transcript
+
+
+# ── 历史会话：按目录找回 ──────────────────────────────────────────────
+
+
+class _SessionRecorderOpencode:
+    """支持自由对话的替身：记录 start/resume 调用，便于断言"是接着聊还是新开"。"""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.resumed: list[str] = []
+        self.replies: list[str] = []
+        self.session_counter = 0
+
+    def start(self, run_dir, agent_name="", model=None):
+        self.started.append(str(run_dir))
+        self.session_counter += 1
+        return f"ses_{self.session_counter}"
+
+    def resume(self, run_dir, model=None):
+        self.resumed.append(str(run_dir))
+
+    def chat(self, session_id, message, timeout_ms, on_delta=None, cancel=None, system_preamble=""):
+        self.replies.append((session_id, message))
+        return "好的"
+
+    def abort(self, session_id):
+        pass
+
+    def dispose(self):
+        pass
+
+
+def _chat_controller(qtbot, tmp_path, run_root):
+    """对话用例：注入支持 chat 的替身，运行根指向临时目录。"""
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.run_controller import RunController
+
+    settings = AppSettings(run_root=str(run_root), templates_dir=str(tmp_path / "tpl"))
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    opencode = _SessionRecorderOpencode()
+    controller = RunController(
+        opencode=opencode,
+        toolchain=_FakeToolchain(),
+        window=window,
+        settings=settings,
+        run_root=str(run_root),
+        auto_confirm=True,
+    )
+    return controller, opencode, window
+
+
+def _wait_for_chat(qtbot, controller) -> None:
+    """等对话线程结束。
+
+    **不能用 `controller._busy()`**：它只看引擎那个 worker，对话的 worker 是另一个字段，
+    于是等待会立刻返回、断言跑在回复之前（写这两个用例时踩到过）。
+    """
+    qtbot.waitUntil(
+        lambda: controller._chat_worker is None or not controller._chat_worker.isRunning(),
+        timeout=10_000,
+    )
+
+
+def test_chat_finds_the_previous_conversation_in_the_folder(qtbot, tmp_path):
+    """重启后要能按**文件夹**找回上一次对话：接着聊，而不是新开一段。
+
+    会话 id 与对话记录都落在运行目录里（meta.json + chat.jsonl），所以这条路不依赖内存状态。
+    """
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    old_dir = run_root / "20260919-101010-aaaa"
+    old_dir.mkdir(parents=True)
+    write_session_meta(str(old_dir), "ses_old", kind="chat", model="deepseek/x")
+    append_chat(str(old_dir), "user", "上次问的问题")
+    append_chat(str(old_dir), "model", "上次的回答")
+
+    controller, opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    controller.ask("接着问一句")
+    _wait_for_chat(qtbot, controller)
+
+    assert opencode.started == [], "应当接着历史会话，而不是新开一段"
+    assert opencode.resumed == [str(old_dir)], "没有把 serve 起在那段会话的目录里"
+    assert opencode.replies[-1][0] == "ses_old"
+    # 记录要回填，新的一句也要落盘
+    transcript = window.chat_panel.transcript.toPlainText()
+    assert "上次问的问题" in transcript and "上次的回答" in transcript
+    assert "接着问一句" in (old_dir / "chat.jsonl").read_text(encoding="utf-8")
+
+
+def test_new_session_button_starts_a_fresh_conversation(qtbot, tmp_path):
+    """点「新对话」之后必须真的新开一段（否则用户没法脱离旧上下文）。"""
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    old_dir = run_root / "20260919-101010-aaaa"
+    old_dir.mkdir(parents=True)
+    write_session_meta(str(old_dir), "ses_old", kind="chat")
+    append_chat(str(old_dir), "user", "旧话题")
+
+    controller, opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    window.chat_panel.new_session_requested.emit()
+    assert window.chat_panel.transcript.toPlainText() == ""
+
+    controller.ask("新话题")
+    _wait_for_chat(qtbot, controller)
+    assert opencode.started, "点了新对话之后应当新建会话"
+    assert opencode.replies[-1][0] != "ses_old"
+
+
+def test_session_picker_lists_and_switches(qtbot, tmp_path):
+    """会话下拉：列出文件夹里的会话，选中即切换（连记录一起回填）。"""
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    first = run_root / "20260919-101010-aaaa"
+    second = run_root / "20260919-121212-bbbb"
+    for directory, session, text in ((first, "ses_a", "第一段"), (second, "ses_b", "第二段")):
+        directory.mkdir(parents=True)
+        write_session_meta(str(directory), session, kind="chat")
+        append_chat(str(directory), "user", text)
+
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    listed = controller.refresh_sessions()
+    assert {item.session_id for item in listed} == {"ses_a", "ses_b"}
+
+    controller._on_session_selected(str(first))
+    assert controller._session_id == "ses_a"
+    assert controller._run_dir == str(first)
+    assert "第一段" in window.chat_panel.transcript.toPlainText()
+
+
+def test_replay_adopts_the_run_session(qtbot, tmp_path):
+    """看一眼历史运行之后，应当能直接就着那一次的会话继续问。"""
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, tmp_path / "runs")
+    controller._on_replay({"run_dir": str(tmp_path / "runs" / "x"), "meta": {"sessionId": "ses_run"}})
+
+    assert controller._session_id == "ses_run"
+    assert controller._run_dir == str(tmp_path / "runs" / "x")
+    assert "ses_run" in window.chat_panel.status.text()
+
+
+def test_chat_session_id_is_written_into_the_folder(qtbot, tmp_path):
+    """新开的对话会话要把 id 落进目录 —— 这是"下次还能找到"的唯一依据。"""
+    import json
+
+    controller, _opencode, _window = _chat_controller(qtbot, tmp_path, tmp_path / "runs")
+    controller.ask("你好")
+    _wait_for_chat(qtbot, controller)
+
+    meta = json.loads((Path(controller._run_dir) / "meta.json").read_text(encoding="utf-8"))
+    assert meta["sessionId"] == controller._session_id
+    assert meta["kind"] == "chat"

@@ -127,8 +127,13 @@ class HistoryPage(QWidget):
             if not meta_path.is_file():
                 continue
             meta = self._read_json(meta_path)
-            if isinstance(meta, dict):
-                found.append((meta, child))
+            if not isinstance(meta, dict):
+                continue
+            # 纯对话目录不列在这里：它没有轮次也没有脚本，列出来是一行空运行。
+            # 那类目录归「模型对话」的会话下拉管（同样的 meta.json，那里才有意义）。
+            if str(meta.get("kind") or "") == "chat" and not meta.get("rounds"):
+                continue
+            found.append((meta, child))
         return found
 
     @staticmethod
@@ -156,6 +161,7 @@ class HistoryPage(QWidget):
         run_dir = Path(str(item.data(Qt.ItemDataRole.UserRole)))
         attempt = self._latest_attempt(run_dir)
         return {
+            "run_dir": str(run_dir),
             "meta": self._read_json(run_dir / "meta.json"),
             "script": self._read_text(run_dir / "script.sh"),
             "notes": self._read_text(attempt / "notes.md"),

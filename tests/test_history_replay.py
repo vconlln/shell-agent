@@ -94,3 +94,28 @@ def test_history_refresh_button_rescans_the_run_root(qtbot, tmp_path):
     page.refresh_button.click()
 
     assert page.list_widget.count() == 1
+
+
+def test_pure_chat_directories_are_not_listed_as_runs(qtbot, tmp_path):
+    """纯对话目录不该出现在「历史运行」里（没有轮次也没有脚本，那类目录归会话下拉管）。"""
+    from tu_shell_agent.run_store.sessions import write_session_meta
+
+    root = tmp_path / "runs"
+    run_dir = root / "20260919-101010-run0"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"runId": "run0", "outcome": "succeeded", "rounds": [{"round": 1}]}),
+        encoding="utf-8",
+    )
+    chat_dir = root / "20260919-121212-chat"
+    chat_dir.mkdir(parents=True)
+    write_session_meta(str(chat_dir), "ses_chat", kind="chat")
+
+    page = HistoryPage(run_root=str(root))
+    qtbot.addWidget(page)
+    page.reload()
+
+    labels = [
+        page.list_widget.item(index).text() for index in range(page.list_widget.count())
+    ]
+    assert len(labels) == 1 and "run0" in labels[0]
