@@ -228,3 +228,41 @@ def test_acrylic_layer_is_dark_enough_for_light_text(restore_app, qtbot, tmp_pat
         layer.pixelColor(x, y).lightness() for x in range(0, 120, 7) for y in range(0, 80, 7)
     ) / len(range(0, 120, 7)) / len(range(0, 80, 7))
     assert lightness <= 140, f"亚克力层太亮（平均 {lightness:.0f}），浅色文字会看不清"
+
+
+def test_find_wallpaper_reads_the_windows_registry(tmp_path, monkeypatch):
+    """Windows：壁纸路径在注册表里（HKCU\\Control Panel\\Desktop\\Wallpaper）。"""
+    image = _two_tone(tmp_path / "win.png")
+    assert acrylic._registry_wallpaper() == ""          # 非 Windows 平台上不读注册表
+
+    monkeypatch.setattr(acrylic, "_registry_wallpaper", lambda: image)
+    assert acrylic.find_wallpaper("", home=tmp_path) == image
+
+
+def test_find_wallpaper_falls_back_to_the_windows_theme_cache(tmp_path, monkeypatch):
+    """被"聚焦 / 幻灯片"接管时注册表可能是空值，那就用主题缓存里的当前壁纸。
+
+    主题缓存文件叫 `TranscodedWallpaper`，**没有后缀** —— 所以必须按文件是否存在判断，
+    不能按扩展名过滤。
+    """
+    import shutil
+
+    monkeypatch.setattr(acrylic, "_registry_wallpaper", lambda: "")
+    themes = tmp_path / "AppData/Roaming/Microsoft/Windows/Themes"
+    themes.mkdir(parents=True)
+    # 直接复制而不是 QImage.save：save() 靠后缀判格式，无后缀存不出来
+    shutil.copy(_two_tone(tmp_path / "src.png"), themes / "TranscodedWallpaper")
+
+    found = acrylic.find_wallpaper("", home=tmp_path)
+    assert found is not None and found.endswith("TranscodedWallpaper")
+    # 无后缀的文件要能**按内容**加载（Qt 自己认格式），否则找到了也画不出来
+    assert acrylic.backdrop_image(found, 60, 40, 8) is not None
+
+
+def test_configured_wallpaper_wins_over_auto_detection(tmp_path, monkeypatch):
+    """设置里指定的永远优先：自动探测只是"猜"，用户指定的是"事实"。"""
+    chosen = _two_tone(tmp_path / "chosen.png")
+    other = _two_tone(tmp_path / "other.png")
+    monkeypatch.setattr(acrylic, "_registry_wallpaper", lambda: other)
+
+    assert acrylic.find_wallpaper(chosen, home=tmp_path) == chosen

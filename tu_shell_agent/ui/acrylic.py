@@ -6,7 +6,8 @@ Wayland 出于安全压根不允许，X11 抓屏拿到的也是"整块屏幕"而
 
 但观感可以自己造 —— 壁纸图片是能读的，而窗口背后通常就是壁纸：
 
-1. 找到当前壁纸（DankMaterialShell / KDE / hyprpaper 的配置，或 ~/Pictures 里最新的一张）；
+1. 找到当前壁纸（Windows 注册表与主题缓存 / DankMaterialShell / KDE / hyprpaper，
+   或 ~/Pictures 里最新的一张）；
 2. 在窗口自己的背景层里画一份**高斯模糊过的**壁纸；
 3. QSS 那层半透明深色底再压上去 —— 看起来就是毛玻璃。
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
@@ -57,7 +59,13 @@ def find_wallpaper(configured: str = "", *, home: Path | None = None) -> str | N
     if picked is not None:
         return picked
 
-    for finder in (_dms_wallpaper, _kde_wallpaper, _hyprpaper_wallpaper, _pictures_wallpaper):
+    for finder in (
+        _windows_wallpaper,
+        _dms_wallpaper,
+        _kde_wallpaper,
+        _hyprpaper_wallpaper,
+        _pictures_wallpaper,
+    ):
         try:
             found = finder(base)
         except (OSError, ValueError, json.JSONDecodeError):
@@ -90,6 +98,32 @@ def _newest_image(directory: Path) -> str | None:
     if not images:
         return None
     return str(max(images, key=lambda entry: entry.stat().st_mtime))
+
+
+def _windows_wallpaper(home: Path) -> str | None:
+    """Windows：当前壁纸记在注册表里；被"聚焦/幻灯片"接管时注册表可能是旧值或空，
+    那就看主题缓存目录（`TranscodedWallpaper` 是系统转码后的当前壁纸，可能没有后缀，
+    按内容加载即可）。非 Windows 平台上这个函数返回 None，不影响其它探测顺序。
+    """
+    found = _from_path(_registry_wallpaper())
+    if found is not None:
+        return found
+    themes = home / "AppData/Roaming/Microsoft/Windows/Themes"
+    return _from_path(str(themes / "TranscodedWallpaper")) or _newest_image(themes)
+
+
+def _registry_wallpaper() -> str:
+    """读 `HKCU\\Control Panel\\Desktop` 的 Wallpaper 值；非 Windows 或读不到时返回空串。"""
+    if sys.platform != "win32":
+        return ""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as key:
+            value, _kind = winreg.QueryValueEx(key, "Wallpaper")
+    except OSError:
+        return ""
+    return str(value or "")
 
 
 def _dms_wallpaper(home: Path) -> str | None:

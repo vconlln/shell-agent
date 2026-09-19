@@ -208,6 +208,22 @@ Windows wheel 一般带 `styles/qmodernwindowsstyle.dll`，需在 Windows 侧确
 | 8 | [ ] 单文件便携 exe | 本次只按计划出了 one-folder。要单文件另跑：`pyinstaller --onefile --clean --noconfirm --distpath dist-onefile --workpath build-onefile packaging\tu-shell-agent.spec`（spec 里的 `exclude_binaries=True` 需一并去掉，或另写一份 one-file spec）；单文件启动会先解包到临时目录，**启动慢是正常的** | ⚠ 未实现、未验证 |
 | 9 | [ ] 应用退出后无残留进程（规格 §15.7） | 跑完一次运行后关窗，任务管理器里不应残留 `opencode.exe` / `bash.exe` | ⚠ 未在 Linux 验证 |
 
+### 6.1 外观相关（2026-09-19 新增功能，代码平台无关，但要在 Windows 上过一眼）
+
+界面全部是 Qt/QSS + 纯 Python，没有一处平台分支，所以下面这些在 Windows 上**应当**与 Linux 一致；
+但"应当"不等于"验过"，逐条手测就能收口：
+
+| # | 条目 | 怎么测 | Linux 状态 |
+| --- | --- | --- | --- |
+| A1 | [ ] 半透明（`背景效果 = 半透明`）在 Windows 上真的透 | 关掉其它窗口只留桌面，切到「半透明」，应能看到壁纸透出来；文字仍清晰 | ✅ Linux 已验（合成不透明度：空白 43% / 内容区 71%） |
+| A2 | [ ] 亚克力（`自绘壁纸，不需要系统支持`）能找到 Windows 壁纸 | 切到该模式，设置页提示应显示壁纸文件名（注册表 `HKCU\Control Panel\Desktop\Wallpaper`；聚焦/幻灯片时回退到 `%APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper`） | ⚠ Windows 探测分支本机跑不到；解析逻辑与回退路径已用假 home 单测覆盖 |
+| A3 | [ ] 亚克力模糊层跟窗口尺寸走 | 拖动窗口边缘连续改大小，背景不应卡顿或残留旧尺寸的糊图（结果按 64px 分桶缓存） | ✅ Linux 已验（1400×900 生成 0.07s） |
+| A4 | [ ] 亚克力模式下列表/菜单/提示不透明、字看得清 | 打开「界面字体」下拉，滚动列表；长文本/中文都要能读 | ✅ Linux 已验（弹层对比度 13:1；修复前 1.7:1） |
+| A5 | [ ] `背景效果 = 亚克力模糊（问系统要）` 在 Win11 22H2+ 生效 | 切过去后窗口背后应被 DWM 模糊（Acrylic）；Win10 会如实提示"当前桌面不支持…已退化为半透明" | ⚠ 未验证（DWM 调用只在 Windows 上执行） |
+| A6 | [ ] 界面缩放与字体在多 DPI 显示器上正常 | 100% / 150% / 200% 缩放下各看一遍；「界面缩放」0.8~1.6 各试一档 | ⚠ 未验证（Linux 侧只验了缩放值本身） |
+| A7 | [ ] 圆角与配色一致（按钮/页签条/卡片/输入框） | 对照 Linux 截图看四个地方：页签条整条圆角、按钮圆角、输入框圆角、列表圆角 | ✅ Linux 已验（每个都有像素级用例） |
+| A8 | [ ] 中文字体不糊、不缺字 | 界面字体选「系统默认」与「微软雅黑」各看一遍；`✓ ⚠ ▸` 这类符号不应显示成方块 | ⚠ 未验证（Windows 字体回退与本机不同） |
+
 ## 7. 本机（Linux）明确没验证的项
 
 - Windows exe 的**双击启动**、GUI 子系统 exe 的退出码读取（第 3 节的 `Start-Process` 写法是通用做法，本机没法实测）。
