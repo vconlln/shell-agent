@@ -212,11 +212,13 @@ class MainWindow(QMainWindow):
                 mono_font=str(getattr(self.settings, "mono_font", "") or ""),
                 backdrop=str(getattr(self.settings, "backdrop", "off") or "off"),
             )
-        wants_effect = self.settings.backdrop in ("translucent", "blur")
-        if wants_effect:
-            backdrop_module.enable_translucent(self)
-        else:
-            backdrop_module.disable_translucent(self)
+        # 记下模式：新建的对话框（确认框等）是独立顶层窗口，要自己跟着变透明
+        backdrop_module.set_mode(str(self.settings.backdrop or "off"))
+        backdrop_module.apply_to(self)
+        # 已经开着的对话框也一并跟上（改设置时它们可能正开着）
+        for widget in QApplication.topLevelWidgets():
+            if widget is not self:
+                backdrop_module.apply_to(widget)
 
         self.blur_available = False
         if self.settings.backdrop == "blur":

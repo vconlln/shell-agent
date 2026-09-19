@@ -150,6 +150,92 @@ def mono_family() -> str:
     return "monospace"
 
 
+def unstack_viewports(root) -> int:
+    """让滚动区的**视口**不再重复画一遍底色，返回处理过的数量。
+
+    Qt 的行为：给 QAbstractScrollArea 设了 QSS 的 background-color 之后，视口会自己再画一层
+    同样的颜色。半透明模式下这就成了叠加 —— 实测 `bg_under` 的 51% 被叠成 74%
+    （1-(1-0.51)²），于是脚本/输出/报告这些大块头看起来"还是纯黑底"。
+    这里把视口底色交还给外面的那一层，只画一次，透明度才如实生效。
+    """
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    handled = 0
+    for area in [root, *root.findChildren(QAbstractScrollArea)]:
+        if not isinstance(area, QAbstractScrollArea):
+            continue
+        viewport = area.viewport()
+        if viewport is None:
+            continue
+        # 记住原值再改：还原时若一律设成 True，视口会把整块矩形填满，
+        # **连圆角都被填成直角**（实测 off 模式下列表角落与中心同色）。
+        if viewport.property("dsh_prev_autofill") is None:
+            viewport.setProperty("dsh_prev_autofill", viewport.autoFillBackground())
+        viewport.setAutoFillBackground(False)
+        viewport.setStyleSheet("background: transparent;")
+        handled += 1
+    return handled
+
+
+def thin_containers(root) -> int:
+    """容器控件不再自绘背景，返回处理过的数量。
+
+    与 unstack_viewports 同一个病根：Qt 会把父控件的 QSS 底色灌进子控件的调色板 Window 角色，
+    于是每个 `autoFillBackground` 的容器都再刷一遍 —— 层数一多就等于不透明。
+    这里把"只起布局作用"的容器统一关掉自动填充；`off` 模式下外观不变（它们刷的就是同一个底色）。
+    """
+    from PySide6.QtWidgets import (
+        QAbstractScrollArea,
+        QFrame,
+        QScrollArea,
+        QSplitter,
+        QStackedWidget,
+        QTabWidget,
+        QWidget,
+    )
+
+    container_types = (QSplitter, QStackedWidget, QScrollArea, QTabWidget, QAbstractScrollArea)
+    keep = {"paneCard", "confirmScriptView"}
+    handled = 0
+    for widget in [root, *root.findChildren(QWidget)]:
+        if widget.objectName() in keep:
+            continue
+        is_bare = type(widget) in (QWidget, QFrame)
+        if isinstance(widget, container_types) or is_bare:
+            widget.setAutoFillBackground(False)
+            # QSS 会把父控件的底色灌进子控件的调色板；对"只负责布局"的容器连调色板也清掉，
+            # 这样不论走哪条绘制路径都不会再叠一层。
+            palette = widget.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+            palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+            widget.setPalette(palette)
+            handled += 1
+    return handled
+
+
+def restack_viewports(root) -> int:
+    """撤销 unstack_viewports（回到不透明模式时用），保证 `off` 与以前逐像素一致。"""
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    handled = 0
+    for area in [root, *root.findChildren(QAbstractScrollArea)]:
+        if not isinstance(area, QAbstractScrollArea):
+            continue
+        viewport = area.viewport()
+        if viewport is None:
+            continue
+        previous = viewport.property("dsh_prev_autofill")
+        if previous is None:
+            # 没被 unstack_viewports 动过的视口**一个字都不要改**：给没改过的视口设空样式表
+            # 会重置它的样式状态，`off` 模式下列表的圆角会被视口填成直角（实测）。
+            continue
+        viewport.setStyleSheet("")
+        viewport.setAutoFillBackground(bool(previous))
+        viewport.setProperty("dsh_prev_autofill", None)
+        handled += 1
+    return handled
+
+
 def build_palette(*, backdrop: str = "off") -> QPalette:
     """把令牌灌进 QPalette：控件自绘的部分（行号槽、文本选中、滚动条）也跟着变。"""
     colors = backdrop_colors(backdrop)
@@ -186,6 +272,19 @@ def build_palette(*, backdrop: str = "off") -> QPalette:
         QPalette.ColorRole.ButtonText,
         color("fg_disabled"),
     )
+    if backdrop != "off":
+        # **一处着色**：半透明时 QSS 已经给这些表面上了色，调色板再上一遍就是两层叠加 ——
+        # 实测脚本视图 51% 的 alpha 被叠成 74%（1-(1-0.51)²），窗口底更是叠到 95%，
+        # 于是用户看到的仍是"纯黑底和浅黑底"。这里让调色板只保留前景色、不再填充背景，
+        # 透明度就由 QSS 那唯一一层如实生效。
+        for role in (
+            QPalette.ColorRole.Window,
+            QPalette.ColorRole.Base,
+            QPalette.ColorRole.AlternateBase,
+            QPalette.ColorRole.Button,
+            QPalette.ColorRole.ToolTipBase,
+        ):
+            palette.setColor(role, QColor(0, 0, 0, 0))
     return palette
 
 
@@ -209,15 +308,20 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     base["bg_card"] = base["bg_elevated"]
     if backdrop == "off":
         return base
-    # 透明度要**看得出来**：第一版给 92%（只有 8% 的壁纸透出来），用户反馈"没有效果"。
-    # 现在页面 78%、面板 76%、只读底 72% —— 深色壁纸上能明显看到透出的内容，
-    # 同时文字仍是全不透明（对比度靠它保）。
-    base["bg"] = (16, 17, 20, 200)
+    # 透明度要**看得出来**。踩过两个坑：
+    #   1) 第一版给 92%，只有 8% 的壁纸透出来 —— 用户反馈"没有效果"；
+    #   2) 后来给 78%，但**窗口底自己就是一层 78% 的深色盖在最上面**，内部表面再透，
+    #      合成后最多也只能透出 22% —— 用户反馈"还是没有完全透明，还是纯黑底/浅黑底"。
+    # 实测（把界面画到品红画布上反推等效不透明度）：窗口底 43%、内容区 47~51% 时，
+    # 空白处能透出约一半、内容区仍能透出约三成 —— 既看得出透，文字对比也还在。
+    base["bg"] = (16, 17, 20, 110)
     base["bg_surface"] = "transparent"          # 面板/页面：不再叠加一层底色
     base["bg_card"] = (255, 255, 255, 12)       # 卡片：只留极淡的一层白，靠边框区分
-    base["bg_elevated"] = (23, 24, 28, 194)
-    base["bg_under"] = (11, 12, 14, 184)
-    base["bg_input"] = (18, 19, 23, 198)
+    # 内容区（脚本/报告/输出/列表）面积最大，"还是纯黑/浅黑"的印象主要来自它们 ——
+    # 所以这几个降到"半透明能明显看出来"的程度；文字仍全不透明，可读性靠它保。
+    base["bg_elevated"] = (23, 24, 28, 130)
+    base["bg_under"] = (11, 12, 14, 120)
+    base["bg_input"] = (18, 19, 23, 130)
     return base
 
 
@@ -241,6 +345,22 @@ def build_stylesheet(
     """
     colors = backdrop_colors(backdrop)
     mono = mono_font or mono_family()
+    # **只让窗口那一层上色**：分割器、堆叠页、滚动区、标签页这些容器若各自再刷一遍窗口底色，
+    # 43% 叠四五层就等于 97% 不透明 —— 实测主工作区 95~97%，正是用户说的"还是纯黑底和浅黑底"。
+    # 容器一律不上色，底色只在最外层画一次；真正该有底色的表面（卡片/输入框/列表/按钮）
+    # 都有自己的 ID 或类规则，不受影响。
+    # **只在半透明模式下生效**：`off` 模式必须与以往逐像素一致（页签页的底色一撤，
+    # 列表视口会把圆角填成直角 —— 实测 off 模式下列表角落与中心同色）。
+    containers_transparent_rule = (
+        """QSplitter, QStackedWidget, QScrollArea, QTabWidget::pane,
+#leftPane, #centerPane, #rightPane, #toolTabs, #centerTabs,
+#settingsPage, #selfCheckPage, #historyPage, #templatesPage, #chatPanel, #wallpaperPage,
+CollapsibleSection, #sectionBody {
+    background: transparent;
+}"""
+        if backdrop != "off"
+        else ""
+    )
     # 界面字体：没指定就用系统默认（不塞 font-family，交给 Qt/系统）
     ui_font_rule = (
         f'QWidget {{ font-family: "{ui_font}"; }}' if ui_font else ""
@@ -379,6 +499,7 @@ QHeaderView::section {{
 }}
 
 /* ── 页签：Codex 的胶囊式，去掉原生边框与底部横线 ─────────────── */
+{containers_transparent_rule}
 QTabWidget::pane {{ border: 1px solid {_color('border_light', colors)}; border-radius: {sized('radius_lg', scale)}; top: -1px; }}
 QTabBar {{ qproperty-drawBase: 0; }}
 QTabBar::tab {{

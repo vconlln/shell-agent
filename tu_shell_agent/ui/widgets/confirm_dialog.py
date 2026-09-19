@@ -93,6 +93,13 @@ class ConfirmDialog(QDialog):
         layout.addWidget(self.script_view, 1)
         layout.addWidget(buttons)
 
+        # 子控件都建好之后再套用背景模式：对话框是**独立顶层窗口**，不这么做的话，
+        # 开了半透明之后弹出来的确认框仍是一整块纯不透明的深色
+        # （用户反馈的"对话框之类的还是纯黑底"）。
+        from .. import backdrop as backdrop_module
+
+        backdrop_module.apply_to(self)
+
     @staticmethod
     def ask(round_no: int, script_path: str, script: str, parent: QWidget | None = None) -> bool:
         """模态弹窗并返回是否获批。唯一会阻塞的地方 —— 只在主线程、且只在执行前调用。"""

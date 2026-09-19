@@ -22,6 +22,33 @@ import sys
 from typing import Any
 
 
+# 当前背景模式（由 apply_appearance 写入）。对话框是**独立顶层窗口**，创建时也要跟着变透明 ——
+# 只在主窗口上设 WA_TranslucentBackground 的话，弹出来的确认框仍是纯不透明的一整块。
+_current_mode = "off"
+
+
+def set_mode(mode: str) -> None:
+    global _current_mode
+    _current_mode = mode or "off"
+
+
+def current_mode() -> str:
+    return _current_mode
+
+
+def apply_to(window: Any) -> None:
+    """把"当前背景模式"应用到某个顶层窗口（主窗口与所有对话框都走这里）。"""
+    from . import theme as theme_module
+
+    if _current_mode in ("translucent", "blur"):
+        enable_translucent(window)
+        theme_module.unstack_viewports(window)
+        theme_module.thin_containers(window)
+    else:
+        disable_translucent(window)
+        theme_module.restack_viewports(window)
+
+
 def enable_translucent(window: Any) -> None:
     """让窗口背景可以半透明（底色自身的 alpha 由主题负责）。"""
     from PySide6.QtCore import Qt

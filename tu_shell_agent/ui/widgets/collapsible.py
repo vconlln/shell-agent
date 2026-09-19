@@ -71,6 +71,10 @@ class CollapsibleSection(QWidget):
         self.header.setProperty("collapsed", "false")
 
         self.content = widget
+        if not widget.objectName():
+            # 具名才能让 QSS 明确"这层不上色"：折叠区块的外壳与其内容容器都只是布局，
+            # 各自再刷一遍窗口底色会让右栏叠到 84% 不透明（实测）。
+            widget.setObjectName("sectionBody")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

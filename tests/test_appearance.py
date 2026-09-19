@@ -320,3 +320,119 @@ def test_structural_surfaces_do_not_stack_opacity():
     for key in ("bg", "bg_card", "bg_surface"):
         stacked *= 1 - alpha(on[key])
     assert 1 - stacked <= 0.85, f"主工作区叠加后仍接近不透明（{1 - stacked:.0%}）"
+
+
+def test_content_surfaces_are_clearly_translucent(restore_app, qtbot, tmp_path):
+    """内容区（脚本/报告/输出/列表）也要"看得出透"。
+
+    第一版只把页面与卡片做成半透明，内容区还留着 72~78% 的 alpha —— 它们占的面积最大，
+    所以用户看到的仍是"纯黑底和浅黑底"。
+    """
+    on = backdrop_colors("translucent")
+
+    def alpha(value) -> float:
+        return value[3] / 255 if isinstance(value, tuple) else 1.0
+
+    assert alpha(on["bg_under"]) <= 0.55, "只读内容区（脚本/输出）仍太不透明"
+    assert alpha(on["bg_elevated"]) <= 0.62, "列表/树的底色仍太不透明"
+    assert alpha(on["bg_input"]) <= 0.62
+    # 文字不跟着透明（对比度靠它）
+    from tu_shell_agent.ui.theme import TOKENS as BASE_TOKENS
+
+    assert not isinstance(BASE_TOKENS["fg"], tuple)
+
+
+def test_dialogs_follow_the_translucent_backdrop(restore_app, qtbot, tmp_path):
+    """对话框是**独立顶层窗口**，必须自己带 WA_TranslucentBackground。
+
+    只在主窗口上设这个属性时，弹出来的确认框仍是一整块纯不透明的深色 ——
+    用户反馈的"对话框之类的还是纯黑底"就是这个。
+    """
+    from PySide6.QtCore import Qt
+
+    from tu_shell_agent.ui import backdrop as backdrop_module
+    from tu_shell_agent.ui.widgets.confirm_dialog import ConfirmDialog
+
+    window = _window(tmp_path, backdrop="translucent")
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+
+    dialog = ConfirmDialog(1, "/tmp/script.sh", "echo hi\n")
+    qtbot.addWidget(dialog)
+    assert dialog.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+
+    # 关掉背景效果之后，新开的对话框要回到不透明
+    window.settings.backdrop = "off"
+    window.apply_appearance()
+    opaque = ConfirmDialog(1, "/tmp/script.sh", "echo hi\n")
+    qtbot.addWidget(opaque)
+    assert opaque.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
+
+
+def test_rendered_surfaces_let_the_backdrop_through(restore_app, qtbot, tmp_path):
+    """**渲染结果**层面的证据：把整个窗口画到品红画布上，看壁纸还能透出多少。
+
+    只断言令牌里的 alpha 不够 —— 真正决定观感的是**合成之后**的结果，而这正是我踩过的坑：
+    窗口底自己就是一层 78% 的深色时，内容区再透明，合成后也只剩 22% 能透出来
+    （用户反馈的"还是没有完全透明"）。所以这里把整窗渲染到品红上，
+    再按控件→窗口的坐标映射取该控件中心的那一个像素，用"品红残留比例"反推等效不透明度。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    window = _window(tmp_path, backdrop="translucent")
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+
+    targets = {
+        "脚本视图": window.center_pane.script_view,
+        "输出视图": window.right_pane.output_view,
+        "报告视图": window.right_pane.notes_view,
+        "方案预览": window.left_pane.plan_preview,
+        "对话记录": window.chat_panel.transcript,
+        "运行时间线": window.tool_tabs,
+    }
+
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(255, 0, 255))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+
+    for name, widget in targets.items():
+        center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
+        pixel = image.pixelColor(center)
+        bleed = pixel.red() / 255  # 品红残留比例 = 壁纸能透出来的程度
+        print(f"[透出量] {name}: rgb={pixel.red(), pixel.green(), pixel.blue()} 透出≈{bleed:.0%}")
+        assert bleed >= 0.18, (
+            f"{name} 几乎不透：等效不透明≈{1 - bleed:.0%}"
+            f"（测得 {pixel.red(), pixel.green(), pixel.blue()}）"
+        )
+        assert bleed <= 0.75, f"{name} 透得过头，底色没了、文字会看不清"
+
+
+def test_opaque_mode_keeps_every_surface_solid(restore_app, qtbot, tmp_path):
+    """关掉背景效果时必须回到完全不透明 —— 默认外观不能被"透明改造"顺带改掉。"""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    window = _window(tmp_path, backdrop="off")
+    qtbot.addWidget(window)
+    window.show()
+    window.apply_appearance()
+
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(255, 0, 255))
+    painter = QPainter(image)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+
+    for name, widget in {
+        "脚本视图": window.center_pane.script_view,
+        "输出视图": window.right_pane.output_view,
+    }.items():
+        center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
+        pixel = image.pixelColor(center)
+        assert pixel.red() < 70, f"{name} 在 off 模式下被透出来了：{pixel.red()}"
