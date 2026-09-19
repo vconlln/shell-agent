@@ -201,12 +201,20 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     `off` 保持完全不透明：像素测试与"看不清就调不透明度"这类麻烦都不引入。
     """
     base = dict(TOKENS)
+    # 结构性表面（栏目的卡片 / 面板本身）：默认与以前一样；开了背景效果就**不再自己上色**。
+    # 原因是叠加：窗口底 78% + 卡片 76% + 面板/只读底 → 合成不透明度 ≈ 98.8%，等于不透明 ——
+    # 用户反馈的"主工作区的黑底与浅黑底没有透明效果"就是叠出来的。
+    # 所以只让**最外层**承担透明度，内部改用"极淡的一层白 + 边框"来区分区域。
+    base["bg_surface"] = base["bg"]
+    base["bg_card"] = base["bg_elevated"]
     if backdrop == "off":
         return base
     # 透明度要**看得出来**：第一版给 92%（只有 8% 的壁纸透出来），用户反馈"没有效果"。
     # 现在页面 78%、面板 76%、只读底 72% —— 深色壁纸上能明显看到透出的内容，
     # 同时文字仍是全不透明（对比度靠它保）。
     base["bg"] = (16, 17, 20, 200)
+    base["bg_surface"] = "transparent"          # 面板/页面：不再叠加一层底色
+    base["bg_card"] = (255, 255, 255, 12)       # 卡片：只留极淡的一层白，靠边框区分
     base["bg_elevated"] = (23, 24, 28, 194)
     base["bg_under"] = (11, 12, 14, 184)
     base["bg_input"] = (18, 19, 23, 198)
@@ -266,12 +274,12 @@ QLabel[role="muted"] {{ color: {_color('fg_tertiary', colors)}; font-size: {size
    分隔感由分割条 hover 与留白提供。 */
 QWidget#leftPane, QWidget#centerPane, QWidget#rightPane, QWidget#templatesPane,
 QWidget#historyPage, QWidget#settingsPage, QWidget#selfCheckPage, QWidget#chatPanel {{
-    background-color: {_color('bg', colors)};
+    background-color: {_color('bg_surface', colors)};
 }}
 QWidget#chatPanel {{ border: 1px solid {_color('border_light', colors)}; border-radius: {sized('radius_lg', scale)}; }}
 /* 三栏/底栏的"卡片"：大圆角 + 极淡边框。栏与栏的分隔靠它，而不是靠那条透明的分割条。 */
 QWidget#paneCard {{
-    background-color: {_color('bg_elevated', colors)};
+    background-color: {_color('bg_card', colors)};
     border: 1px solid {_color('border_light', colors)};
     border-radius: {sized('radius_lg', scale)};
 }}

@@ -290,3 +290,33 @@ def test_entry_point_applies_appearance_before_showing_the_window():
     assert source.index("apply_appearance") < source.index(".show()"), (
         "app.py 里 apply_appearance() 必须在 show() 之前调用"
     )
+
+
+def test_structural_surfaces_do_not_stack_opacity():
+    """开了背景效果后，结构性表面（卡片/面板）不能再各自叠一层底色。
+
+    用户反馈"主工作区的黑底与浅黑底没有透明效果"：窗口 78% + 卡片 76% + 面板 78% 三层叠起来
+    合成不透明度 ≈ 99%，肉眼就是不透明。现在只让最外层承担透明度，内部改透明/极淡一层白，
+    叠加后 ≈ 79%（桌面能透进主工作区）。
+    """
+    off = backdrop_colors("off")
+    on = backdrop_colors("translucent")
+
+    # 默认模式一点都不能变（像素测试全都建立在"不透明"上）
+    assert off["bg_card"] == off["bg_elevated"]
+    assert off["bg_surface"] == off["bg"]
+
+    assert on["bg_surface"] == "transparent", "面板不该再自己上一层底色"
+    assert isinstance(on["bg_card"], tuple) and on["bg_card"][3] <= 40, "卡片只该留极淡的一层"
+
+    def alpha(value) -> float:
+        if value == "transparent":
+            return 0.0
+        if isinstance(value, tuple):
+            return value[3] / 255
+        return 1.0
+
+    stacked = 1.0
+    for key in ("bg", "bg_card", "bg_surface"):
+        stacked *= 1 - alpha(on[key])
+    assert 1 - stacked <= 0.85, f"主工作区叠加后仍接近不透明（{1 - stacked:.0%}）"
