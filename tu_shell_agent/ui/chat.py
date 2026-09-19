@@ -98,11 +98,8 @@ class ChatPanel(QWidget):
         session_layout.addWidget(self.session_combo, 1)
         session_layout.addWidget(self.refresh_button)
         session_layout.addWidget(self.new_button)
-        model_layout_row = QHBoxLayout()
-        model_layout_row.setContentsMargins(0, 0, 0, 0)
-        model_layout_row.addWidget(QLabel("模型"))
-        model_layout_row.addWidget(self.model_combo, 1)
-        model_layout_row.addWidget(self.model_button)
+        # 模型控件放**底部按钮行**的右端：与「发送 / 取消 / 把最新脚本放进中栏」同一行。
+        # 会话那行只留会话本身，上面不再堆两排控件。
 
         self.transcript = QPlainTextEdit()
         self.transcript.setObjectName("chatTranscript")
@@ -135,10 +132,12 @@ class ChatPanel(QWidget):
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.extract_button)
         buttons.addStretch(1)
+        buttons.addWidget(QLabel("模型"))
+        buttons.addWidget(self.model_combo)
+        buttons.addWidget(self.model_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
-        layout.addLayout(model_layout_row)
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.input)
