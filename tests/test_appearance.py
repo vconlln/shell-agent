@@ -136,7 +136,10 @@ def test_settings_page_offers_fonts_and_scale(qtbot):
     assert page.ui_font_combo.itemData(0) == ""          # 第一项 = 系统默认
     assert page.mono_font_combo.itemData(0) == ""        # 第一项 = 自动
     assert page.ui_font_combo.count() > 1
-    assert page.backdrop_combo.count() == 3
+    modes = {page.backdrop_combo.itemData(i) for i in range(page.backdrop_combo.count())}
+    assert modes == {"off", "translucent", "blur", "acrylic"}, (
+        "背景效果要四种：不透明 / 半透明 / 问系统要模糊 / 自绘壁纸模糊"
+    )
 
 
 # ── 背景效果 ──────────────────────────────────────────────────────────────

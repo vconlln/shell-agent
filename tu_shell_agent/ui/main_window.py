@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -25,6 +26,7 @@ from .pages.history import HistoryPage
 from .pages.selfcheck import SelfCheckPage
 from .chat import ChatPanel
 from .pages.settings_page import SettingsPage
+from . import acrylic as acrylic_module
 from . import backdrop as backdrop_module
 from .settings import AppSettings, default_settings_path, default_templates_dir
 from .theme import apply_theme
@@ -61,6 +63,14 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
 
         self.settings = settings if settings is not None else AppSettings.load(default_settings_path())
+        # 亚克力（自绘模糊）的壁纸图层：apply_appearance 里按设置准备，paintEvent 里画
+        self._acrylic_image = None
+        self._acrylic_wallpaper = ""
+        # 壁纸是会变的（本机桌面每 900 秒轮换一次）。低频自检，变了就重新模糊 ——
+        # 不做监听是因为壁纸的"当前值"写在别家的状态文件里，轮询最省事也最不容易出错。
+        self._acrylic_timer = QTimer(self)
+        self._acrylic_timer.setInterval(60_000)
+        self._acrylic_timer.timeout.connect(self._poll_acrylic_wallpaper)
 
         self.left_pane = LeftPane()
         self.left_pane.setObjectName("leftPane")
@@ -227,6 +237,68 @@ class MainWindow(QMainWindow):
                 self.set_status(
                     "当前桌面不支持窗口模糊（模糊由窗口管理器提供），已退化为半透明"
                 )
+        # 亚克力（自绘）：不向系统要任何东西，自己把壁纸模糊好铺在窗口最底层。
+        # **每次都要调**：从亚克力切走时也得把那一层撤掉，否则换了背景效果却还是那张壁纸。
+        acrylic_ready = self._refresh_acrylic()
+        if self.settings.backdrop == "acrylic":
+            self._acrylic_timer.start()
+        else:
+            self._acrylic_timer.stop()
+        if self.settings.backdrop == "acrylic" and not acrylic_ready:
+            self.set_status("亚克力：没找到壁纸图片，请在设置里指定（当前只有半透明）")
+
+    def _refresh_acrylic(self) -> bool:
+        """按当前设置准备/清掉"模糊壁纸"图层；返回是否真的铺上了壁纸。
+
+        设置里没填壁纸时自动找当前壁纸（DMS / KDE / hyprpaper / ~/Pictures 最新一张）。
+        找不到就返回 False，外面会如实提示 —— 不假装模糊成功了。
+        """
+        mode = str(getattr(self.settings, "backdrop", "off") or "off")
+        if mode != "acrylic":
+            self._acrylic_image = None
+            return False
+        wallpaper = acrylic_module.find_wallpaper(
+            str(getattr(self.settings, "acrylic_wallpaper", "") or "")
+        )
+        self._acrylic_wallpaper = wallpaper or ""
+        self._acrylic_image = acrylic_module.backdrop_image(
+            wallpaper,
+            max(1, self.width()),
+            max(1, self.height()),
+            int(getattr(self.settings, "acrylic_blur", acrylic_module.DEFAULT_BLUR) or 0),
+        )
+        self.update()
+        return self._acrylic_image is not None
+
+    def _poll_acrylic_wallpaper(self) -> None:
+        """壁纸换了吗？换了就重新模糊（桌面轮换壁纸时模糊层不该停在旧图上）。"""
+        if str(getattr(self.settings, "backdrop", "off") or "off") != "acrylic":
+            self._acrylic_timer.stop()
+            return
+        found = acrylic_module.find_wallpaper(
+            str(getattr(self.settings, "acrylic_wallpaper", "") or "")
+        ) or ""
+        if found != self._acrylic_wallpaper:
+            self._refresh_acrylic()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """亚克力模式：**先**铺自己模糊好的壁纸，再让 QSS 的半透明深色底压上去。
+
+        顺序不能反：壁纸在最底层、深色底在它上面，才是毛玻璃的观感；反过来壁纸会把
+        底色整块盖掉（那就是一张普通背景图，不是亚克力了）。
+        """
+        image = getattr(self, "_acrylic_image", None)
+        if image is not None:
+            painter = QPainter(self)
+            painter.drawImage(self.rect(), image)
+            painter.end()
+        super().paintEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """窗口尺寸变了要按新尺寸重新生成模糊层（生成结果按尺寸分桶缓存，不会每像素重算）。"""
+        super().resizeEvent(event)
+        if getattr(self, "_acrylic_image", None) is not None:
+            self._refresh_acrylic()
 
     def _preview_appearance(self) -> None:
         """即时预览：把设置页当前的控件值收进内存再应用一次外观（**不写文件**）。"""
@@ -237,6 +309,8 @@ class MainWindow(QMainWindow):
         """给设置页/状态栏用的一句话说明（测试与用户都看这句）。"""
         if self.settings.backdrop == "blur" and not getattr(self, "blur_available", False):
             return "模糊不可用：当前桌面不支持，已退化为半透明"
+        if self.settings.backdrop == "acrylic" and getattr(self, "_acrylic_image", None) is None:
+            return "亚克力：没找到壁纸图片，请在设置里指定（当前只有半透明）"
         return ""
 
     # ── 布局记忆 ────────────────────────────────────────────────────

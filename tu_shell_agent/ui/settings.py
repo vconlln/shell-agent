@@ -50,7 +50,10 @@ class AppSettings:
     ui_scale: float = 1.0            # 界面缩放：字号与所有尺寸一起放大
     ui_font: str = ""                # 空 = 系统默认字体
     mono_font: str = ""              # 空 = 自动挑一个可用的等宽字体
-    backdrop: str = "off"            # off / translucent / blur（blur 拿不到时退化为半透明）
+    backdrop: str = "off"            # off / translucent / blur（问系统要） / acrylic（自绘壁纸模糊）
+    # 亚克力（自绘）：壁纸图片路径（留空 = 自动找当前壁纸）与模糊强度
+    acrylic_wallpaper: str = ""
+    acrylic_blur: int = 40
 
     def __post_init__(self) -> None:
         # _loaded_from 刻意**不做** dataclass 字段（连类级注解都不能留，否则会被当成字段）：

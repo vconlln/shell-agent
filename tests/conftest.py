@@ -33,3 +33,24 @@ def bash_path() -> str:
     if found:
         return found
     pytest.skip("找不到 bash")
+
+
+@pytest.fixture
+def restore_app(qtbot):
+    """还原全局样式表/调色板/字体，别把外观泄漏给同一会话里的其它测试。
+
+    （本来只在 test_appearance.py 里；亚克力用例同样会装主题，所以提到这里共用。）
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    previous = (app.styleSheet(), app.palette(), app.font().pointSizeF())
+    try:
+        yield app
+    finally:
+        sheet, palette, point_size = previous
+        app.setStyleSheet(sheet)
+        app.setPalette(palette)
+        font = app.font()
+        font.setPointSizeF(point_size)
+        app.setFont(font)

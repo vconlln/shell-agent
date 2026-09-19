@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -118,7 +119,27 @@ class SettingsPage(QWidget):
         self.backdrop_combo.setObjectName("backdropCombo")
         self.backdrop_combo.addItem("不透明（默认）", "off")
         self.backdrop_combo.addItem("半透明", "translucent")
-        self.backdrop_combo.addItem("亚克力模糊（系统支持时）", "blur")
+        self.backdrop_combo.addItem("亚克力模糊（问系统要，Windows 有）", "blur")
+        self.backdrop_combo.addItem("亚克力模糊（自绘壁纸，不需要系统支持）", "acrylic")
+
+        # 自绘亚克力的两个旋钮：用哪张壁纸、模糊多强。留空 = 自动找当前壁纸。
+        self.wallpaper_edit = QLineEdit()
+        self.wallpaper_edit.setObjectName("acrylicWallpaperEdit")
+        self.wallpaper_edit.setPlaceholderText("留空 = 自动找当前壁纸（DMS / KDE / hyprpaper）")
+        self.wallpaper_button = QPushButton("选择图片…")
+        self.wallpaper_button.setObjectName("acrylicWallpaperButton")
+        self.wallpaper_button.clicked.connect(self._pick_wallpaper)
+        wallpaper_row = QWidget()
+        wallpaper_layout = QHBoxLayout(wallpaper_row)
+        wallpaper_layout.setContentsMargins(0, 0, 0, 0)
+        wallpaper_layout.addWidget(self.wallpaper_edit, 1)
+        wallpaper_layout.addWidget(self.wallpaper_button)
+
+        self.acrylic_blur_spin = QSpinBox()
+        self.acrylic_blur_spin.setObjectName("acrylicBlurSpin")
+        self.acrylic_blur_spin.setRange(0, 120)
+        self.acrylic_blur_spin.setSingleStep(4)
+        self.acrylic_blur_spin.setSuffix(" px")
 
         self.backdrop_hint = QLabel()
         self.backdrop_hint.setObjectName("backdropHint")
@@ -130,7 +151,11 @@ class SettingsPage(QWidget):
         self.ui_scale_spin.valueChanged.connect(lambda _v: self.appearance_changed.emit())
         self.ui_font_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
         self.mono_font_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
+        self.backdrop_combo.currentIndexChanged.connect(self._refresh_backdrop_hint)
         self.backdrop_combo.currentIndexChanged.connect(lambda _i: self.appearance_changed.emit())
+        self.wallpaper_edit.textChanged.connect(lambda _t: self._refresh_backdrop_hint())
+        self.wallpaper_edit.editingFinished.connect(lambda: self.appearance_changed.emit())
+        self.acrylic_blur_spin.valueChanged.connect(lambda _v: self.appearance_changed.emit())
 
         self.save_button = QPushButton("保存")
         self.status_label = QLabel()
@@ -151,6 +176,8 @@ class SettingsPage(QWidget):
         appearance_form.addRow("界面字体", self.ui_font_combo)
         appearance_form.addRow("等宽字体（脚本/报告/输出）", self.mono_font_combo)
         appearance_form.addRow("背景效果", self.backdrop_combo)
+        appearance_form.addRow("亚克力壁纸", wallpaper_row)
+        appearance_form.addRow("模糊强度", self.acrylic_blur_spin)
         appearance_form.addRow("", self.backdrop_hint)
         layout.addWidget(appearance)
 
@@ -191,6 +218,30 @@ class SettingsPage(QWidget):
             else _DEFAULT_BLOCKING_LEVEL
         )
         self.blocking_combo.setCurrentText(level)
+        # 外观控件也要铺回来。**必须屏蔽信号**：否则铺的过程中会触发"即时预览"，
+        # 而预览的 collect() 会把还没铺完的中间态又写回设置（踩过：字体会被重置成"自动"）。
+        for widget in (
+            self.ui_scale_spin,
+            self.backdrop_combo,
+            self.wallpaper_edit,
+            self.acrylic_blur_spin,
+        ):
+            widget.blockSignals(True)
+        try:
+            self.ui_scale_spin.setValue(round(float(getattr(settings, "ui_scale", 1.0) or 1.0), 2))
+            _select_by_data = self.backdrop_combo.findData(str(getattr(settings, "backdrop", "off")))
+            self.backdrop_combo.setCurrentIndex(max(0, _select_by_data))
+            self.wallpaper_edit.setText(str(getattr(settings, "acrylic_wallpaper", "") or ""))
+            self.acrylic_blur_spin.setValue(int(getattr(settings, "acrylic_blur", 40) or 0))
+        finally:
+            for widget in (
+                self.ui_scale_spin,
+                self.backdrop_combo,
+                self.wallpaper_edit,
+                self.acrylic_blur_spin,
+            ):
+                widget.blockSignals(False)
+        self._refresh_backdrop_hint()
         path = settings.loaded_from
         self.status_label.setText(f"保存位置：{path}" if path is not None else "尚未确定保存位置")
 
@@ -230,11 +281,34 @@ class SettingsPage(QWidget):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
+    def _pick_wallpaper(self) -> None:
+        """选一张壁纸图片。只在点击时弹对话框 —— 无头测试不会走到这里。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        from .. import acrylic as acrylic_module
+
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "选择壁纸图片", self.wallpaper_edit.text().strip() or str(Path.home()),
+            "图片 (" + " ".join(f"*{suffix}" for suffix in acrylic_module.IMAGE_SUFFIXES) + ")",
+        )
+        if chosen:
+            self.wallpaper_edit.setText(chosen)
+            self.appearance_changed.emit()
+
     def _refresh_backdrop_hint(self) -> None:
         """如实说明模糊能不能用：拿不到就别让用户以为开了。"""
-        from .. import backdrop as backdrop_module
+        from .. import acrylic as acrylic_module
 
-        if self.backdrop_combo.currentData() != "blur":
+        mode = self.backdrop_combo.currentData()
+        if mode == "acrylic":
+            # 自绘：不问系统，只问"壁纸找不找得到"—— 找到就能糊，找不到就如实说
+            found = acrylic_module.find_wallpaper(self.wallpaper_edit.text().strip())
+            self.backdrop_hint.setText(
+                f"自绘模糊（不需要系统支持）：{Path(found).name}" if found
+                else "自绘模糊：没找到壁纸图片，请在上面指定一张（否则只有半透明）"
+            )
+            return
+        if mode != "blur":
             self.backdrop_hint.setText("")
             return
         self.backdrop_hint.setText(
@@ -258,6 +332,8 @@ class SettingsPage(QWidget):
         settings.ui_font = str(self.ui_font_combo.currentData() or "")
         settings.mono_font = str(self.mono_font_combo.currentData() or "")
         settings.backdrop = str(self.backdrop_combo.currentData() or "off")
+        settings.acrylic_wallpaper = self.wallpaper_edit.text().strip()
+        settings.acrylic_blur = int(self.acrylic_blur_spin.value())
         return settings
 
     def save(self) -> Path | None:

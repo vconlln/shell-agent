@@ -40,7 +40,9 @@ def apply_to(window: Any) -> None:
     """把"当前背景模式"应用到某个顶层窗口（主窗口与所有对话框都走这里）。"""
     from . import theme as theme_module
 
-    if _current_mode in ("translucent", "blur"):
+    # acrylic（自绘壁纸模糊）同样要窗口半透明：模糊层是画在窗口最底层的，
+    # 深色底再压上去才是"毛玻璃"，而它的透明度同样依赖 WA_TranslucentBackground。
+    if _current_mode in ("translucent", "blur", "acrylic"):
         enable_translucent(window)
         theme_module.unstack_viewports(window)
         theme_module.thin_containers(window)
