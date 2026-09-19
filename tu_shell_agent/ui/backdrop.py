@@ -40,10 +40,16 @@ def apply_to(window: Any) -> None:
     """把"当前背景模式"应用到某个顶层窗口（主窗口与所有对话框都走这里）。"""
     from . import theme as theme_module
 
-    # acrylic（自绘壁纸模糊）同样要窗口半透明：模糊层是画在窗口最底层的，
-    # 深色底再压上去才是"毛玻璃"，而它的透明度同样依赖 WA_TranslucentBackground。
-    if _current_mode in ("translucent", "blur", "acrylic"):
+    if _current_mode in ("translucent", "blur"):
         enable_translucent(window)
+        theme_module.unstack_viewports(window)
+        theme_module.thin_containers(window)
+    elif _current_mode == "acrylic":
+        # 自绘亚克力**不需要**窗口半透明：模糊壁纸是铺在窗口自己最底层的一层不透明内容，
+        # 窗口保持不透明反而更对 —— 窗口一透明，下拉列表/菜单这些浮层会跟着继承透明，
+        # 字体下拉一打开字就浮在壁纸上（用户反馈的"看不见字"就是这么来的）。
+        # 半透明的观感全部由 QSS 里那些带 alpha 的表面提供，够用。
+        disable_translucent(window)
         theme_module.unstack_viewports(window)
         theme_module.thin_containers(window)
     else:

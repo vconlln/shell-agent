@@ -355,3 +355,32 @@ def test_read_only_view_scrollbar_uses_the_read_only_surface(themed_app, qtbot):
         f"只读视图的滚动条区域混进了可编辑输入框的底色 {TOKENS['bg_input']}"
         f"（共 {strip.count(TOKENS['bg_input'])} 个像素）—— 那是一条长方形色块"
     )
+
+
+def test_every_backdrop_mode_defines_the_same_tokens():
+    """四种背景模式的令牌表必须**同键**。
+
+    踩过：给半透明模式加了 `bg_menu`，却漏了 `off` 模式的令牌表 —— QSS 直接 KeyError 崩在
+    启动路径上，而且只在 `off` 下复现。同键这条不变量能把这类"只补了一半"当场拦下来。
+    """
+    from tu_shell_agent.ui.theme import backdrop_colors
+
+    modes = ("off", "translucent", "blur", "acrylic")
+    reference = set(backdrop_colors("off"))
+    for mode in modes[1:]:
+        assert set(backdrop_colors(mode)) == reference, f"{mode} 模式缺/多了令牌"
+
+
+def test_popup_surfaces_stay_opaque_enough_to_read():
+    """浮层（下拉列表 / 菜单 / 提示）不能跟着变透明：那里是读字的地方。
+
+    用户反馈："选择字体的背景也跟着透明了，看不见字"。实测字体下拉列表在一张亮壁纸上
+    底色全透明、对比度 1.7:1。所以浮层底色单列一个令牌，任何"开了透明"的模式下都必须
+    接近不透明。
+    """
+    from tu_shell_agent.ui.theme import backdrop_colors
+
+    for mode in ("translucent", "blur", "acrylic"):
+        value = backdrop_colors(mode)["bg_menu"]
+        assert isinstance(value, tuple), f"{mode} 模式浮层底色必须是带 alpha 的颜色"
+        assert value[3] >= 230, f"{mode} 模式浮层太透（alpha={value[3]}），文字会糊在壁纸上"

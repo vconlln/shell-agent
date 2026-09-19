@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -49,6 +50,10 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     # 输入框比面板**更深**：和面板同色时，圆角处的像素与填充同色 —— 形状根本看不出来
     # （用户报的"圆角边框 + 长方形底色"里有一部分就是这个：输入框和卡片都是 #17181c）。
     "bg_input": "#121317",
+    # 浮层（下拉列表 / 菜单 / 提示气泡）：**不跟着变透明**。它们是"临时盖在一切之上的
+    # 一层"，读的就是里面的字；跟着透会把文字糊在壁纸上（实测字体下拉列表底色全透明，
+    # 文字与背景对比度掉到 1.7:1，等于看不见）。
+    "bg_menu": "#17181c",
     "bg_hover": (255, 255, 255, 10),     # 4% 白（--color-background...hover）
     "bg_selected": (255, 255, 255, 20),  # 8% 白
     "bg_button": (255, 255, 255, 13),    # 5% 白
@@ -150,6 +155,79 @@ def mono_family() -> str:
     return "monospace"
 
 
+# 浮层底色守卫：下拉列表 / 菜单的底色由 apply_theme 写在这里，由事件过滤器在**显示前**钉死。
+# 为什么需要：把页面做成透明之后，**页面里的**下拉，其弹出列表会跟着变透明（调色板继承），
+# 文字直接浮在壁纸上；而独立的下拉却是正常的 —— 用户反馈的
+# "选择字体的背景也跟着透明了，看不见字"就是这个。所以不依赖继承，显式钉一遍。
+_popup_style = ""
+_popup_container_style = ""
+_popup_keeper = None
+
+
+def _is_popup_view(widget) -> bool:
+    """这个控件是不是下拉弹层里的列表？
+
+    **不能只看 parent**：列表的父是弹层容器（QFrame），不是 QComboBox；它自己也不是窗口
+    （窗口是那个容器）。判据是"它所在的窗口是个弹出窗口"。
+    """
+    from PySide6.QtWidgets import QAbstractItemView
+
+    if not isinstance(widget, QAbstractItemView):
+        return False
+    window = widget.window()
+    if window is None or window is widget:
+        return False
+    # 必须按**窗口类型字段**精确判断：`Qt.WindowType.Popup` 的位里含 `Window`，
+    # 直接做位与会把所有顶层窗口都判成弹层 —— 那样主界面里的历史/模板列表会被一起
+    # 染成浮层色（实测：主背景从 #101114 变成 #17181c，六个用例转红）。
+    kind = window.windowFlags() & Qt.WindowType.WindowType_Mask
+    return kind == Qt.WindowType.Popup
+
+
+def _pin_popup(widget) -> bool:
+    """把浮层的底色钉死（列表 + **弹层容器**）。返回是否做了改动。
+
+    为什么需要：把页面做成透明之后，**页面里的**下拉，其弹出列表会跟着变透明（调色板继承），
+    文字直接浮在壁纸上 —— 用户反馈的"选择字体的背景也跟着透明了，看不见字"。
+    而"弹层容器"才是真正要上色的那一层：实测只给列表上色时列表底色仍不被绘制，整块弹层是透的。
+    """
+    from PySide6.QtWidgets import QMenu
+
+    if isinstance(widget, QMenu):
+        if widget.styleSheet() != _popup_style:
+            widget.setStyleSheet(_popup_style)
+            return True
+        return False
+    if not _is_popup_view(widget):
+        return False
+    changed = False
+    if widget.styleSheet() != _popup_style:
+        widget.setStyleSheet(_popup_style)
+        changed = True
+    container = widget.window()
+    if container is not None and container.styleSheet() != _popup_container_style:
+        container.setStyleSheet(_popup_container_style)
+        changed = True
+    return changed
+
+
+class _PopupKeeper(QObject):
+    """浮层守卫：显示前把底色与文字色钉在浮层令牌上（新弹出的浮层也照顾得到）。"""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        if _popup_style and event.type() in (QEvent.Type.Polish, QEvent.Type.Show):
+            _pin_popup(obj)          # 内部会先比较再设，避免样式表触发递归 polish
+        return False
+
+
+def _install_popup_keeper(app) -> None:
+    """装一次就够；应用对象活多久它就活多久（模块级引用防止被 GC）。"""
+    global _popup_keeper
+    if _popup_keeper is None:
+        _popup_keeper = _PopupKeeper(app)
+        app.installEventFilter(_popup_keeper)
+
+
 def unstack_viewports(root) -> int:
     """让滚动区的**视口**不再重复画一遍底色，返回处理过的数量。
 
@@ -158,12 +236,22 @@ def unstack_viewports(root) -> int:
     （1-(1-0.51)²），于是脚本/输出/报告这些大块头看起来"还是纯黑底"。
     这里把视口底色交还给外面的那一层，只画一次，透明度才如实生效。
     """
-    from PySide6.QtWidgets import QAbstractScrollArea
+    from PySide6.QtWidgets import QPlainTextEdit, QTextBrowser, QTextEdit, QWidget
 
     handled = 0
-    for area in [root, *root.findChildren(QAbstractScrollArea)]:
-        if not isinstance(area, QAbstractScrollArea):
-            continue
+    # **只处理文本视图**。原来是把所有 QAbstractScrollArea 一网打尽 —— 结果把下拉列表
+    # （QListView 也是滚动区）的视口底色也清成了透明：字体下拉一打开就是"字浮在壁纸上"，
+    # 用户反馈的"选择字体的背景也跟着透明了，看不见字"就是这个。
+    # 浮层（下拉/菜单/提示）本来就不该参与透明化，它们要的是可读性。
+    kinds = (QPlainTextEdit, QTextEdit, QTextBrowser)
+    text_views = [root] if isinstance(root, kinds) else []
+    # findChildren 不接受类型元组（PySide6 会报 subscripted generics），所以取全部再筛
+    text_views += [
+        area
+        for area in root.findChildren(QWidget)
+        if isinstance(area, kinds) and area.window() is root
+    ]
+    for area in text_views:
         viewport = area.viewport()
         if viewport is None:
             continue
@@ -185,7 +273,7 @@ def thin_containers(root) -> int:
     这里把"只起布局作用"的容器统一关掉自动填充；`off` 模式下外观不变（它们刷的就是同一个底色）。
     """
     from PySide6.QtWidgets import (
-        QAbstractScrollArea,
+        QAbstractItemView,
         QFrame,
         QScrollArea,
         QSplitter,
@@ -194,11 +282,20 @@ def thin_containers(root) -> int:
         QWidget,
     )
 
-    container_types = (QSplitter, QStackedWidget, QScrollArea, QTabWidget, QAbstractScrollArea)
+    # 注意**不要把 QAbstractItemView（列表/树/下拉列表）算进来**：它们是内容表面，
+    # 底色来自调色板 —— 清掉之后下拉列表会整块透明，字浮在壁纸上看不见
+    # （用户反馈的"选择字体的背景也跟着透明了，看不见字"）。滚动区里只有"纯文本视图"
+    # 才是我们要去叠加的对象，那个由 unstack_viewports 单独处理。
+    container_types = (QSplitter, QStackedWidget, QScrollArea, QTabWidget)
     keep = {"paneCard", "confirmScriptView"}
     handled = 0
     for widget in [root, *root.findChildren(QWidget)]:
         if widget.objectName() in keep:
+            continue
+        if isinstance(widget, QAbstractItemView):
+            continue
+        # 浮层（下拉列表 / 菜单 / 提示）是独立顶层窗口：它们要的是可读性，不参与透明化
+        if widget is not root and widget.window() is not root:
             continue
         is_bare = type(widget) in (QWidget, QFrame)
         if isinstance(widget, container_types) or is_bare:
@@ -215,12 +312,22 @@ def thin_containers(root) -> int:
 
 def restack_viewports(root) -> int:
     """撤销 unstack_viewports（回到不透明模式时用），保证 `off` 与以前逐像素一致。"""
-    from PySide6.QtWidgets import QAbstractScrollArea
+    from PySide6.QtWidgets import QPlainTextEdit, QTextBrowser, QTextEdit, QWidget
 
     handled = 0
-    for area in [root, *root.findChildren(QAbstractScrollArea)]:
-        if not isinstance(area, QAbstractScrollArea):
-            continue
+    # **只处理文本视图**。原来是把所有 QAbstractScrollArea 一网打尽 —— 结果把下拉列表
+    # （QListView 也是滚动区）的视口底色也清成了透明：字体下拉一打开就是"字浮在壁纸上"，
+    # 用户反馈的"选择字体的背景也跟着透明了，看不见字"就是这个。
+    # 浮层（下拉/菜单/提示）本来就不该参与透明化，它们要的是可读性。
+    kinds = (QPlainTextEdit, QTextEdit, QTextBrowser)
+    text_views = [root] if isinstance(root, kinds) else []
+    # findChildren 不接受类型元组（PySide6 会报 subscripted generics），所以取全部再筛
+    text_views += [
+        area
+        for area in root.findChildren(QWidget)
+        if isinstance(area, kinds) and area.window() is root
+    ]
+    for area in text_views:
         viewport = area.viewport()
         if viewport is None:
             continue
@@ -321,7 +428,12 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     # 所以这几个降到"半透明能明显看出来"的程度；文字仍全不透明，可读性靠它保。
     base["bg_elevated"] = (23, 24, 28, 130)
     base["bg_under"] = (11, 12, 14, 120)
-    base["bg_input"] = (18, 19, 23, 130)
+    # 输入类（输入框 / 下拉 / 数字框）比内容区**更不透明**：这些是读字与写字的地方，
+    # 实测 51% 时下拉里的字体名与底色对比度只有 3.1:1（低于可读线 4.5:1），
+    # 用户反馈的"看不见字"就是这一类。透明让给大块的只读内容区。
+    base["bg_input"] = (18, 19, 23, 205)
+    # 浮层保持接近不透明（244/255 ≈ 96%）：透明只给"看内容"的表面，不给"读字"的浮层。
+    base["bg_menu"] = (23, 24, 28, 244)
     return base
 
 
@@ -465,7 +577,7 @@ QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{ color: {_color('fg_
 /* 下拉与微调按钮去掉原生立体感 */
 QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox QAbstractItemView {{
-    background-color: {_color('bg_elevated', colors)};
+    background-color: {_color('bg_menu', colors)};
     border: 1px solid {_color('border', colors)};
     selection-background-color: {_color('bg_selected', colors)};
     selection-color: {_color('fg', colors)};
@@ -536,11 +648,11 @@ QSplitter::handle:hover {{ background-color: {_color('border_heavy', colors)}; }
 QSplitter::handle:pressed {{ background-color: {_color('accent', colors)}; }}
 
 /* ── 菜单 / 提示 / 滚动条 ─────────────────────────────────────── */
-QMenu {{ background-color: {_color('bg_elevated', colors)}; border: 1px solid {_color('border', colors)}; border-radius: {sized('radius', scale)}; }}
+QMenu {{ background-color: {_color('bg_menu', colors)}; border: 1px solid {_color('border', colors)}; border-radius: {sized('radius', scale)}; }}
 QMenu::item {{ padding: 5px 18px; }}
 QMenu::item:selected {{ background-color: {_color('bg_selected', colors)}; }}
 QToolTip {{
-    background-color: {_color('bg_under', colors)};
+    background-color: {_color('bg_menu', colors)};
     color: {_color('fg_secondary', colors)};
     border: 1px solid {_color('border', colors)};
     border-radius: {sized('radius', scale)};
@@ -623,6 +735,28 @@ def apply_theme(
     - `backdrop` 见 `backdrop_colors()`；窗口级的半透明与平台模糊由 `ui/backdrop.py` 处理。
     """
     app.setStyle("Fusion")          # 原生样式会带来各自的立体感，Fusion 才吃调色板
+
+    # 浮层底色：任何模式下都显式钉住（off 模式下它就是原来的面板色，外观不变）
+    global _popup_style, _popup_container_style
+    _popup_container_style = (
+        "background-color: {menu}; border: 1px solid {border}; border-radius: {radius};"
+    ).format(
+        menu=_color("bg_menu", backdrop_colors(backdrop)),
+        border=_color("border", backdrop_colors(backdrop)),
+        radius=sized("radius_lg", scale),
+    )
+    _popup_style = (
+        "QAbstractItemView, QMenu {{ background-color: {menu}; color: {fg};"
+        " border: 1px solid {border}; }}"
+    ).format(
+        menu=_color("bg_menu", backdrop_colors(backdrop)),
+        fg=_color("fg", backdrop_colors(backdrop)),
+        border=_color("border", backdrop_colors(backdrop)),
+    )
+    _install_popup_keeper(app)
+    # 已经存在的浮层也先钉一遍（事件只在之后才发生，启动时就建好的下拉要在这里兜住）
+    for widget in app.allWidgets():
+        _pin_popup(widget)
 
     font = QFont()
     if ui_font:

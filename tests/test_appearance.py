@@ -338,7 +338,9 @@ def test_content_surfaces_are_clearly_translucent(restore_app, qtbot, tmp_path):
 
     assert alpha(on["bg_under"]) <= 0.55, "只读内容区（脚本/输出）仍太不透明"
     assert alpha(on["bg_elevated"]) <= 0.62, "列表/树的底色仍太不透明"
-    assert alpha(on["bg_input"]) <= 0.62
+    # 输入类**故意更不透明**：那里是读字/写字的地方，51% 时对比度只有 3.1:1（实测），
+    # 用户报的"看不见字"就是这一类。所以这里断言的是下限而不是上限。
+    assert alpha(on["bg_input"]) >= 0.70, "输入控件太透，里面的字会糊在壁纸上"
     # 文字不跟着透明（对比度靠它）
     from tu_shell_agent.ui.theme import TOKENS as BASE_TOKENS
 
@@ -472,3 +474,56 @@ def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
 
     assert strip[3] < 255, "页签条应当是半透明的显式底色，而不是调色板刷的不透明块"
     assert strip != corner, "页签条角落与条内同色 → 还是直角矩形"
+
+
+def test_combo_popup_stays_readable_in_transparent_modes(restore_app, qtbot, tmp_path):
+    """下拉弹层不能跟着变透明：那里是读字的地方。
+
+    用户反馈："选择字体的背景也跟着透明了，看不见字"。实测原因：把页面做成透明之后，
+    **页面里的**下拉，其弹出列表会跟着变透明（调色板继承），文字直接浮在壁纸上；
+    而且真正要上色的是**弹层容器**那一层，只给列表上色没用。
+    判据：把弹层渲染到与用户壁纸同等亮度的底上，行底色必须足够深、与文字色的对比度达标。
+    """
+
+    def contrast(fg, bg):
+        def channel(value):
+            value /= 255
+            return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+        def luminance(color):
+            r, g, b = (channel(v) for v in color[:3])
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        high, low = sorted((luminance(fg), luminance(bg)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    wallpaper_brightness = (189, 186, 182)      # 用户那张壁纸的平均亮度（实测）
+    text = (236, 237, 240)                      # 主题前景色
+
+    for mode in ("acrylic", "translucent"):
+        window = _window(tmp_path, backdrop=mode)
+        qtbot.addWidget(window)
+        window.resize(1400, 900)
+        window.show()
+        window.tool_tabs.setCurrentWidget(window.settings_page)
+        window.apply_appearance()
+
+        combo = window.settings_page.blocking_combo
+        combo.showPopup()
+        popup = combo.view().window()
+        image = QImage(popup.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(*wallpaper_brightness))
+        painter = QPainter(image)
+        popup.render(painter, QPoint(0, 0))
+        painter.end()
+
+        row = image.pixelColor(popup.width() // 2, 4)
+        background = (row.red(), row.green(), row.blue())
+        assert contrast(text, background) >= 4.5, (
+            f"{mode} 模式下下拉弹层的底色是 {background}，与文字几乎没有对比"
+            f"（对比度 {contrast(text, background):.1f}:1）"
+        )
+        combo.hidePopup()

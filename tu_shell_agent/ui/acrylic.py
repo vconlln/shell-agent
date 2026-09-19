@@ -26,11 +26,16 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage, QPainter
 
 # 模糊强度（QGraphicsBlurEffect 的半径，单位像素）。40 左右已经明显"毛"了，
 # 再大就开始糊成一片色块，所以设置页给的是 0~120。
 DEFAULT_BLUR = 40
+
+# 色调层（tint）：真亚克力的配方是"模糊 + 色调 + 噪点"，缺了色调就是一张糊图。
+# 本机那张壁纸平均亮度 189（很亮），不压一层的话，浅色文字压在它上面只有 3:1 左右，
+# 用户反馈的"看不见字"有一部分就是它。alpha 150 ≈ 59% 深色：壁纸仍看得出来，字也压得住。
+TINT = (16, 17, 20, 150)
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
@@ -160,7 +165,18 @@ def _cached_backdrop(path: str, stamp: float, width: int, height: int, blur: int
     image = QImage(path)
     if image.isNull():
         return None
-    return _blur(_cover(image, width, height), blur)
+    return _tint(_blur(_cover(image, width, height), blur))
+
+
+def _tint(image: QImage) -> QImage:
+    """压一层深色，把壁纸的亮度收到"上面写浅色字也看得清"的范围。"""
+    tinted = QImage(image.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    tinted.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(tinted)
+    painter.drawImage(0, 0, image)
+    painter.fillRect(tinted.rect(), QColor(*TINT))
+    painter.end()
+    return tinted
 
 
 def _cover(image: QImage, width: int, height: int) -> QImage:

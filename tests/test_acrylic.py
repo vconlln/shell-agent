@@ -81,9 +81,10 @@ def test_blur_actually_spreads_a_hard_edge(restore_app, qtbot, tmp_path):
     assert len(_transitions(wide, row)) > len(_transitions(sharp, row)) + 4, (
         "模糊没有把硬边摊开 —— 那它就只是把原图贴上去"
     )
-    # 两端仍要保持原色（模糊不该把整幅图洗成灰）
-    assert wide.pixelColor(2, row).red() < 60
-    assert wide.pixelColor(wide.width() - 3, row).red() > 200
+    # 两端仍要分得开（模糊不该把整幅图洗成一片灰）；数值受色调层影响，所以看差值
+    left = wide.pixelColor(2, row).red()
+    right = wide.pixelColor(wide.width() - 3, row).red()
+    assert right - left > 60, f"模糊之后两端几乎同色（{left} vs {right}）—— 糊过头了"
 
 
 def test_backdrop_image_needs_a_real_wallpaper(restore_app, qtbot, tmp_path):
@@ -208,3 +209,22 @@ def test_changing_the_wallpaper_refreshes_the_layer(restore_app, qtbot, tmp_path
     window.settings.backdrop = "off"
     window.apply_appearance()
     assert not window._acrylic_timer.isActive(), "离开亚克力模式要停掉自检"
+
+
+def test_acrylic_layer_is_dark_enough_for_light_text(restore_app, qtbot, tmp_path):
+    """亚克力层必须压得住亮度：文字是浅色的，壁纸太亮就"看不见字"。
+
+    真亚克力的配方是"模糊 + 色调 + 噪点" —— 少了色调就只是一张糊图。本机那张壁纸平均亮度
+    189（很亮），不压一层时浅色文字压在上面只有 3:1 左右。
+    """
+    bright = QImage(120, 80, QImage.Format.Format_ARGB32_Premultiplied)
+    bright.fill(QColor(250, 248, 245))
+    path = str(tmp_path / "bright.png")
+    bright.save(path)
+
+    layer = acrylic.backdrop_image(path, 120, 80, acrylic.DEFAULT_BLUR)
+    assert layer is not None
+    lightness = sum(
+        layer.pixelColor(x, y).lightness() for x in range(0, 120, 7) for y in range(0, 80, 7)
+    ) / len(range(0, 120, 7)) / len(range(0, 80, 7))
+    assert lightness <= 140, f"亚克力层太亮（平均 {lightness:.0f}），浅色文字会看不清"
