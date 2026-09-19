@@ -165,6 +165,9 @@ def test_translucent_backdrop_makes_surfaces_transparent(restore_app, qtbot, tmp
 
     assert restore_app.palette().window().color().alpha() < 255
     assert restore_app.palette().base().color().alpha() < 255
+    # 透明度要**看得出来**：第一版给 92%（只有 8% 的壁纸透出来），用户反馈"没有效果"。
+    # 这里锁住"至少透出两成"，免得以后又被调回看不见的值。
+    assert restore_app.palette().window().color().alpha() <= 210
     assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
     # 文字与强调色不能被一起做透明 —— 那会直接毁掉对比度
     assert restore_app.palette().windowText().color().alpha() == 255
@@ -270,3 +273,20 @@ def test_saved_font_survives_opening_the_settings_page(restore_app, qtbot, tmp_p
     assert combo.count() > 1, "显示之后字体列表应当已填充"
     assert combo.currentData() == target, "打开设置页把已保存的字体重置了"
     assert settings.mono_font == target, "设置里的字体被即时预览冲掉了"
+
+
+def test_entry_point_applies_appearance_before_showing_the_window():
+    """入口必须先应用外观再 show()。
+
+    `WA_TranslucentBackground` 这类窗口属性只有在窗口显示之前设上才稳：先 show 再设，
+    属性虽然读出来是 True，窗口表面却已经是不透明的 —— 用户反馈的"半透明没有效果"
+    有一半就是这个顺序造成的。这条用源码断言把它钉住（比"跑起来看看"更可靠）。
+    """
+    import inspect
+
+    from tu_shell_agent.ui import app as app_module
+
+    source = inspect.getsource(app_module.main)
+    assert source.index("apply_appearance") < source.index(".show()"), (
+        "app.py 里 apply_appearance() 必须在 show() 之前调用"
+    )

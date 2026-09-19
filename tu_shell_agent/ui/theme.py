@@ -203,11 +203,13 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     base = dict(TOKENS)
     if backdrop == "off":
         return base
-    # 面板类底色给 92% / 82%，越"底"的越透；文字与强调色不动（对比度要保住）
-    base["bg"] = (16, 17, 20, 235)
-    base["bg_elevated"] = (23, 24, 28, 222)
-    base["bg_under"] = (11, 12, 14, 210)
-    base["bg_input"] = (18, 19, 23, 226)
+    # 透明度要**看得出来**：第一版给 92%（只有 8% 的壁纸透出来），用户反馈"没有效果"。
+    # 现在页面 78%、面板 76%、只读底 72% —— 深色壁纸上能明显看到透出的内容，
+    # 同时文字仍是全不透明（对比度靠它保）。
+    base["bg"] = (16, 17, 20, 200)
+    base["bg_elevated"] = (23, 24, 28, 194)
+    base["bg_under"] = (11, 12, 14, 184)
+    base["bg_input"] = (18, 19, 23, 198)
     return base
 
 
