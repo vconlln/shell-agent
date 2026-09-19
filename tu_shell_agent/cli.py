@@ -18,6 +18,7 @@ from .run_store.store import RunStore
 from .shell_toolchain.detect import detect_all, system_deps
 from .shell_toolchain.facade import ShellToolchain
 from .template_store.render import render_template
+from .ui.settings import default_templates_dir
 from .template_store.store import TemplateStore
 from .types import RunConfig, RunEvent
 
