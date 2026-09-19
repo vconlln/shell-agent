@@ -253,3 +253,62 @@ def test_selfcheck_page_shows_warnings_separately_from_problems(qtbot):
     assert "问题：" not in text          # 没有故障就不该出现"问题"这一节
     assert page.has_problems() is False  # 提示不算故障
     assert page.has_warnings() is True    # 但要说有提示
+
+
+def test_selfcheck_is_compact_on_success_and_expands_only_when_needed(qtbot):
+    """自检通过时只留**一行结论**，详情框收起；有问题/提示时才展开。
+
+    用户问了两个问题："三件套缺一不可这些文字能不能不要"、"自检有必要占这么大一片吗，
+    如果成功这个框里是什么"。所以契约是：
+    - 通过 → 一行 `✓ 环境就绪：opencode 1.18.31 · bash 5.3.15 · shellcheck 0.11.0`，
+      详情框**不可见**（它的内容就是这三条，已经在那一行里说完了）；
+    - 缺件 → 一行说清几个问题 + 详情框展开（里面是逐项与安装指引）。
+    """
+    from tu_shell_agent.types import DetectedTool
+
+    page = SelfCheckPage()
+    qtbot.addWidget(page)
+    page.show()          # 详情框的可见性要在"页面本身可见"时才有意义
+
+    ok = DetectionReport(
+        opencode=DetectedTool(path="/usr/bin/opencode", version="1.18.31"),
+        bash=DetectedTool(path="/usr/bin/bash", version="5.3.15"),
+        shellcheck=DetectedTool(path="/usr/bin/shellcheck", version="0.11.0"),
+        problems=(),
+    )
+    page.render(ok)
+    assert page.status_label.text() == "✓ 环境就绪：opencode 1.18.31 · bash 5.3.15 · shellcheck 0.11.0"
+    assert page.text.isVisible() is False, "通过时不该展开详情框"
+    assert "三件套" not in page.status_label.text()      # 不再把规格原文贴给用户
+    assert "缺一不可" not in page.summary_text()
+
+    broken = DetectionReport(
+        opencode=DetectedTool(path="/usr/bin/opencode", version="1.18.31"),
+        bash=None,
+        shellcheck=None,
+        problems=("未找到 Git Bash", "未找到 shellcheck"),
+    )
+    page.render(broken)
+    assert page.status_label.text() == "⚠ 2 个问题需要处理（见下方）"
+    assert "Git Bash" in page.summary_text()
+    assert page.has_problems() is True
+
+
+def test_selfcheck_warning_keeps_the_box_open(qtbot):
+    """只有提示（例如 opencode 没保存凭据）时也要展开：那条提示是"自检全绿却跑不起来"的唯一线索。"""
+    from tu_shell_agent.types import DetectedTool
+
+    page = SelfCheckPage()
+    qtbot.addWidget(page)
+    page.show()
+    page.render(
+        DetectionReport(
+            opencode=DetectedTool(path="/usr/bin/opencode", version="1.18.31"),
+            bash=DetectedTool(path="/usr/bin/bash", version="5.3.15"),
+            shellcheck=DetectedTool(path="/usr/bin/shellcheck", version="0.11.0"),
+            problems=(),
+            warnings=("opencode 里没有已保存的凭据",),
+        )
+    )
+    assert "提示" in page.status_label.text()
+    assert page.text.isVisible() is True

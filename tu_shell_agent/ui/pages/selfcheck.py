@@ -26,29 +26,56 @@ class SelfCheckPage(QWidget):
         self.setObjectName("selfCheckPage")     # main_window 与骨架测试的契约，不要改名
         self._report: DetectionReport | None = None
 
-        self.hint = QLabel("三件套缺一不可：opencode / Git Bash / shellcheck（规格 §9）")
-        self.hint.setWordWrap(True)
-        self.hint.setProperty("role", "hint")
+        # 一行状态 + 一个按钮；**详情框只在有事要说时才出现**。
+        # 原来那行"三件套缺一不可：…（规格 §9）"是把规格原文贴给用户看 —— 用户要的是结论，
+        # 不是规矩；自检通过时更没必要占一大片地方（用户问的就是这个）。
+        self.status_label = QLabel("尚未检测")
+        self.status_label.setObjectName("selfCheckStatus")
+        self.status_label.setWordWrap(True)
+        self.status_label.setProperty("role", "hint")
         self.recheck_button = QPushButton("重新检测")
         self.text = QPlainTextEdit()
+        self.text.setObjectName("selfCheckDetail")
         self.text.setReadOnly(True)             # 自检结果是"呈堂证供"，不允许用户改
-        self.text.setPlainText("尚未检测。点击「重新检测」开始。")
+        self.text.setMinimumHeight(90)
+        self.text.setVisible(False)             # 默认收起：通过时一行就够
 
         # 表单进滚动区：空间不够时滚动，而不是把控件压扁（见 widgets/scroll.py）
         content, layout = form_container()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scrollable(content))
-        layout.addWidget(self.hint)
+        layout.addWidget(self.status_label)
         layout.addWidget(self.recheck_button)
         layout.addWidget(self.text, 1)
+        layout.addStretch(1)
 
         self.recheck_button.clicked.connect(self._on_recheck_clicked)
 
     def render(self, report: DetectionReport) -> None:
-        """把一次探测结果铺到页面上。探测失败也要调它——problems 里会写清为什么失败。"""
+        """把一次探测结果铺到页面上。探测失败也要调它——problems 里会写清为什么失败。
+
+        显示策略：**一行结论**（通过/缺几项/几条提示）始终在；详情框只在有 problems 或
+        warnings 时展开 —— 自检通过时它是三条版本信息，已经在那一行里说完了，
+        再占一大片空间没有意义。
+        """
         self._report = report
         self.text.setPlainText(self._format(report))
+        self.text.setVisible(bool(report.problems or report.warnings))
+        self.status_label.setText(self._status_line(report))
+
+    @staticmethod
+    def _status_line(report: DetectionReport) -> str:
+        """一行说清结论：通过就把三件套的版本列出来，否则说缺什么。"""
+        if report.problems:
+            return f"⚠ {len(report.problems)} 个问题需要处理（见下方）"
+        versions = " · ".join(
+            f"{name} {tool.version}" for name in _TOOLS
+            if (tool := getattr(report, name)) is not None
+        )
+        if report.warnings:
+            return f"✓ 环境可用：{versions}（另有 {len(report.warnings)} 条提示）"
+        return f"✓ 环境就绪：{versions}"
 
     def report(self) -> DetectionReport | None:
         """上一次被渲染的探测结果（没检测过则为 None）；控制器据此构造真实工具链。"""
