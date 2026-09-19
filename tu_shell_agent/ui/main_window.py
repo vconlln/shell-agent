@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
             self.blur_available = backdrop_module.try_enable_blur(self)
             if not self.blur_available:
                 self.set_status(
-                    "当前桌面不支持窗口模糊（模糊由窗口管理器提供），已退化为半透明"
+                    "系统模糊不可用，已退化为半透明。"
                 )
         # 亚克力（自绘）：不向系统要任何东西，自己把壁纸模糊好铺在窗口最底层。
         # **每次都要调**：从亚克力切走时也得把那一层撤掉，否则换了背景效果却还是那张壁纸。
@@ -245,7 +245,7 @@ class MainWindow(QMainWindow):
         else:
             self._acrylic_timer.stop()
         if self.settings.backdrop == "acrylic" and not acrylic_ready:
-            self.set_status("亚克力：没找到壁纸图片，请在设置里指定（当前只有半透明）")
+            self.set_status("未找到壁纸图片，已退化为半透明。请在设置的「亚克力壁纸」中指定。")
 
     def _refresh_acrylic(self) -> bool:
         """按当前设置准备/清掉"模糊壁纸"图层；返回是否真的铺上了壁纸。
@@ -308,9 +308,9 @@ class MainWindow(QMainWindow):
     def _appearance_hint(self) -> str:
         """给设置页/状态栏用的一句话说明（测试与用户都看这句）。"""
         if self.settings.backdrop == "blur" and not getattr(self, "blur_available", False):
-            return "模糊不可用：当前桌面不支持，已退化为半透明"
+            return "系统模糊不可用，已退化为半透明"
         if self.settings.backdrop == "acrylic" and getattr(self, "_acrylic_image", None) is None:
-            return "亚克力：没找到壁纸图片，请在设置里指定（当前只有半透明）"
+            return "未找到壁纸图片，已退化为半透明"
         return ""
 
     # ── 布局记忆 ────────────────────────────────────────────────────

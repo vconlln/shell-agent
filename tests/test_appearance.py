@@ -195,8 +195,8 @@ def test_blur_reports_honestly_when_the_platform_cannot_do_it(restore_app, qtbot
     if platform_can:
         assert window._appearance_hint() == ""            # 真拿到了就别报丧
     else:
-        assert "不支持" in window._appearance_hint()
-        assert "不支持" in window.status_label.text()
+        assert "不可用" in window._appearance_hint()
+        assert "不可用" in window.status_label.text()
     # 无论模糊成不成，半透明都要生效（模糊是叠加在半透明之上的）
     assert window.testAttribute(
         __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.WidgetAttribute.WA_TranslucentBackground
@@ -527,3 +527,41 @@ def test_combo_popup_stays_readable_in_transparent_modes(restore_app, qtbot, tmp
             f"（对比度 {contrast(text, background):.1f}:1）"
         )
         combo.hidePopup()
+
+
+def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
+    """界面文案一律用书面语：不用口语、不加括号旁白。
+
+    用户明确要求过两次（"问系统要""不需要系统支持"这类）。这条用例把已经定下来的
+    四种模式名称与提示语钉住，顺带挡住那几句被点名的口语。
+    """
+    window = _window(tmp_path, backdrop="off")
+    qtbot.addWidget(window)
+    page = window.settings_page
+
+    labels = {
+        page.backdrop_combo.itemData(index): page.backdrop_combo.itemText(index)
+        for index in range(page.backdrop_combo.count())
+    }
+    assert labels == {
+        "off": "不透明（默认）",
+        "translucent": "半透明",
+        "blur": "亚克力模糊（系统提供）",
+        "acrylic": "亚克力模糊（界面自绘）",
+    }, f"背景效果的模式名称被改动了：{labels}"
+
+    # 提示与状态文字里不许出现口语 / 括号旁白；并且要说明系统模糊的可用平台
+    banned = ("问系统要", "多半", "不假装", "挑一个", "不需要系统支持", "（不模糊）")
+    texts = []
+    for mode in ("blur", "acrylic"):
+        page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData(mode))
+        texts.append(page.backdrop_hint.text())
+    window.settings.backdrop = "blur"
+    window.apply_appearance()
+    texts.extend([window.status_label.text(), window._appearance_hint()])
+    for text in texts:
+        for phrase in banned:
+            assert phrase not in text, f"界面文案出现口语：{text!r} 含 {phrase!r}"
+
+    page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData("blur"))
+    assert "Windows" in page.backdrop_hint.text(), "系统模糊的提示要写明哪些平台可用"

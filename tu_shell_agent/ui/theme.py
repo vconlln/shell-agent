@@ -139,7 +139,7 @@ def qcolor(name: str) -> QColor:
 
 
 def mono_family() -> str:
-    """挑一个真实存在的等宽字体族（找不到就交给 Qt 的 monospace 别名）。
+    """选择一个真实存在的等宽字体族（找不到时交给 Qt 的 monospace 别名）。
 
     没有 QGuiApplication 时直接返回通用族：`QFontDatabase.families()` 在那种情况下
     不是返回空列表而是**让进程 abort**（实测：QFontDatabase: Must construct a
@@ -401,8 +401,8 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     **亚克力模糊**（Windows 11 的 Acrylic / macOS 的毛玻璃）需要窗口管理器支持：真正能拿到的是
     "窗口半透明 + 由窗口管理器去模糊背后的内容"。所以这里做两件事：
       1. 把底色变成带 alpha 的颜色（半透明）—— 这一步与平台无关，任何合成器都能生效；
-      2. 平台模糊由 ui/backdrop.py 去尝试（Windows 走 DWM，其它平台多半拿不到）。
-    拿不到模糊时**只保留半透明**，界面会如实告诉用户（不假装模糊成功了）。
+      2. 平台模糊由 ui/backdrop.py 尝试（Windows 走 DWM，其它平台通常不可用）。
+    不可用时**只保留半透明**，界面明确说明，不声称模糊已生效。
 
     `off` 保持完全不透明：像素测试与"看不清就调不透明度"这类麻烦都不引入。
     """
@@ -731,7 +731,7 @@ def apply_theme(
     """给整个应用装主题（幂等，可重复调用；改设置后直接再调一次即可热更新）。
 
     - `scale` 同时放大字号与所有尺寸（圆角、行高、内边距）——只放大字号会让界面变挤；
-    - `ui_font` / `mono_font` 为空表示"用系统默认 / 自动挑一个等宽字体"；
+    - `ui_font` / `mono_font` 为空表示"使用系统默认 / 自动选择等宽字体"；
     - `backdrop` 见 `backdrop_colors()`；窗口级的半透明与平台模糊由 `ui/backdrop.py` 处理。
     """
     app.setStyle("Fusion")          # 原生样式会带来各自的立体感，Fusion 才吃调色板

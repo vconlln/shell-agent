@@ -55,11 +55,11 @@ class SettingsPage(QWidget):
         self.setObjectName("settingsPage")      # main_window 与骨架测试的契约，不要改名
 
         self.opencode_path_edit = QLineEdit()
-        self.opencode_path_edit.setPlaceholderText("留空 = 用 PATH 里找到的 opencode")
+        self.opencode_path_edit.setPlaceholderText("留空则从 PATH 中查找 opencode")
         self.bash_path_edit = QLineEdit()
-        self.bash_path_edit.setPlaceholderText("留空 = 用 PATH 里找到的 bash")
+        self.bash_path_edit.setPlaceholderText("留空则从 PATH 中查找 bash")
         self.shellcheck_path_edit = QLineEdit()
-        self.shellcheck_path_edit.setPlaceholderText("留空 = 用 PATH 里找到的 shellcheck")
+        self.shellcheck_path_edit.setPlaceholderText("留空则从 PATH 中查找 shellcheck")
 
         components = QGroupBox("组件路径")
         components_form = QFormLayout(components)
@@ -91,7 +91,7 @@ class SettingsPage(QWidget):
 
         self.blocking_combo = QComboBox()
         self.blocking_combo.addItems(list(BLOCKING_LEVELS))
-        self.blocking_combo.setToolTip("shellcheck 发现达到该级别就阻断执行并回灌自修")
+        self.blocking_combo.setToolTip("shellcheck 达到该级别时阻断执行并回灌自修")
         checks = QGroupBox("shellcheck")
         checks_form = QFormLayout(checks)
         checks_form.addRow("阻断级别", self.blocking_combo)
@@ -112,20 +112,20 @@ class SettingsPage(QWidget):
         # addItem —— 每建一次设置页都付这个代价，实测把整套测试从 47s 拖到 332s。
         # 而设置页平时躲在工具区页签里，绝大多数时候根本不需要这份列表。
         self.ui_font_combo.addItem("系统默认", "")
-        self.mono_font_combo.addItem("自动（挑一个可用的等宽字体）", "")
+        self.mono_font_combo.addItem("自动选择（等宽字体）", "")
         self._fonts_populated = False
 
         self.backdrop_combo = QComboBox()
         self.backdrop_combo.setObjectName("backdropCombo")
         self.backdrop_combo.addItem("不透明（默认）", "off")
         self.backdrop_combo.addItem("半透明", "translucent")
-        self.backdrop_combo.addItem("亚克力模糊（问系统要，Windows 有）", "blur")
-        self.backdrop_combo.addItem("亚克力模糊（自绘壁纸，不需要系统支持）", "acrylic")
+        self.backdrop_combo.addItem("亚克力模糊（系统提供）", "blur")
+        self.backdrop_combo.addItem("亚克力模糊（界面自绘）", "acrylic")
 
         # 自绘亚克力的两个旋钮：用哪张壁纸、模糊多强。留空 = 自动找当前壁纸。
         self.wallpaper_edit = QLineEdit()
         self.wallpaper_edit.setObjectName("acrylicWallpaperEdit")
-        self.wallpaper_edit.setPlaceholderText("留空 = 自动找当前壁纸（DMS / KDE / hyprpaper）")
+        self.wallpaper_edit.setPlaceholderText("留空则自动检测系统壁纸")
         self.wallpaper_button = QPushButton("选择图片…")
         self.wallpaper_button.setObjectName("acrylicWallpaperButton")
         self.wallpaper_button.clicked.connect(self._pick_wallpaper)
@@ -301,19 +301,19 @@ class SettingsPage(QWidget):
 
         mode = self.backdrop_combo.currentData()
         if mode == "acrylic":
-            # 自绘：不问系统，只问"壁纸找不找得到"—— 找到就能糊，找不到就如实说
+            # 自绘模式：不依赖系统合成器，只取决于能否取到壁纸图片
             found = acrylic_module.find_wallpaper(self.wallpaper_edit.text().strip())
             self.backdrop_hint.setText(
-                f"自绘模糊（不需要系统支持）：{Path(found).name}" if found
-                else "自绘模糊：没找到壁纸图片，请在上面指定一张（否则只有半透明）"
+                f"由界面自行模糊壁纸，不依赖系统合成器。当前壁纸：{Path(found).name}" if found
+                else "未找到壁纸图片，请在「亚克力壁纸」中指定；未指定时使用半透明。"
             )
             return
         if mode != "blur":
             self.backdrop_hint.setText("")
             return
         self.backdrop_hint.setText(
-            "模糊由窗口管理器提供：" + ("当前平台看起来支持（保存后生效）"
-            if sys.platform == "win32" else "当前桌面多半不支持，保存后会退化为半透明（不模糊）")
+            "由系统合成器提供模糊。Windows 11 22H2 及以上版本可用；"
+            "不可用时自动退化为半透明。"
         )
 
     def collect(self) -> AppSettings:

@@ -49,8 +49,8 @@ class AppSettings:
     # ── 外观（2026-09-19 用户要求）──────────────────────────────────────
     ui_scale: float = 1.0            # 界面缩放：字号与所有尺寸一起放大
     ui_font: str = ""                # 空 = 系统默认字体
-    mono_font: str = ""              # 空 = 自动挑一个可用的等宽字体
-    backdrop: str = "off"            # off / translucent / blur（问系统要） / acrylic（自绘壁纸模糊）
+    mono_font: str = ""              # 空 = 自动选择可用的等宽字体
+    backdrop: str = "off"            # off / translucent / blur（系统合成器） / acrylic（界面自绘模糊）
     # 亚克力（自绘）：壁纸图片路径（留空 = 自动找当前壁纸）与模糊强度
     acrylic_wallpaper: str = ""
     acrylic_blur: int = 40

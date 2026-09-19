@@ -146,8 +146,8 @@ def test_acrylic_without_a_wallpaper_degrades_to_plain_translucency(restore_app,
     window.apply_appearance()
 
     assert window._acrylic_image is None
-    assert "没找到壁纸" in window.status_label.text()
-    assert "找不到" in window._appearance_hint() or "没找到" in window._appearance_hint()
+    assert "未找到壁纸图片" in window.status_label.text()
+    assert "未找到壁纸图片" in window._appearance_hint()
 
     over_magenta = _render(window, (255, 0, 255))
     point = QPoint(1100, 700)
