@@ -4,7 +4,12 @@
 > 你说过"需要审批的按默认推荐来"，所以下面每条都已经按 **推荐做法** 实施了 —— 你只需要在
 > 早上扫一眼，觉得哪条不对就说一声，我改回来。
 >
-> 更新时间：2026-09-19 夜（你睡前那一轮）
+> 更新时间：2026-09-20 凌晨（多后端 agent 功能已提交推送）
+>
+> **最新结果**：`4bfb186` 已推送到 GitHub —— 可切换后端 agent（opencode / claude / codeagent / 自定义命令行）。
+> 提交前实测：新测试 72 passed、受影响测试组 83 passed（合计提交前一次跑 129 passed）、
+> 设置里换后端确实换掉引擎用的适配器（opencode→OpencodeAdapter，codeagent/claude/custom→CliAgentAdapter）、
+> 应用 `--self-test` exit=0、`ui/**` 分层规矩未破。详见下面第一节第 1、2 条。
 
 ---
 
