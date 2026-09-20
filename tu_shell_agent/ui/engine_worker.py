@@ -153,21 +153,57 @@ class DetectWorker(QThread):
     done = Signal(object)   # DetectionReport
     failed = Signal(str)    # 探测本身炸了（与"探测完成但发现问题"是两回事）
 
-    def __init__(self, overrides: dict[str, str] | None = None, parent: Any = None) -> None:
+    def __init__(
+        self,
+        overrides: dict[str, str] | None = None,
+        parent: Any = None,
+        *,
+        backend_id: str = "opencode",
+        command: str = "",
+    ) -> None:
         super().__init__(parent)
         self._overrides = dict(overrides or {})
+        self._backend_id = str(backend_id or "opencode")
+        self._command = str(command or "")
 
     def run(self) -> None:  # noqa: D102 - QThread
         try:
             # 函数内 import：本模块被 ui 的控制器在启动路径上导入，
-            # 顶层拉进 shell_toolchain 会让"只想建个窗口"也付出这条依赖链的代价。
-            from ..shell_toolchain.detect import detect_all, system_deps
+            # 顶层拉进 shell_toolchain / 注册表会让"只想建个窗口"也付出这条依赖链的代价。
+            from ..agent_backends import detect_environment
 
-            report = detect_all(system_deps(self._overrides))
+            report = detect_environment(
+                self._backend_id, self._command, overrides=self._overrides
+            )
         except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
             self.failed.emit(str(error))
             return
         self.done.emit(report)
+
+
+class BackendProbeWorker(QThread):
+    """探测"当前后端的命令能不能用"（跑一次它的版本命令）。
+
+    与 DetectWorker 分开：这里只要那一条命令的结论，不需要连带探测 bash/shellcheck，
+    而设置页的「检测」按钮按的就是这个语义（用户想知道的是"我填的这条命令对不对"）。
+    子进程仍然在适配器层起：本类只负责线程与信号。
+    """
+
+    done = Signal(object)   # ProbeResult
+    failed = Signal(str)
+
+    def __init__(self, backend_id: str, command: str = "", parent: Any = None) -> None:
+        super().__init__(parent)
+        self._backend_id = str(backend_id or "")
+        self._command = str(command or "")
+
+    def run(self) -> None:  # noqa: D102 - QThread
+        try:
+            from ..agent_backends import probe_backend
+
+            self.done.emit(probe_backend(self._backend_id, self._command))
+        except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
+            self.failed.emit(str(error))
 
 
 class ChatWorker(QThread):

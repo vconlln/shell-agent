@@ -187,14 +187,22 @@ class RunController(QObject):
 
     # ── 环境自检 ──────────────────────────────────────────────────
     def recheck_environment(self) -> None:
-        """重跑三件套探测并铺到自检页（规格 §9：缺一不可）。
+        """按**当前后端**重跑环境探测并铺到自检页（规格 §9：缺一不可）。
 
         探测起子进程，所以走线程；结果只做展示 —— 真正的"能不能跑"由每次运行前的
         `_ensure_deps()` 现场再判一次（用户可能在自检之后把工具挪走）。
+
+        依赖集合随后端而变：opencode 那条路要 opencode + bash + shellcheck，换成命令行后端
+        之后 opencode 不再是依赖（装了别的 agent 的机器不该因为没装 opencode 就报红），
+        但 bash 与 shellcheck 仍然必需 —— 引擎执行脚本用的是它们，换 agent 不换执行者。
         """
         if self._detect_worker is not None and self._detect_worker.isRunning():
             return
-        worker = DetectWorker(self._path_overrides())
+        worker = DetectWorker(
+            self._path_overrides(),
+            backend_id=self._backend_id(),
+            command=self._backend_command_quietly(),
+        )
         worker.done.connect(self._on_detected)
         worker.failed.connect(lambda message: self._status(f"环境探测失败：{message}"))
         self._detect_worker = worker
@@ -202,7 +210,7 @@ class RunController(QObject):
         worker.start()
 
     def _on_detected(self, report: DetectionReport) -> None:
-        self.window.selfcheck_page.render(report)
+        self.window.selfcheck_page.render(report, backend_label=self._backend_label())
         if report.problems:
             self._status(f"环境自检有 {len(report.problems)} 个问题（见「环境自检」页）")
         elif report.warnings:
@@ -520,6 +528,11 @@ class RunController(QObject):
         from .workers import track
 
         chat = self.window.chat_panel
+        if self._backend_id() != "opencode":
+            # 模型列表只有 opencode 提供；命令行后端的模型名由用户自己填。照实说明，
+            # 不去跑一条明知会失败的命令（那会把"没装 opencode"报成"取模型列表失败"）。
+            chat.set_status("当前后端不提供模型列表，请在输入框旁直接填写模型名称。")
+            return
         worker = ModelsWorker(str(getattr(self.settings, "opencode_path", "") or ""))
         worker.done.connect(lambda models: chat.set_models([str(item) for item in (models or [])]))
         worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
@@ -650,27 +663,106 @@ class RunController(QObject):
         worker.start()
 
     def _ensure_deps(self, config: RunConfig):
-        """返回 (opencode, toolchain)。注入过替身就直接用；否则现场探测三件套。"""
+        """返回 (agent 适配器, toolchain)。注入过替身就直接用；否则按设置里的后端现场构建。
+
+        两条路的依赖不同，所以这里按后端分流（探测本身在 `agent_backends.detect_environment`）：
+        opencode 要 opencode + bash + shellcheck；命令行后端只要"它的命令 + bash + shellcheck"。
+        """
+        del config                              # 端口签名要求，本方法用不到它
         if self._opencode is not None and self._toolchain is not None:
             return self._opencode, self._toolchain
 
-        from ..opencode_adapter import OpencodeAdapter
-        from ..shell_toolchain.detect import detect_all, system_deps
+        from ..agent_backends import (
+            BackendError,
+            backend_descriptor,
+            build_adapter,
+            detect_environment,
+        )
+        from ..shell_toolchain.detect import system_deps
         from ..shell_toolchain.facade import ShellToolchain
 
         overrides = self._path_overrides()
-        report = detect_all(system_deps(overrides))
+        try:
+            backend_id = self._backend_id()
+            descriptor = backend_descriptor(backend_id)
+            command = self._backend_command(descriptor)
+            report = detect_environment(backend_id, command, overrides=overrides)
+        except BackendError as error:
+            raise _DependencyMissing(str(error)) from error
         if report.problems:
             raise _DependencyMissing("环境自检未通过：" + "；".join(report.problems))
-        assert report.opencode and report.bash and report.shellcheck
-        self._adapter = OpencodeAdapter(
-            opencode_path=report.opencode.path, note=self._status
-        )
+        assert report.bash and report.shellcheck
+
+        # 走 serve 的后端（opencode）要用探测出来的**真实路径**：用户可能只在 PATH 里装了它，
+        # 命令行后端则按用户填的命令启动（探测已经确认过解析得到）。
+        resolved = report.opencode.path if descriptor.needs_serve and report.opencode else command
+        try:
+            self._adapter = build_adapter(backend_id, resolved, note=self._status)
+        except BackendError as error:
+            raise _DependencyMissing(str(error)) from error
         self._opencode = self._adapter
         # 三个 path 一起进 facade：run_loop 内部还会再 detect 一次，少了 override 会在
         # "shellcheck 不在 PATH"的机器上把已解析出的路径又判成缺失 → aborted_dependency。
-        self._toolchain = ShellToolchain(report.bash.path, report.shellcheck.path, overrides)
+        #
+        # 探测钩子按**当前后端**注入：命令行后端不该因为"没装 opencode"就在预检处被拦下，
+        # 而预检恰恰是每轮开头都会走的那一步（漏了它，换后端这个功能在没装 opencode 的
+        # 机器上等于没生效，症状是每次运行都终止为 aborted_dependency）。
+        self._toolchain = ShellToolchain(
+            report.bash.path,
+            report.shellcheck.path,
+            overrides,
+            detect=lambda: detect_environment(backend_id, command, overrides=overrides),
+        )
         return self._opencode, self._toolchain
+
+    # ── 后端选择（设置 → 后端 agent）────────────────────────────────
+    def _backend_id(self) -> str:
+        """设置里选的 agent 后端；取值非法时退回默认后端而不是抛异常。
+
+        未知 id 在 `AppSettings.normalize()` 里已经收敛过一次，这里兜第二次是因为控制器也可能
+        被喂进一个手工构造的设置对象：那时"报错"会让界面直接跑不起来，而退回默认后端至少是
+        能跑的，且自检页与设置页会如实显示当前用的是谁。
+        """
+        from ..agent_backends import DEFAULT_BACKEND_ID, backend_descriptor
+
+        raw = str(getattr(self.settings, "agent_backend", "") or "")
+        try:
+            backend_descriptor(raw)
+        except Exception:  # noqa: BLE001 - 未知 id 不静默乱跑，退回默认后端
+            return DEFAULT_BACKEND_ID
+        return raw
+
+    def _backend_command(self, descriptor: Any = None) -> str:
+        """当前后端要执行的命令（与设置页提示行走同一个 `resolve_command`）。
+
+        opencode 的路径也可以填在「组件路径」里（老字段），所以把它作为 fallback 传进去 ——
+        优先级写在注册表一处，界面显示与实际执行才不会给出两个答案。
+        """
+        from ..agent_backends import backend_descriptor, resolve_command
+
+        if descriptor is None:
+            descriptor = backend_descriptor(self._backend_id())
+        return resolve_command(
+            descriptor.id,
+            str(getattr(self.settings, "agent_command", "") or ""),
+            fallback=str(getattr(self.settings, "opencode_path", "") or ""),
+        )
+
+    def _backend_command_quietly(self) -> str:
+        """同上，但必填命令没填时返回空串（探测会把"没填"报成一条可读的问题）。"""
+        try:
+            return self._backend_command()
+        except Exception:  # noqa: BLE001 - 探测路径上以"问题清单"的形式呈现
+            return ""
+
+    def _backend_label(self) -> str:
+        """自检页第一栏显示的名字（当前后端的显示名）。"""
+        from ..agent_backends import backend_descriptor
+
+        try:
+            return backend_descriptor(self._backend_id()).display_name
+        except Exception:  # noqa: BLE001
+            return "opencode"
 
     def _path_overrides(self) -> dict[str, str]:
         """设置页里的组件路径覆盖（绝对化，理由同 cli._path_overrides）。"""

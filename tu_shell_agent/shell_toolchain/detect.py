@@ -125,10 +125,29 @@ def _resolve(tool: str, deps: DetectDeps) -> DetectedTool | None:
     return None
 
 
-def detect_all(deps: DetectDeps) -> DetectionReport:
-    opencode = _resolve("opencode", deps)
+def detect_shell_deps(
+    deps: DetectDeps,
+) -> tuple[DetectedTool | None, DetectedTool | None, tuple[str, ...]]:
+    """探测**执行侧**的两件套（bash + shellcheck），返回 (bash, shellcheck, 问题列表)。
+
+    单独拆出来是因为依赖集合随 agent 后端而变：opencode 那条路三件套缺一不可，而换成命令行
+    agent 之后 opencode 不再是依赖，bash 与 shellcheck 却仍然是（引擎执行脚本用的是它们，
+    换 agent 不换执行者）。拆一份共用实现，比在两个调用点各写一遍"缺了就报什么"稳。
+    问题列表的顺序与 `detect_all` 里完全一致（bash 在前、shellcheck 在后）。
+    """
     bash = _resolve("bash", deps)
     shellcheck = _resolve("shellcheck", deps)
+    problems: list[str] = []
+    if bash is None:
+        problems.append(_INSTALL_HINTS["bash"])
+    if shellcheck is None:
+        problems.append(_INSTALL_HINTS["shellcheck"])
+    return bash, shellcheck, tuple(problems)
+
+
+def detect_all(deps: DetectDeps) -> DetectionReport:
+    opencode = _resolve("opencode", deps)
+    bash, shellcheck, shell_problems = detect_shell_deps(deps)
 
     problems: list[str] = []
     if opencode is None:
@@ -144,10 +163,7 @@ def detect_all(deps: DetectDeps) -> DetectionReport:
         problems.append(
             f"opencode 版本过低（{opencode.version}）：需要 >= {MIN_OPENCODE_VERSION} 才有 permission 配置"
         )
-    if bash is None:
-        problems.append(_INSTALL_HINTS["bash"])
-    if shellcheck is None:
-        problems.append(_INSTALL_HINTS["shellcheck"])
+    problems.extend(shell_problems)
 
     warnings: list[str] = []
     if opencode is not None and deps.run_auth is not None:

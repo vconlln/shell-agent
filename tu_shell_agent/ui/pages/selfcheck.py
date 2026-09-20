@@ -1,4 +1,4 @@
-"""环境自检页：显示三件套的版本/路径与问题清单，并允许重跑探测。"""
+"""环境自检页：显示当前后端与执行侧的版本/路径、问题清单，并允许重跑探测。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, 
 from ..widgets.scroll import form_container, scrollable
 from ...types import DetectionReport
 
+# 报告里的三条位置。第一栏承载"当前 agent 后端"的探测结果 —— 字段名来自这份报告只有
+# opencode 一种后端的年代，而"后端"现在可能是 claude / codeagent / 自定义命令，
+# 所以显示用的名字由 `render(..., backend_label=...)` 传进来，不写死。
 _TOOLS = ("opencode", "bash", "shellcheck")
 
 
 class SelfCheckPage(QWidget):
-    """三件套（opencode / Git Bash / shellcheck）的自检结果。
+    """当前后端 + 执行侧两件套（Git Bash / shellcheck）的自检结果。
 
     页面只做两件事：如实显示，以及把"用户要求重跑"这件事发出去。
     真实探测要起子进程、可能耗时数秒，必须由控制器放在工作线程里跑——
@@ -25,6 +28,8 @@ class SelfCheckPage(QWidget):
         super().__init__(parent)
         self.setObjectName("selfCheckPage")     # main_window 与骨架测试的契约，不要改名
         self._report: DetectionReport | None = None
+        # 第一栏显示成什么名字（当前后端的显示名）。默认 opencode = 本功能之前的行为。
+        self._backend_label = _TOOLS[0]
 
         # 一行状态 + 一个按钮；**详情框只在有事要说时才出现**。
         # 原来那行"三件套缺一不可：…（规格 §9）"是把规格原文贴给用户看 —— 用户要的是结论，
@@ -52,7 +57,8 @@ class SelfCheckPage(QWidget):
 
         self.recheck_button.clicked.connect(self._on_recheck_clicked)
 
-    def render(self, report: DetectionReport) -> None:
+    def render(self, report: DetectionReport, *, backend_label: str = "opencode") -> None:
+        """把一次探测结果铺到页面上（`backend_label` 是当前后端在第一栏显示的名字）。"""
         """把一次探测结果铺到页面上。探测失败也要调它——problems 里会写清为什么失败。
 
         显示策略：**一行结论**（通过/缺几项/几条提示）始终在；详情框只在有 problems 或
@@ -60,17 +66,23 @@ class SelfCheckPage(QWidget):
         再占一大片空间没有意义。
         """
         self._report = report
-        self.text.setPlainText(self._format(report))
+        self._backend_label = backend_label or _TOOLS[0]
+        self.text.setPlainText(self._format(report, self._backend_label))
         self.text.setVisible(bool(report.problems or report.warnings))
-        self.status_label.setText(self._status_line(report))
+        self.status_label.setText(self._status_line(report, self._backend_label))
+
+    def backend_label(self) -> str:
+        """第一栏当前显示的名字（当前后端的显示名）。"""
+        return self._backend_label
 
     @staticmethod
-    def _status_line(report: DetectionReport) -> str:
-        """一行说清结论：通过就把三件套的版本列出来，否则说缺什么。"""
+    def _status_line(report: DetectionReport, backend_label: str = "opencode") -> str:
+        """一行说清结论：通过就把三件的版本列出来，否则说缺什么。"""
         if report.problems:
             return f"⚠ {len(report.problems)} 个问题需要处理（见下方）"
         versions = " · ".join(
-            f"{name} {tool.version}" for name in _TOOLS
+            f"{backend_label if name == _TOOLS[0] else name} {tool.version}"
+            for name in _TOOLS
             if (tool := getattr(report, name)) is not None
         )
         if report.warnings:
@@ -101,14 +113,15 @@ class SelfCheckPage(QWidget):
         self.recheck_requested.emit()
 
     @staticmethod
-    def _format(report: DetectionReport) -> str:
+    def _format(report: DetectionReport, backend_label: str = "opencode") -> str:
         lines: list[str] = []
         for name in _TOOLS:
+            label = backend_label if name == _TOOLS[0] else name
             tool = getattr(report, name)
             if tool is None:
-                lines.append(f"{name}: 未找到")
+                lines.append(f"{label}: 未找到")
             else:
-                lines.append(f"{name}: {tool.version}  ({tool.path})")
+                lines.append(f"{label}: {tool.version}  ({tool.path})")
         if report.problems:
             lines.append("")
             lines.append("问题：")

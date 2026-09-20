@@ -31,12 +31,30 @@ from PySide6.QtWidgets import (
 )
 
 from ..settings import AppSettings, default_settings_path
+from ...agent_backends import (
+    BackendError,
+    available_backends,
+    backend_descriptor,
+    resolve_command,
+)
 
 # 阻断级别的条目顺序与左栏（任务 5）逐字一致：同一件事在两个地方不能出现不同顺序
 BLOCKING_LEVELS = ("error", "warning", "info", "style")
 _DEFAULT_BLOCKING_LEVEL = "info"      # 与 types.RunConfig 的默认值一致
 
 _TIMEOUT_MAX_MS = 3_600_000      # 1 小时；再长的等待不该由界面默默容忍，而是让人去改脚本
+
+# 模型这一栏的说明分两套：这段话讲的是 opencode 的免费档陷阱（用户实际踩到过），
+# 换成命令行后端之后它一个字都不适用，继续显示只会误导。
+_OPENCODE_MODEL_HINT = (
+    "用于生成 shell 脚本；模型对话的模型在「模型对话」面板中单独设置。"
+    "留空时使用 opencode 的默认模型。opencode 未配置默认模型时将使用其免费档，"
+    "而免费档仅限官方客户端调用。"
+)
+_CLI_MODEL_HINT = (
+    "用于生成 shell 脚本，会作为 --model 传给命令行后端（例：sonnet / opus）。"
+    "留空时使用该后端自己的默认模型；模型对话的模型在「模型对话」面板中单独设置。"
+)
 
 
 @lru_cache(maxsize=1)
@@ -68,6 +86,42 @@ class SettingsPage(QWidget):
         components_form.addRow("Git Bash", self.bash_path_edit)
         components_form.addRow("shellcheck", self.shellcheck_path_edit)
 
+        # ── 后端 agent ───────────────────────────────────────────────
+        # 用哪个 agent 生成脚本属于**运行参数**（改完保存后生效），所以这里不做即时预览；
+        # 但提示行必须如实说明"当前选的是谁、命令解析成了什么、上一次检测的结果"，
+        # 否则用户会以为"下拉换了就换了"，直到某次运行报出一个看不懂的错。
+        self.backend_combo = QComboBox()
+        self.backend_combo.setObjectName("backendCombo")
+        for descriptor in available_backends():
+            self.backend_combo.addItem(descriptor.display_name, descriptor.id)
+        self.agent_command_edit = QLineEdit()
+        self.agent_command_edit.setObjectName("agentCommandEdit")
+        self.agent_command_edit.setPlaceholderText("留空则使用该后端的默认命令名称")
+        self.backend_detect_button = QPushButton("检测")
+        self.backend_detect_button.setObjectName("backendDetectButton")
+        backend_row = QWidget()
+        backend_layout = QHBoxLayout(backend_row)
+        backend_layout.setContentsMargins(0, 0, 0, 0)
+        backend_layout.addWidget(self.agent_command_edit, 1)
+        backend_layout.addWidget(self.backend_detect_button)
+        self.backend_hint = QLabel()
+        self.backend_hint.setObjectName("backendHint")
+        self.backend_hint.setProperty("role", "muted")
+        self.backend_hint.setWordWrap(True)
+
+        backends = QGroupBox("后端 agent")
+        backends_form = QFormLayout(backends)
+        backends_form.addRow("后端", self.backend_combo)
+        backends_form.addRow("命令", backend_row)
+        backends_form.addRow("", self.backend_hint)
+
+        # 上一次「检测」的结论：(后端 id, 命令, 结果)。只在"与当前选择一致"时才显示 ——
+        # 换了后端或改了命令之后，那条结论已经不是这一份配置的结论了。
+        self._backend_probe: tuple[str, str, Any] | None = None
+        self.backend_detect_button.clicked.connect(self._detect_backend)
+        self.backend_combo.currentIndexChanged.connect(lambda _index: self._on_backend_changed())
+        self.agent_command_edit.textChanged.connect(lambda _text: self._on_backend_changed())
+
         # ── 模型 ────────────────────────────────────────────────────
         # 必须显式选：opencode 自己没配默认模型时会落到免费档，而免费档只允许官方客户端，
         # 经 serve 的 API 调用会被拒（用户实际遇到的就是这条）。
@@ -85,11 +139,7 @@ class SettingsPage(QWidget):
         model_layout.setContentsMargins(0, 0, 0, 0)
         model_layout.addWidget(self.model_combo, 1)
         model_layout.addWidget(self.model_refresh_button)
-        self.model_hint = QLabel(
-            "用于生成 shell 脚本；模型对话的模型在「模型对话」面板中单独设置。"
-            "留空时使用 opencode 的默认模型。opencode 未配置默认模型时将使用其免费档，"
-            "而免费档仅限官方客户端调用。"
-        )
+        self.model_hint = QLabel(_OPENCODE_MODEL_HINT)
         self.model_hint.setObjectName("modelHint")
         self.model_hint.setProperty("role", "muted")
         self.model_hint.setWordWrap(True)
@@ -199,6 +249,7 @@ class SettingsPage(QWidget):
         models_form.addRow("", self.model_hint)
 
         layout.addWidget(components)
+        layout.addWidget(backends)
         layout.addWidget(models_group)
         layout.addWidget(run_defaults)
         layout.addWidget(checks)
@@ -259,6 +310,8 @@ class SettingsPage(QWidget):
             self.wallpaper_edit,
             self.acrylic_blur_spin,
             self.model_combo,
+            self.backend_combo,
+            self.agent_command_edit,
         ):
             widget.blockSignals(True)
         try:
@@ -272,6 +325,16 @@ class SettingsPage(QWidget):
                 self.model_combo.setCurrentIndex(self.model_combo.findText(model))
             else:
                 self.model_combo.setEditText(model)
+            # 后端取值先过一遍注册表：文件被手改成未知 id 时不能把下拉设成空（那是"选不中"，
+            # 用户看不出到底在跑哪个后端）。AppSettings.normalize() 已经收敛过一次，
+            # 这里再兜一次是因为 reload() 也可能被喂进一个没走过 load() 的对象。
+            backend = str(getattr(settings, "agent_backend", "") or "")
+            index = self.backend_combo.findData(backend)
+            self.backend_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.agent_command_edit.setText(str(getattr(settings, "agent_command", "") or ""))
+            # 铺控件时把上一次的检测结论丢掉：它是**另一个后端/另一条命令**的结论，
+            # 留在提示行里会被读成"当前这个也能用"。
+            self._backend_probe = None
         finally:
             for widget in (
                 self.ui_scale_spin,
@@ -279,9 +342,13 @@ class SettingsPage(QWidget):
                 self.wallpaper_edit,
                 self.acrylic_blur_spin,
                 self.model_combo,
+                self.backend_combo,
+                self.agent_command_edit,
             ):
                 widget.blockSignals(False)
         self._refresh_backdrop_hint()
+        self._refresh_backend_hint()
+        self._refresh_model_hint()
         path = settings.loaded_from
         self.status_label.setText(f"保存位置：{path}" if path is not None else "尚未确定保存位置")
 
@@ -325,6 +392,13 @@ class SettingsPage(QWidget):
         """点「检测可用模型」：起线程跑 `opencode models`，回来后填进下拉（保留当前选择）。"""
         from ..engine_worker import ModelsWorker
 
+        if self.selected_backend_id() != "opencode":
+            # 模型列表是 `opencode models` 给的东西，只有那个后端有；命令行后端的模型名由用户
+            # 自己填（claude 那类接受 sonnet / opus 这样的别名）。这里照实说明，不去跑一条
+            # 明知会失败的命令 —— 那只会把"这台机器没装 opencode"报成"检测模型失败"。
+            self.model_hint.setText("当前后端不提供模型列表，请直接填写模型名称。")
+            return
+
         self.model_refresh_button.setEnabled(False)
         self.model_hint.setText("正在检测可用模型…")
         from ..workers import track
@@ -360,6 +434,87 @@ class SettingsPage(QWidget):
                 self.model_combo.setEditText(current)
         finally:
             self.model_combo.blockSignals(False)
+
+    # ---- 后端 agent ----
+
+    def selected_backend_id(self) -> str:
+        """当前下拉选中的后端 id（控件上的值，未必已经保存）。"""
+        return str(self.backend_combo.currentData() or "")
+
+    def effective_command(self) -> str:
+        """当前选择下**实际会执行**的命令。
+
+        与控制器走同一个 `resolve_command`：界面提示行说的命令与真正跑的命令必须是同一个，
+        否则这个提示行就是在骗人（"显示 claude、实际跑 opencode"这种故障最难查）。
+        """
+        try:
+            return resolve_command(
+                self.selected_backend_id(),
+                self.agent_command_edit.text(),
+                fallback=str(getattr(self._settings, "opencode_path", "") or ""),
+            )
+        except BackendError:
+            return ""
+
+    def _on_backend_changed(self) -> None:
+        """下拉或命令框变了：丢掉旧结论，重铺提示行（保存后才真正生效）。"""
+        self._backend_probe = None
+        self._refresh_backend_hint()
+        self._refresh_model_hint()
+
+    def _refresh_model_hint(self) -> None:
+        """模型这一栏的说明跟着后端走（opencode 的免费档提示对命令行后端不适用）。"""
+        try:
+            needs_serve = backend_descriptor(self.selected_backend_id()).needs_serve
+        except BackendError:
+            needs_serve = True
+        self.model_hint.setText(_OPENCODE_MODEL_HINT if needs_serve else _CLI_MODEL_HINT)
+
+    def _refresh_backend_hint(self) -> None:
+        """把"当前后端 / 解析出的命令 / 上一次检测的结论"如实铺在提示行里。"""
+        try:
+            descriptor = backend_descriptor(self.selected_backend_id())
+        except BackendError as error:
+            self.backend_hint.setText(str(error))
+            return
+        command = self.effective_command()
+        lines = [
+            f"当前后端：{descriptor.display_name}。{descriptor.summary}",
+            f"命令：{command}。" if command else "命令尚未填写，运行时会无法启动该后端。",
+        ]
+        if descriptor.needs_serve and not self.agent_command_edit.text().strip():
+            lines.append("命令留空时使用「组件路径」中的 opencode 路径。")
+        probe = self._backend_probe
+        if probe is not None and probe[0] == descriptor.id and probe[1] == command:
+            result = probe[2]
+            lines.append(result.detail())
+        else:
+            lines.append("按「检测」运行它的版本命令，确认该命令在这台机器上可用。")
+        self.backend_hint.setText("\n".join(lines))
+
+    def _detect_backend(self) -> None:
+        """点「检测」：在 worker 线程里跑该后端的版本命令（子进程不能起在界面线程上）。"""
+        from ..engine_worker import BackendProbeWorker
+        from ..workers import track
+
+        backend_id = self.selected_backend_id()
+        command = self.agent_command_edit.text().strip()
+        self.backend_detect_button.setEnabled(False)
+        self.backend_hint.setText(f"正在检测 {backend_id}…")
+        worker = BackendProbeWorker(backend_id, command)
+
+        def on_done(result: object) -> None:
+            self._backend_probe = (backend_id, self.effective_command(), result)
+            self.backend_detect_button.setEnabled(True)
+            self._refresh_backend_hint()
+
+        def on_failed(message: str) -> None:
+            self.backend_detect_button.setEnabled(True)
+            self.backend_hint.setText(f"检测失败：{message}")
+
+        worker.done.connect(on_done)
+        worker.failed.connect(on_failed)
+        track(worker)      # 托管：引用被覆盖 / 退出时还在跑都会让 Qt abort（见 ui/workers.py）
 
     def _pick_wallpaper(self) -> None:
         """选一张壁纸图片。只在点击时弹对话框 —— 无头测试不会走到这里。"""
@@ -414,6 +569,8 @@ class SettingsPage(QWidget):
         settings.acrylic_wallpaper = self.wallpaper_edit.text().strip()
         settings.acrylic_blur = int(self.acrylic_blur_spin.value())
         settings.opencode_model = self.model_combo.currentText().strip()
+        settings.agent_backend = self.selected_backend_id()
+        settings.agent_command = self.agent_command_edit.text().strip()
         return settings
 
     def save(self) -> Path | None:

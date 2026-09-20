@@ -13,6 +13,10 @@ from pathlib import Path
 
 from ..filetext import write_text_lf
 
+# 后端 id 的值域来自注册表（那里是唯一来源）。这个 import 是纯数据查询，不碰 Qt、不起进程；
+# 注册表里的适配器工厂都是延迟 import，所以这不会把 httpx / 子进程提前拖进来。
+from ..agent_backends import DEFAULT_BACKEND_ID, backend_ids
+
 # 应用名只有一个来源：app.py 用它设 QApplication.applicationName，设置路径也由它决定。
 # 两处写死成不同的字符串，就会变成"设置保存在 A、读取时找 B"。
 APP_NAME = "tu-shell-agent"
@@ -43,6 +47,13 @@ class AppSettings:
     opencode_path: str = ""
     bash_path: str = ""
     shellcheck_path: str = ""
+    # 用哪个 agent 生成脚本（注册表里的 id：opencode / claude / codeagent / custom）。
+    # 默认 opencode = 本功能加进来之前的行为，老用户的设置文件不动也照旧。
+    agent_backend: str = "opencode"
+    # 该后端的命令（命令名或完整路径）。**留空 = 用后端的默认命令**（opencode/claude/codeagent
+    # 都有默认值，只有自定义后端必须填）。opencode 那条路一直由 opencode_path 负责，
+    # 所以这个字段对它只在"组件路径没填"时兜底，避免同一个东西两个来源互相打架。
+    agent_command: str = ""
     # 生成与对话使用的模型，形如 `provider/model`（例：deepseek/deepseek-v4-pro）。
     # 留空 = 用 opencode 自己的默认模型 —— 注意 opencode 未配置默认模型时会落到它的
     # 免费档（`opencode/*-free`），而免费档只允许官方客户端调用，经 serve 的 API 调用会被拒绝。
@@ -73,9 +84,16 @@ class AppSettings:
 
         旧版本里"系统提供"与"界面自绘"是两个背景效果，现在合成一个「亚克力模糊」
         （模糊来源自动选择），老的 `blur` 归到 `acrylic`：不然设置读进来之后下拉里选不中。
+
+        后端 id 同理：值域由注册表决定，文件被手改成别的词（或以后删掉某个后端）时收敛回默认
+        后端。不收敛的后果是下拉里选不中任何一项、界面显示的后端与实际跑的又不是一回事 ——
+        而"未知 id 要报错、不许静默回退"那条规矩管的是**接口**（`backend_descriptor` 对显式传入
+        的未知 id 一律报错），这里只是把持久化文件里的脏值收进值域。
         """
         if self.backdrop == "blur":
             self.backdrop = "acrylic"
+        if self.agent_backend not in backend_ids():
+            self.agent_backend = DEFAULT_BACKEND_ID
 
     @classmethod
     def defaults_for(cls, path: Path) -> AppSettings:
