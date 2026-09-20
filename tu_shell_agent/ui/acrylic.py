@@ -39,6 +39,10 @@ DEFAULT_BLUR = 40
 # 用户反馈的"看不见字"有一部分就是它。alpha 150 ≈ 59% 深色：壁纸仍看得出来，字也压得住。
 TINT = (16, 17, 20, 150)
 
+# 「半透明」模式用的色调：**不模糊**壁纸，只压一层淡色（alpha 96 ≈ 38%）。
+# 于是它看起来就是"透过一块玻璃看桌面"，而完全不依赖窗口半透明或系统模糊。
+TRANSLUCENT_TINT = (16, 17, 20, 96)
+
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 # 模糊结果按**尺寸分桶**缓存：拖动窗口时每个像素都重算一次会把界面拖卡，
@@ -173,8 +177,19 @@ def _pictures_wallpaper(home: Path) -> str | None:
     return None
 
 
-def backdrop_image(wallpaper: str | None, width: int, height: int, blur: int) -> QImage | None:
-    """按窗口尺寸生成"模糊壁纸"图层；没有壁纸或尺寸无效时返回 None（调用方退化为半透明）。"""
+def backdrop_image(
+    wallpaper: str | None,
+    width: int,
+    height: int,
+    blur: int,
+    *,
+    tint: tuple[int, int, int, int] = TINT,
+) -> QImage | None:
+    """按窗口尺寸生成"壁纸底色"图层（模糊程度与色调由调用方给）。
+
+    没有壁纸或尺寸无效时返回 None —— 调用方据此退化为纯色底。
+    `blur=0` 表示不模糊（「半透明」模式用它）。
+    """
     if not wallpaper or width <= 1 or height <= 1:
         return None
     path = Path(wallpaper)
@@ -189,26 +204,33 @@ def backdrop_image(wallpaper: str | None, width: int, height: int, blur: int) ->
     bucket_h = max(_BUCKET, (height + _BUCKET - 1) // _BUCKET * _BUCKET)
     blurs = max(0, min(200, int(blur)))
     try:
-        return _cached_backdrop(str(path), stamp, bucket_w, bucket_h, blurs)
+        return _cached_backdrop(str(path), stamp, bucket_w, bucket_h, blurs, tint)
     except (OSError, ValueError):
         return None
 
 
 @lru_cache(maxsize=_MAX_CACHE)
-def _cached_backdrop(path: str, stamp: float, width: int, height: int, blur: int) -> QImage | None:
+def _cached_backdrop(
+    path: str,
+    stamp: float,
+    width: int,
+    height: int,
+    blur: int,
+    tint: tuple[int, int, int, int],
+) -> QImage | None:
     image = QImage(path)
     if image.isNull():
         return None
-    return _tint(_blur(_cover(image, width, height), blur))
+    return _tint(_blur(_cover(image, width, height), blur), tint)
 
 
-def _tint(image: QImage) -> QImage:
+def _tint(image: QImage, tint: tuple[int, int, int, int]) -> QImage:
     """压一层深色，把壁纸的亮度收到"上面写浅色字也看得清"的范围。"""
     tinted = QImage(image.size(), QImage.Format.Format_ARGB32_Premultiplied)
     tinted.fill(Qt.GlobalColor.transparent)
     painter = QPainter(tinted)
     painter.drawImage(0, 0, image)
-    painter.fillRect(tinted.rect(), QColor(*TINT))
+    painter.fillRect(tinted.rect(), QColor(*tint))
     painter.end()
     return tinted
 

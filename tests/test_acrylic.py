@@ -167,9 +167,9 @@ def test_acrylic_without_a_wallpaper_degrades_to_plain_translucency(restore_app,
     assert window._acrylic_image is None
     assert "未找到壁纸图片" in window.status_label.text()
     assert "未找到壁纸图片" in window._appearance_hint()
-    # 退化目标必须是**半透明**（不是"一块不透明的深色"）：生效模式跟着退，窗口重新可透
-    assert window._effective_backdrop == "translucent"
-    assert _alpha_at(window, QPoint(1100, 700)) < 255, "退化后应当还能透出桌面"
+    # 退化目标：没有壁纸就画不出"透明"，退回纯色底（并如实说明）
+    assert window._effective_backdrop == "off"
+    assert window._acrylic_image is None
 
 
 def test_leaving_acrylic_mode_drops_the_layer(restore_app, qtbot, tmp_path):
@@ -182,6 +182,9 @@ def test_leaving_acrylic_mode_drops_the_layer(restore_app, qtbot, tmp_path):
     assert window._acrylic_image is not None
 
     window.settings.backdrop = "translucent"
+    window.apply_appearance()
+    assert window._acrylic_image is not None, "半透明也要铺底色层（壁纸不模糊的那种）"
+    window.settings.backdrop = "off"
     window.apply_appearance()
     assert window._acrylic_image is None
 

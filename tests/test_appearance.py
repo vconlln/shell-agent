@@ -175,85 +175,88 @@ def test_default_backdrop_is_fully_opaque(restore_app, qtbot, tmp_path):
     assert colors["bg"] == "#101114"
 
 
-def test_translucent_backdrop_makes_surfaces_transparent(restore_app, qtbot, tmp_path):
-    """半透明：底色带 alpha，并且窗口属性真的设上了。"""
-    from PySide6.QtCore import Qt
+def test_backdrop_modes_paint_a_self_drawn_layer(restore_app, qtbot, tmp_path):
+    """两种"透明"效果都由**界面自绘底色**，窗口本身不透明。
 
-    window = _window(tmp_path, backdrop="translucent")
-    qtbot.addWidget(window)
-    window.show()
-    window.apply_appearance()
-
-    assert restore_app.palette().window().color().alpha() < 255
-    assert restore_app.palette().base().color().alpha() < 255
-    # 透明度要**看得出来**：第一版给 92%（只有 8% 的壁纸透出来），用户反馈"没有效果"。
-    # 这里锁住"至少透出两成"，免得以后又被调回看不见的值。
-    assert restore_app.palette().window().color().alpha() <= 210
-    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
-    # 文字与强调色不能被一起做透明 —— 那会直接毁掉对比度
-    assert restore_app.palette().windowText().color().alpha() == 255
-
-
-def test_acrylic_reports_its_blur_source_honestly(restore_app, qtbot, tmp_path, monkeypatch):
-    """亚克力的模糊来源要如实（系统合成器 / 界面自绘），不能谎报。
-
-    现在只有一个「亚克力模糊」选项：来源按可用性自动选择 —— 系统合成器优先，拿不到就用
-    界面自绘（自己糊壁纸）。开发机是 Linux/Wayland（Niri），没有给普通应用的模糊接口；
-    Windows 11 22H2+ 才可能拿到系统的。
+    为什么不问系统要（用户 Windows 11 实测两个都没生效）：
+      1. Windows 上 `WA_TranslucentBackground` 必须搭配无边框窗口才生效，而我们保留原生标题栏；
+      2. Windows 11 的 DWM 亚克力要求窗口没有重定向位图（`WS_EX_NOREDIRECTIONBITMAP`），
+         Qt 的普通窗口有，所以 `DwmSetWindowAttribute` 返回成功、背景也显示不出来。
+    于是两端统一成自绘：半透明 = 壁纸不模糊 + 淡色调，亚克力 = 壁纸模糊 + 浓色调。
     """
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QImage
 
-    from tu_shell_agent.ui import backdrop as backdrop_module
-
     wallpaper = tmp_path / "wall.png"
-    image = QImage(96, 64, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(120, 130, 140))
+    image = QImage(160, 100, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(200, 180, 150))
     image.save(str(wallpaper))
 
-    window = _window(tmp_path, backdrop="acrylic", acrylic_wallpaper=str(wallpaper))
-    qtbot.addWidget(window)
-    window.show()
-    # 断言要跟**平台的真实能力**比，而不是跟窗口自己报的标志比（否则"把标志写死"的变异体照样通过）
-    platform_can = backdrop_module.try_enable_blur(window)
-    window.apply_appearance()
+    for mode in ("translucent", "acrylic"):
+        window = _window(tmp_path, backdrop=mode, acrylic_wallpaper=str(wallpaper))
+        qtbot.addWidget(window)
+        window.resize(1200, 800)
+        window.show()
+        window.apply_appearance()
+        assert window._effective_backdrop == mode
+        assert window._acrylic_image is not None, f"{mode} 模式没有铺底色层"
+        assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False, (
+            "窗口必须保持不透明：半透明属性在 Windows 上要无边框窗口才生效（用户实测不生效）"
+        )
+        window.close()
 
-    assert window.blur_available == platform_can, "模糊可用性不能谎报"
-    if platform_can:
-        assert window._acrylic_image is None, "系统真在模糊时不必再铺自绘层"
-        assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
-    else:
-        assert window._acrylic_image is not None, "拿不到系统模糊时应当由自绘层接管"
-        assert "界面自绘" in window.status_label.text()
+    plain = _window(tmp_path, backdrop="off")
+    qtbot.addWidget(plain)
+    plain.show()
+    plain.apply_appearance()
+    assert plain._acrylic_image is None
 
 
-def test_blur_mode_falls_back_to_self_drawn_when_the_platform_cannot_blur(restore_app, qtbot, tmp_path, monkeypatch):
-    """系统模糊不可用 + 有壁纸 → 自绘接管；没有壁纸 → 才退化为半透明。"""
+def test_no_wallpaper_falls_back_to_a_solid_background(restore_app, qtbot, tmp_path, monkeypatch):
+    """没有壁纸就画不出"透明"，退回纯色底并如实说明（不能留一块假的透明）。"""
     from tu_shell_agent.ui import acrylic as acrylic_module
-    from tu_shell_agent.ui import backdrop as backdrop_module
-    from PySide6.QtGui import QColor, QImage
-
-    if backdrop_module.try_enable_blur(_window(tmp_path, backdrop="blur")):
-        pytest.skip("当前平台真的能模糊，这条退化路径不适用")
-
-    wallpaper = tmp_path / "wall.png"
-    image = QImage(80, 60, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(120, 130, 140))
-    image.save(str(wallpaper))
-
-    window = _window(tmp_path, backdrop="blur", acrylic_wallpaper=str(wallpaper))
-    qtbot.addWidget(window)
-    window.show()
-    window.apply_appearance()
-    assert window._acrylic_fallback is True
-    assert window._acrylic_image is not None, "有壁纸时应当由自绘层接管"
 
     monkeypatch.setattr(acrylic_module, "find_wallpaper", lambda *a, **k: None)
-    bare = _window(tmp_path, backdrop="blur")
-    qtbot.addWidget(bare)
-    bare.show()
-    bare.apply_appearance()
-    assert bare._acrylic_image is None
-    assert "半透明" in bare.status_label.text()
+    window = _window(tmp_path, backdrop="translucent")
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    window.apply_appearance()
+
+    assert window._effective_backdrop == "off"
+    assert window._acrylic_image is None
+    assert "未找到壁纸图片" in window.status_label.text()
+
+
+def test_translucent_is_sharp_and_acrylic_is_blurred(restore_app, qtbot, tmp_path):
+    """两个模式必须**看得出区别**：一个不模糊、一个模糊。
+
+    用户点过这条："系统提供和界面自绘没有区别了" —— 合并选项之后，区别必须落在"糊不糊"上。
+    """
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    wallpaper = tmp_path / "edge.png"
+    image = QImage(400, 200, QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    painter.fillRect(0, 0, 200, 200, QColor(0, 0, 0))
+    painter.fillRect(200, 0, 200, 200, QColor(255, 255, 255))
+    painter.end()
+    image.save(str(wallpaper))
+
+    def transition_width(mode: str) -> int:
+        window = _window(tmp_path, backdrop=mode, acrylic_wallpaper=str(wallpaper))
+        qtbot.addWidget(window)
+        window.resize(400, 200)
+        window.show()
+        window.apply_appearance()
+        layer = window._acrylic_image
+        row = [layer.pixelColor(x, layer.height() // 2).red() for x in range(layer.width())]
+        window.close()
+        return sum(1 for value in row if 30 < value < 225)
+
+    sharp = transition_width("translucent")
+    blurred = transition_width("acrylic")
+    assert blurred > sharp + 4, f"亚克力没有比半透明更糊（过渡像素 {blurred} vs {sharp}）"
 
 
 def test_appearance_settings_round_trip(tmp_path):
@@ -400,61 +403,65 @@ def test_content_surfaces_are_clearly_translucent(restore_app, qtbot, tmp_path):
     assert not isinstance(BASE_TOKENS["fg"], tuple)
 
 
-def test_dialogs_follow_the_translucent_backdrop(restore_app, qtbot, tmp_path):
-    """对话框是**独立顶层窗口**，必须自己带 WA_TranslucentBackground。
+def test_dialogs_follow_the_current_backdrop_mode(restore_app, qtbot, tmp_path):
+    """对话框是**独立顶层窗口**，必须自己跟随当前的背景模式。
 
-    只在主窗口上设这个属性时，弹出来的确认框仍是一整块纯不透明的深色 ——
-    用户反馈的"对话框之类的还是纯黑底"就是这个。
+    （以前断言的是 `WA_TranslucentBackground`；现在两种透明效果都由界面自绘、窗口统一
+    不透明，所以判据改成"模式跟着走，且不会被设成半透明窗口"。）
     """
     from PySide6.QtCore import Qt
 
     from tu_shell_agent.ui import backdrop as backdrop_module
     from tu_shell_agent.ui.widgets.confirm_dialog import ConfirmDialog
 
-    window = _window(tmp_path, backdrop="translucent")
+    window = _window(tmp_path, backdrop="acrylic")
     qtbot.addWidget(window)
     window.show()
     window.apply_appearance()
+    assert backdrop_module.current_mode() == "acrylic"
 
-    dialog = ConfirmDialog(1, "/tmp/script.sh", "echo hi\n")
+    dialog = ConfirmDialog(1, "/tmp/script.sh", "echo hi")
     qtbot.addWidget(dialog)
-    assert dialog.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+    assert dialog.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
 
-    # 关掉背景效果之后，新开的对话框要回到不透明
     window.settings.backdrop = "off"
     window.apply_appearance()
-    opaque = ConfirmDialog(1, "/tmp/script.sh", "echo hi\n")
-    qtbot.addWidget(opaque)
-    assert opaque.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
+    assert backdrop_module.current_mode() == "off"
 
 
 def test_rendered_surfaces_let_the_backdrop_through(restore_app, qtbot, tmp_path):
-    """**渲染结果**层面的证据：半透明模式下，这些表面真的让桌面透出来。
+    """半透明模式下，界面表面必须**看得出壁纸的影响**（而不是一片纯色）。
 
-    判据是渲染到透明画布后的 **alpha**：alpha < 255 表示这扇窗没有盖满那一块。
-    只断言令牌里的 alpha 不够 —— 决定观感的是合成之后的结果（窗口底自己就是一层深色时，
-    内部再透也只剩百分之十几能透出来，用户为此反馈过两次）。
+    窗口现在始终不透明，不能再量 alpha；判据换成"与纯色模式相比颜色确实不同"。
     """
     from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
 
-    window = _window(tmp_path, backdrop="translucent")
-    qtbot.addWidget(window)
-    window.show()
-    window.apply_appearance()
+    wallpaper = tmp_path / "wall.png"
+    image = QImage(200, 120, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(210, 170, 120))          # 明显的暖色；纯色底是冷灰
+    image.save(str(wallpaper))
 
-    targets = {
-        "脚本视图": window.center_pane.script_view,
-        "输出视图": window.right_pane.output_view,
-        "报告视图": window.right_pane.notes_view,
-        "方案预览": window.left_pane.plan_preview,
-        "对话记录": window.chat_panel.transcript,
-    }
-    for name, widget in targets.items():
-        center = widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
-        alpha = _render_alpha(window, center)
-        print(f"[透出量] {name}: alpha={alpha}")
-        assert alpha <= 250, f"{name} 等效不透明（alpha={alpha}），桌面透不出来"
-        assert alpha >= 100, f"{name} 透得过头（alpha={alpha}），底色没了、文字会看不清"
+    def render(mode: str) -> QImage:
+        window = _window(tmp_path, backdrop=mode, acrylic_wallpaper=str(wallpaper))
+        qtbot.addWidget(window)
+        window.resize(1200, 800)
+        window.show()
+        window.apply_appearance()
+        shot = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        shot.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(shot)
+        window.render(painter, QPoint(0, 0))
+        painter.end()
+        window.close()
+        return shot
+
+    plain = render("off")
+    layered = render("translucent")
+    for label, point in (("窗口空白处", QPoint(1150, 700)), ("脚本视图", QPoint(600, 400))):
+        a, b = plain.pixelColor(point), layered.pixelColor(point)
+        delta = abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue())
+        assert delta >= 12, f"{label} 与纯色模式几乎一样（差 {delta}），壁纸没有透出来"
 
 
 def test_opaque_mode_keeps_every_surface_solid(restore_app, qtbot, tmp_path):
@@ -503,7 +510,6 @@ def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
     )
     corner = pixel(QPoint(1, 1))
 
-    assert strip[3] < 255, "页签条应当是半透明的显式底色，而不是调色板刷的不透明块"
     assert strip != corner, "页签条角落与条内同色 → 还是直角矩形"
 
 
@@ -599,7 +605,9 @@ def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
             assert phrase not in text, f"界面文案出现口语：{text!r} 含 {phrase!r}"
 
     page.backdrop_combo.setCurrentIndex(page.backdrop_combo.findData("acrylic"))
-    assert "Windows" in page.backdrop_hint.text(), "提示要写明系统模糊在哪些平台可用"
+    hint = page.backdrop_hint.text()
+    assert "界面自绘" in hint, "提示要说明底色是界面自绘的（不再依赖系统）"
+    assert "不依赖系统" in hint
 
 
 def test_panel_corners_show_the_card_not_the_window(restore_app, qtbot, tmp_path):
@@ -719,33 +727,23 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
     assert not problems, "；".join(problems)
 
 
-def test_switching_background_modes_actually_toggles_window_translucency(restore_app, qtbot, tmp_path):
-    """切换背景效果必须真的改变**窗口**的半透明状态。
+def test_switching_background_modes_switches_the_layer(restore_app, qtbot, tmp_path):
+    """切换背景效果必须真的换底色层（而不是只改了个下拉）。"""
+    from PySide6.QtGui import QColor, QImage
 
-    用户报的"半透明都没有透明效果了"就是这里：`WA_TranslucentBackground` 必须在窗口被创建
-    之前设好，窗口已经在屏幕上时再改不生效 —— 从「不透明」切回「半透明」时属性设上了、
-    窗口却还是不透。所以 `_set_translucent` 在窗口可见时会隐藏再显示一次，强制重建。
-    """
-    from PySide6.QtCore import Qt
+    wallpaper = tmp_path / "wall.png"
+    image = QImage(120, 80, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(180, 160, 140))
+    image.save(str(wallpaper))
 
-    attribute = Qt.WidgetAttribute.WA_TranslucentBackground
-    window = _window(tmp_path, backdrop="off")
+    window = _window(tmp_path, backdrop="off", acrylic_wallpaper=str(wallpaper))
     qtbot.addWidget(window)
     window.show()
     window.apply_appearance()
-    assert window.testAttribute(attribute) is False
+    assert window._acrylic_image is None
 
-    for mode, expected in (("translucent", True), ("acrylic", True), ("off", False), ("translucent", True)):
+    for mode, has_layer in (("translucent", True), ("acrylic", True), ("off", False)):
         window.settings.backdrop = mode
         window.apply_appearance()
-        assert window.testAttribute(attribute) is expected, f"{mode} 模式下窗口半透明状态不对"
-        assert window.isVisible(), f"{mode} 模式切换后窗口不可见了（重建窗口时要重新显示）"
-
-    # 亚克力也保持半透明窗口：它靠自绘层盖住桌面，且这样两种模式互切不必重建窗口
-    window.settings.backdrop = "acrylic"
-    window.apply_appearance()
-    assert window._acrylic_image is not None
-    window.settings.backdrop = "translucent"
-    window.apply_appearance()
-    assert window._acrylic_image is None, "切回半透明后自绘层必须撤掉"
-    assert window.testAttribute(attribute) is True
+        assert (window._acrylic_image is not None) is has_layer, f"{mode} 模式的底色层不对"
+        assert window.isVisible(), f"{mode} 模式切换后窗口不可见了"

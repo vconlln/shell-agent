@@ -209,8 +209,8 @@ class SettingsPage(QWidget):
         appearance_form.addRow("界面字体", self.ui_font_combo)
         appearance_form.addRow("等宽字体（脚本/报告/输出）", self.mono_font_combo)
         appearance_form.addRow("背景效果", self.backdrop_combo)
-        appearance_form.addRow("亚克力壁纸", wallpaper_row)
-        appearance_form.addRow("模糊强度", self.acrylic_blur_spin)
+        appearance_form.addRow("背景壁纸", wallpaper_row)
+        appearance_form.addRow("模糊强度（亚克力）", self.acrylic_blur_spin)
         appearance_form.addRow("", self.backdrop_hint)
         layout.addWidget(appearance)
 
@@ -380,14 +380,19 @@ class SettingsPage(QWidget):
         from .. import acrylic as acrylic_module
 
         mode = self.backdrop_combo.currentData()
-        if mode != "acrylic":
+        if mode == "off":
             self.backdrop_hint.setText("")
             return
         found = acrylic_module.find_wallpaper(self.wallpaper_edit.text().strip())
+        detail = (
+            "亚克力模糊：壁纸高斯模糊后再压深色。模糊强度只对此模式生效。"
+            if mode == "acrylic"
+            else "半透明：壁纸不模糊，只压一层淡色。"
+        )
         self.backdrop_hint.setText(
-            "模糊来源按可用性自动选择：系统合成器（Windows 11 22H2 及以上版本）、"
-            "界面自绘；两者均不可用时使用半透明。"
-            + (f"当前壁纸：{Path(found).name}" if found else "未检测到壁纸图片，自绘模糊需要指定一张。")
+            detail
+            + "两种模式都由界面自绘底色，不依赖系统合成器或窗口透明。"
+            + (f"当前壁纸：{Path(found).name}" if found else "未检测到壁纸图片，将使用纯色背景。")
         )
 
     def collect(self) -> AppSettings:

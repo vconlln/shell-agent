@@ -617,3 +617,42 @@ X11 抓屏拿到的也是"整块屏幕"而不是"窗口背后"。
 
 用例：`test_switching_background_modes_actually_toggles_window_translucency`（逐个模式断言窗口
 属性与可见性，并断言切回半透明后自绘层已撤）。全套 343 passed / 1 skipped。
+
+
+## 修订十七（2026-09-19）：Windows 上两个"透明"效果都不生效 —— 改成界面自绘
+
+用户报："半透明和亚克力模糊在 win11 上都没生效"。查证后是**两条系统能力在真机上都不成立**：
+
+1. **Windows 的 `WA_TranslucentBackground` 必须搭配无边框窗口**才生效
+   （Qt 的已知限制；[StackOverflow 上这个问题](https://stackoverflow.com/questions/75432262/how-to-make-wa-translucentbackground-work-on-windows-without-using-framelesswindo)
+   的答案是 Windows 上做不到）。我们保留原生标题栏 → 客户区永远不透明。
+2. **Windows 11 的 DWM 亚克力要求窗口没有重定向位图**（`WS_EX_NOREDIRECTIONBITMAP`）——
+   [VLC 的提交](https://mailman.videolan.org/pipermail/vlc-commits/2025-January/070907.html)
+   正是为这个改的。Qt 的普通窗口有重定向位图，所以 `DwmSetWindowAttribute` 即使返回成功，
+   那层背景也显示不出来。
+
+于是**改成两端统一的自绘底色**，不再问系统：
+
+| 模式 | 底色层 |
+| --- | --- |
+| 不透明 | 无（主题纯色） |
+| 半透明 | 壁纸**不模糊** + 淡色调 `TRANSLUCENT_TINT`(alpha 96) |
+| 亚克力模糊 | 壁纸**高斯模糊**（强度可调） + 浓色调 `TINT`(alpha 150) |
+
+- 窗口**始终不透明**：`backdrop.py` 里删掉了 `enable/disable_translucent`、
+  `try_enable_blur`、`_enable_windows_acrylic`、`_enable_kde_blur`（都成了不可达代码），
+  文件顶部写清了为什么；
+- 没有壁纸 → 生效模式退回 `off`（纯色）并如实说明，不留一块假的透明；
+- `erase_damage` 填的必须是**不透明**色：窗口不透明之后，填带 alpha 的色会在重绘处挖出窟窿；
+- `_window_background_color()` 有底色层时返回色调色，纯色模式返回主题底色。
+
+连带的测量方法变化：窗口不再透明，"渲染到透明画布量 alpha"这套判据失效（永远 255）。
+新判据是**颜色差异**：半透明模式下同一位置的颜色必须与纯色模式明显不同（壁纸透出来了），
+以及**模糊程度差异**：用硬边壁纸时亚克力的过渡像素必须显著多于半透明。
+
+用例：`test_backdrop_modes_paint_a_self_drawn_layer`、
+`test_no_wallpaper_falls_back_to_a_solid_background`、
+`test_translucent_is_sharp_and_acrylic_is_blurred`、
+`test_rendered_surfaces_let_the_backdrop_through`（改判据）、
+`test_switching_background_modes_switches_the_layer`、`test_dialogs_follow_the_current_backdrop_mode`。
+整套 347 passed / 1 skipped。

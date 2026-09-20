@@ -40,29 +40,58 @@ def apply_to(window: Any) -> None:
     """把"当前背景模式"应用到某个顶层窗口（主窗口与所有对话框都走这里）。"""
     from . import theme as theme_module
 
+    # 窗口**始终不透明**：两种"透明"效果都是界面自绘的底色层（见文件顶部说明）。
+    # 容器去叠加只对非纯色模式做 —— 纯色模式的观感与历史版本逐像素一致。
     if _current_mode in ("translucent", "acrylic"):
-        # 亚克力也让窗口保持半透明：自绘那层模糊壁纸本来就不透明，铺上去之后桌面上什么都看不见，
-        # 但它保证了**两种模式之间的切换不需要重建窗口**（见 _set_translucent 的说明）。
-        # 下拉列表/菜单的可读性由浮层守卫单独钉住（ui/theme.py 的 _PopupKeeper），
-        # 不依赖"窗口不透明"。
-        _set_translucent(window, True)
         theme_module.unstack_viewports(window)
         theme_module.thin_containers(window)
     else:
-        _set_translucent(window, False)
         theme_module.restack_viewports(window)
 
 
 def erase_damage(widget: Any, event: Any, color: Any = None) -> None:
-    """把这次要重绘的区域**重填成窗口底色**，再让正常绘制往上叠。
+    """把这次要重绘的区域**重填成底色**，再让正常绘制往上叠。
 
-    为什么必须重填：窗口半透明（`WA_TranslucentBackground`）时，它的底色是**带 alpha** 的，
-    正常绘制是"混合"而不是"覆盖"。滚动或重排后只重绘一块区域时，上一次留下的像素会透过来 ——
-    屏幕上就是**重影**（用户报的"半透明又成这种重影的了"）。
+    为什么必须重填：底色层是"混合"画上去的，滚动或重排后只重绘一块区域时，上一次留下的
+    像素会透过来 —— 屏幕上就是**重影**（用户报的"半透明又成这种重影的了"）。
     重填用 `CompositionMode_Source`：它是"替换"，不受 alpha 影响。
 
-    填的是**窗口自己的底色**（不是透明）：填透明会把 Qt 在 paintEvent 之前画好的窗口底色
-    一并抹掉，边角处就成了"没有背景的窟窿"。
+    填的颜色必须是**不透明**的实色（窗口现在始终不透明）：填带 alpha 的色会挖出窟窿。
+    """
+    from PySide6.QtGui import QColor, QPainter
+
+    fill = color if color is not None else QColor(0, 0, 0, 0)
+    painter = QPainter(widget)
+    painter.save()
+    try:
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(event.rect(), fill)
+    finally:
+        # **必须恢复**：合成模式是画笔状态，会跟着这次绘制一路传下去 ——
+        # 留在 Source 上，后面所有绘制都变成"替换"，半透明就整体失效
+        # （实测：留在 Source 上时窗口渲染不再与背景混合，透出 0%）。
+        painter.restore()
+        painter.end()
+
+
+# 说明：这里**曾经**有 enable/disable_translucent 与 try_enable_blur（Windows 走 DWM、
+# KDE 走 KWin）。两条路在真实机器上都靠不住：
+#   1. Windows 上 `WA_TranslucentBackground` 必须搭配**无边框窗口**才生效
+#      （Qt 的已知限制），而我们保留原生标题栏 —— 于是客户区永远不透明；
+#   2. Windows 11 的 DWM 亚克力要求窗口**没有重定向位图**（WS_EX_NOREDIRECTIONBITMAP），
+#      Qt 的普通窗口有，所以 DwmSetWindowAttribute 即使返回成功，背景也显示不出来。
+# 结论：两个"透明"效果都改成**界面自绘底色**（见 ui/acrylic.py）：窗口保持不透明，
+# 半透明 = 壁纸不模糊 + 淡色调，亚克力 = 壁纸模糊 + 浓色调。两端行为一致，也不依赖合成器。
+
+
+def erase_damage(widget: Any, event: Any, color: Any = None) -> None:
+    """把这次要重绘的区域**重填成底色**，再让正常绘制往上叠。
+
+    为什么必须重填：底色层是"混合"画上去的，滚动或重排后只重绘一块区域时，上一次留下的
+    像素会透过来 —— 屏幕上就是**重影**（用户报的"半透明又成这种重影的了"）。
+    重填用 `CompositionMode_Source`：它是"替换"，不受 alpha 影响。
+
+    填的颜色必须是**不透明**的实色（窗口现在始终不透明）：填带 alpha 的色会挖出窟窿。
     """
     from PySide6.QtGui import QColor, QPainter
 
