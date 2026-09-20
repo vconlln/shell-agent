@@ -473,3 +473,38 @@ QThread: Destroyed while thread '' is still running
 测试 `tests/test_workers.py` 6 条：不丢引用、重复 track 幂等、超时如实上报、
 以及两条**子进程**用例把闸门行为钉住（睡 1s 的线程必须被等到；睡 10s 的线程必须
 在远小于 10s 内退出且退出码为 0）。变异验证：把闸门改成直接返回，第一条立刻转红。
+
+---
+
+## §20 可切换的后端 agent（2026-09-19 增补）
+
+**起因**：用户问"opencode 可不可以换成其他 agent，比如 codeagent（基于 Claude Code 改造，启动命令就是
+`codeagent`）"，随后要求"增加切换后端 agent 的按钮选项，想适配多个后端"。
+
+### 为什么这件事在本项目里代价可控
+
+agent 从第一天起就藏在 `ports.py` 的 Protocol 后面（`start/resume/generate/chat/abort/dispose`），
+引擎、界面、会话与模型面板都只认这组方法。换后端 = 换一个实现，不动上层。
+
+### 分层
+
+| 位置 | 职责 |
+| --- | --- |
+| `agent_backends/backends/<id>.py` | **一个后端一个文件**：显示名、默认命令、版本探测命令、模型 flag、权限相关 flags 与禁用工具清单、是否需要 serve、工厂函数 |
+| `agent_backends/registry.py` | 只做"收集这些文件 + 按 id 查 + 构建适配器"；未知 id 明确报错，不静默回退 |
+| `agent_backends/cli_agent.py` | 一套命令行适配器（Claude Code 风格 flags），`claude` 与 `codeagent` 共用；**不写后端分支** |
+| `orchestrator/cli_contract.py` | 命令行后端的**文本契约**：提示词里的输出格式要求 + 解析器 |
+
+### 与 opencode 那条路的唯一实质差异：结构化输出
+
+opencode 支持 `format: json_schema`，响应里直接给结构化对象；命令行 agent 没有这个能力。
+所以命令行后端改用**文本契约**：模型把脚本正文、取舍说明、假设分别放在
+`===TU-SCRIPT===` / `===TU-NOTES===` / `===TU-ASSUMPTIONS===` / `===TU-END===` 之间，
+由 `cli_contract.parse_cli_response()` 解析成 `GeneratedScript`；缺段或空脚本要抛明确异常。
+脚本正文里的 `# @@TU:BODY@@` 锚点照旧，锚点校验仍由引擎侧做（`orchestrator/contract.py`）。
+
+### 权限收敛（安全模型的地基，不因换后端而放宽）
+
+命令行适配器默认用 `--disallowedTools` 禁掉执行类工具（并按需设置 `--permission-mode`）：
+**agent 只写、引擎唯一执行**这条不变。取消用杀整棵进程树实现（POSIX 用新会话 + `killpg`，
+Windows 用新进程组 + `taskkill /T /F`）。
