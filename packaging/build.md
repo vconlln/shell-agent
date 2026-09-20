@@ -264,6 +264,27 @@ opencode auth login
 | 产物自检 | `--self-test` 两边跑同一套检查：构造并绘制主窗口、四种背景效果的样式表与调色板、**自绘模糊跑一遍"图片 → 模糊 → 铺层"**、各模式窗口渲染非空 |
 | 插件抽查 | 两边都查"平台插件 + `imageformats/jpeg`" |
 
+### 9.2.1 `build.bat` 为什么是纯 ASCII（2026-09-19 实测）
+
+Windows 上跑这个脚本报过：
+
+```
+'这里不设' is not recognized as an internal or external command
+'�明"。与 Linux 脚本抽查同一组能力。' is not recognized ...
+'peg.dll' is not recognized ...
+```
+
+原因不是脚本里的命令写错了，而是 **cmd 按"当前代码页"逐行读 .bat**：文件是 UTF-8，
+里面有中文注释与中文提示，多字节字符在读取时被从中间切断，切下来的碎片就被当成命令执行。
+`chcp 65001` 也救不了（代码页是在读取过程中切换的，前后都不稳）。
+
+所以 `packaging/windows/build.bat` 现在**整份文件只有 ASCII**：命令、注释、提示语全是英文，
+中文说明放在本文件里。契约测试会直接 `decode("ascii")`，加一个中文字符就红。
+
+顺带把插件抽查改成**递归搜索**（`dir /s /b` / `find`）：原来在 Windows 上写死的
+`_internal\PySide6\Qt\plugins\...` 在那台机器上根本不存在，于是明明产物是好的却报"缺插件"。
+现在两个平台都在产物目录下递归找平台插件与 jpeg 解码插件，找不到才判失败。
+
 ### 9.2 天生不同、且**故意**不同的地方
 
 | 差异 | 原因 | 会不会导致观感不同 |

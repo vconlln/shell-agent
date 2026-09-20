@@ -60,11 +60,15 @@ def test_platform_build_scripts_point_at_the_shared_spec_and_their_own_dist():
     # 批处理必须是 CRLF：老版本 cmd 对 LF-only 的 .bat 处理有坑
     assert b"\r\n" in (repo / "packaging" / "windows" / "build.bat").read_bytes()
 
-    # 批处理的命令必须是纯 ASCII（中文只出现在 echo/rem 里，否则代码页切换会咬人）
-    for line in bat.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.lower().startswith(("rem", "echo", "::")):
-            assert stripped.isascii(), f"命令里出现非 ASCII 字符：{line!r}"
+    # 批处理必须**整份**都是 ASCII。
+    # 用户实测踩到过：UTF-8 的 .bat 里放中文，cmd 按当前代码页逐行读，多字节字符会被
+    # 从中间切断，注释碎片被当成命令执行（报 '...' is not recognized）。中文说明写在
+    # packaging/build.md 里，脚本本身只用 ASCII。
+    try:
+        batch_bytes = (repo / "packaging" / "windows" / "build.bat").read_bytes()
+        batch_bytes.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise AssertionError(f"packaging/windows/build.bat 里出现了非 ASCII 字节：{error}") from error
 
 
 def test_linux_build_script_is_executable():
@@ -105,24 +109,33 @@ def test_self_test_fails_when_a_backdrop_mode_cannot_be_built(monkeypatch):
 
 
 def test_build_scripts_check_the_same_qt_plugins():
-    """两个平台的打包脚本要抽查**同一组能力**的 Qt 插件。
+    """两个平台的打包脚本要抽查**同一组能力**的 Qt 插件，而且都用递归搜索。
 
     抽查的意义：漏收插件时 PyInstaller 不报错 —— 少平台插件窗口起不来，少 imageformats
     则自绘模糊静默失效（退化成半透明）。两边抽查同一组，才不会出现"Linux 产物好着、
     Windows 产物少了 jpeg 解码"这种只有用户才会遇到的不一致。
+
+    用**递归搜索**而不是写死路径，是因为用户实测在 Windows 上写死的路径根本不存在
+    （PySide6 各版本/wheel 把插件放在哪并不固定）：检查本身不能因为布局不同就误判失败。
     """
-    import re
     from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
     sh = (repo / "packaging" / "linux" / "build.sh").read_text(encoding="utf-8")
     bat = (repo / "packaging" / "windows" / "build.bat").read_text(encoding="utf-8")
 
-    assert "platforms/libqxcb.so" in sh and "imageformats/libqjpeg.so" in sh
-    assert re.search(r"platforms\\qwindows\.dll", bat), "Windows 脚本没抽查平台插件"
-    assert re.search(r"imageformats\\qjpeg\.dll", bat), "Windows 脚本没抽查 jpeg 解码插件"
-    for label, script in (("build.sh", sh), ("build.bat", bat)):
-        assert "抽查" in script, f"{label} 里没有插件抽查这一步"
+    # Linux：递归找 libqxcb.so / libqwayland.so / libqjpeg.so
+    assert "find " in sh and "-print -quit" in sh, "Linux 脚本没做递归搜索"
+    for name in ("libqxcb.so", "libqwayland.so", "libqjpeg.so"):
+        assert name in sh, f"Linux 脚本没抽查 {name}"
+
+    # Windows：递归找 qwindows.dll / qjpeg.dll
+    assert "dir /s /b" in bat, "Windows 脚本没做递归搜索"
+    assert "qwindows.dll" in bat and "qjpeg.dll" in bat, "Windows 脚本没抽查平台/图片插件"
+
+    # 两边都要有这一步，并且失败就判整体失败
+    assert "插件抽查" in sh
+    assert "missing_platform" in bat and "missing_jpeg" in bat
 
 
 def test_ui_layer_keeps_its_platform_branches_in_one_place():

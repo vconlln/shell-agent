@@ -1,112 +1,131 @@
 @echo off
 rem ============================================================================
-rem  一键打包（Windows）：建 venv - 装依赖 - PyInstaller - 产物自检
+rem  One-click build (Windows): venv - deps - PyInstaller - artifact self-test
 rem
-rem  产物：dist\windows\tu-shell-agent\tu-shell-agent.exe
-rem  用法：双击本文件，或在 cmd 里运行 packaging\windows\build.bat
+rem  Output: dist\windows\tu-shell-agent\tu-shell-agent.exe
+rem  Usage : double-click this file, or run packaging\windows\build.bat in cmd
 rem
-rem  ！！本脚本没有在 Windows 上执行过！！ 开发机是 Linux，而 PyInstaller 不支持
-rem  交叉编译，所以 Windows 的 exe 只能在 Windows 上打，这个脚本也就无法在开发机上验证。
-rem  它只是把 packaging\build.md 第 1-3 节的命令按顺序抄了一遍；若某一步失败，
-rem  请打开 build.md 逐条手动跑，那里的每一步都注明了原因。
+rem  THIS FILE IS INTENTIONALLY PURE ASCII -- do not add non-ASCII text.
+rem  cmd.exe reads a .bat with the active code page. A UTF-8 .bat that contains
+rem  multi-byte text gets split mid-character while being read, and fragments of
+rem  comments are then executed as commands, e.g.
+rem      '...' is not recognized as an internal or external command
+rem  (observed on a Chinese Windows with code page 936). All Chinese
+rem  explanations live in packaging/build.md instead.
 rem
-rem  与它对应的是 Linux 的 packaging/linux/build.sh（那个已在 Linux 上实测通过）。
-rem  两者共用同一份 spec 与入口：packaging\tu-shell-agent.spec + packaging\entry.py
+rem  NOT RUN ON WINDOWS YET: PyInstaller cannot cross-compile, so this script can
+rem  only be verified on a Windows machine. It mirrors packaging/linux/build.sh
+rem  step by step on purpose (same spec, same steps, same self-test, same plugin
+rem  check), so the two platforms cannot drift apart.
 rem ============================================================================
 
-rem 65001 = UTF-8：本文件里的中文提示按 UTF-8 存盘，先把控制台代码页切过去，
-rem 否则中文提示会显示成乱码。注意命令本身全是 ASCII，中文只出现在 echo/rem 里，
-rem 且提示文字里不含括号、&、管道、百分号 —— 那些字符在批处理里有语法含义。
-chcp 65001 >nul
 setlocal
 pushd "%~dp0..\.." || goto :fail
-echo 仓库根目录：%CD%
+echo Repo root: %CD%
 echo.
 
-rem ---- 步骤 1/4：虚拟环境 ----------------------------------------------------
+rem ---- Step 1/5: virtual environment -----------------------------------------
 if exist ".venv\Scripts\python.exe" goto :have_venv
-echo [1/4] 创建虚拟环境 .venv ...
+echo [1/5] Creating virtual environment .venv ...
 py -3 -m venv .venv
 if exist ".venv\Scripts\python.exe" goto :deps
-echo py 启动器不可用，改用 python 再试一次 ...
+echo "py" launcher not available, retrying with "python" ...
 python -m venv .venv || goto :fail
 goto :deps
 
 :have_venv
-echo [1/4] 已存在 .venv，跳过创建
+echo [1/5] .venv already exists, skipping creation
 
-rem ---- 步骤 2/4：依赖 --------------------------------------------------------
+rem ---- Step 2/5: dependencies ------------------------------------------------
 :deps
-echo [2/4] 准备依赖 ...
-rem 三步的失败后果不一样：升级 pip 失败只警告；PySide6 与 pyinstaller 缺失就打不出产物；
-rem 而"可编辑安装项目"只影响跑测试与控制台入口，失败不该把整次打包判死
-rem （网络抖动时它会因为拉不到 setuptools 而失败，但产物其实能出）。
+echo [2/5] Preparing dependencies ...
+rem The three steps below have different consequences: upgrading pip only warns;
+rem PySide6 and pyinstaller are required to produce an artifact; the editable
+rem install only affects running the tests and the console entry point, so a
+rem failure there (usually a flaky network) must not fail the whole build.
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
-echo   - PySide6 与 pyinstaller，打包必需
+echo   - PySide6 and pyinstaller (required)
 ".venv\Scripts\python.exe" -m pip install "PySide6>=6.11" pyinstaller || goto :fail
-echo   - 项目本身与测试依赖，可选，失败不影响出产物
-rem pyproject 里用 [tool.setuptools.packages.find] 把自动发现限定成 tu_shell_agent*，
-rem 否则平铺布局会因为"发现多个顶层包"直接拒绝构建。
+echo   - the project itself and test deps (optional)
 ".venv\Scripts\python.exe" -m pip install -e ".[ui,dev]"
-rem 用 goto 而不是 `if errorlevel 1 echo <中文>`：让中文只出现在 echo 行上，
-rem 脚本契约测试才能用一条简单规则守住"命令全 ASCII"（中文在 if 里同样是文本，
-rem 但规则要区分"命令"和"被 echo 的文本"就得解析批处理语法，太脆）。
 if not errorlevel 1 goto :deps_ok
-echo   ！可编辑安装失败，多半是网络或代理拉不到构建依赖，打包继续
+echo   ! editable install failed (network or proxy); continuing with packaging
 :deps_ok
 
-rem ---- 步骤 3/4：打包 --------------------------------------------------------
-echo [3/4] 打包：one-folder ...
-rem --distpath / --workpath 相对当前目录解析，所以前面 pushd 到了仓库根。
-rem 两个平台分目录：dist\windows 与 dist/linux 各自独立，互不覆盖。
+rem ---- Step 3/5: package -----------------------------------------------------
+echo [3/5] Packaging (one-folder) ...
+rem --distpath / --workpath are resolved relative to the current directory, so the
+rem pushd above is required. The two platforms use separate output directories:
+rem dist\windows and dist/linux never overwrite each other.
 ".venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm --distpath "dist\windows" --workpath "build\windows" "packaging\tu-shell-agent.spec" || goto :fail
 
-rem ---- 步骤 4/4：产物自检 ----------------------------------------------------
-set "APP=dist\windows\tu-shell-agent\tu-shell-agent.exe"
+rem ---- Step 4/5: artifact self-test ------------------------------------------
+set "APPDIR=dist\windows\tu-shell-agent"
+set "APP=%APPDIR%\tu-shell-agent.exe"
 if not exist "%APP%" goto :missing
-echo [4/4] 产物自检，应打印 exit=0 ...
-rem spec 里 console=False，产物是 GUI 子系统 exe：直接调用不会等待、也读不到退出码，
-rem 所以必须用 start /wait 等它跑完。自检会短暂闪出一个窗口后自己退出，属正常。
-rem 这里不设 QT_QPA_PLATFORM：Windows 上直接开窗更接近真实使用，也少依赖一个插件。
+echo [4/5] Self-test of the artifact (expects exit=0) ...
+rem The spec sets console=False, so the artifact is a GUI subsystem exe: calling it
+rem directly neither waits nor exposes an exit code, hence "start /wait".
+rem QT_QPA_PLATFORM is not set here: opening a real window is closer to actual use
+rem and depends on one Qt plugin less.
 start /wait "" "%APP%" --self-test
 echo self-test exit=%ERRORLEVEL%
 if not "%ERRORLEVEL%"=="0" goto :selftest_failed
 
-rem ---- 插件抽查：PyInstaller 漏收 Qt 插件时不会报错，后果是"窗口起不来"或
-rem      "自绘模糊读不了壁纸、悄悄退化成半透明"。与 Linux 脚本抽查同一组能力。
-set "PLUGINS=dist\windows\tu-shell-agent\_internal\PySide6\Qt\plugins"
-if not exist "%PLUGINS%\platforms\qwindows.dll" goto :missing_plugins
-if not exist "%PLUGINS%\imageformats\qjpeg.dll" goto :missing_plugins
-echo 插件抽查通过：platforms 与 imageformats/jpeg 都在
+rem ---- Step 5/5: Qt plugin spot-check ----------------------------------------
+rem PyInstaller does not fail when a Qt plugin is missing. The window then either
+rem refuses to start (platform plugin) or the self-drawn acrylic background
+rem silently degrades to plain translucency (jpeg decoding) -- both only show up
+rem when a human runs the app. The search below is recursive on purpose: it must
+rem not depend on where the PySide6 wheel keeps its plugins.
+echo [5/5] Checking that the Qt plugins were collected ...
+set "HAVE_PLATFORM="
+for /f "delims=" %%F in ('dir /s /b "%APPDIR%\qwindows.dll" 2^>nul') do set "HAVE_PLATFORM=%%F"
+if not defined HAVE_PLATFORM goto :missing_platform
+set "HAVE_JPEG="
+for /f "delims=" %%F in ('dir /s /b "%APPDIR%\qjpeg.dll" 2^>nul') do set "HAVE_JPEG=%%F"
+if not defined HAVE_JPEG goto :missing_jpeg
+echo   Qt platform plugin : %HAVE_PLATFORM%
+echo   Qt image plugin    : %HAVE_JPEG%
+
 echo.
 echo ============================================================
-echo  产物：%CD%\%APP%
-echo  exe 体积（字节）：
-for %%F in ("%APP%") do echo   %%~zF
-echo  双击它即可打开界面
-echo  生成脚本需要 opencode 已登录：先跑一次  opencode auth login
-echo  手测清单见 packaging\build.md 第 6 节
+echo  Artifact: %CD%\%APP%
+for %%F in ("%APP%") do echo  exe size: %%~zF bytes
+echo  Double-click it to open the interface
+echo  Generating scripts requires a logged-in opencode: opencode auth login
+echo  Manual test checklist: packaging\build.md section 6
 echo ============================================================
 popd
 pause
 exit /b 0
 
 :missing
-echo *** 打包结束但没有找到 %APP% ***
+echo *** FAILED: packaging finished but %APP% does not exist ***
 goto :fail
 
 :selftest_failed
-echo *** 自检没有返回 0：产物能生成但起不来，对照 packaging\build.md 第 3 节排错 ***
+echo *** FAILED: the self-test did not return 0; the artifact builds but does not run.
+echo     See packaging\build.md section 3 for troubleshooting.
 goto :fail
 
-:missing_plugins
-echo *** 缺 Qt 插件：platforms\qwindows.dll 缺失会导致窗口起不来；
-echo     imageformats\qjpeg.dll 缺失会让自绘模糊静默失效 ***
+:missing_platform
+echo *** FAILED: qwindows.dll (Qt platform plugin) is missing from the artifact.
+echo     The exe will not start without it.
+echo     See packaging\build.md section 4 (which warnings are noise, which are real).
+goto :fail
+
+:missing_jpeg
+echo *** FAILED: qjpeg.dll (Qt image format plugin) is missing from the artifact.
+echo     The self-drawn acrylic background needs it to read the wallpaper; without
+echo     it the app silently falls back to plain translucency.
+echo     See packaging\build.md section 4 (which warnings are noise, which are real).
 goto :fail
 
 :fail
 echo.
-echo *** 失败：看上面的输出；对照 packaging\build.md 的前置与第 8 节排错 ***
+echo *** FAILED: see the output above; packaging\build.md section 1 has the
+echo     prerequisites and section 8 covers troubleshooting. ***
 popd
 pause
 exit /b 1
