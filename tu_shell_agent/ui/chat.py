@@ -51,6 +51,8 @@ class ChatPanel(QWidget):
     session_selected = Signal(str)    # 会话下拉选中（携带运行目录）
     sessions_refresh_requested = Signal()
     new_session_requested = Signal()
+    proposal_accepted = Signal()       # 用户接受模型提议的脚本
+    proposal_rejected = Signal()       # 用户拒绝（中栏脚本保持不动）
     model_changed = Signal(str)        # 对话用的模型改了（provider/model，空 = 用会话默认）
     models_requested = Signal()        # 需要可用模型列表（首次显示 / 点刷新）
 
@@ -138,8 +140,33 @@ class ChatPanel(QWidget):
         buttons.addWidget(self.model_combo)
         buttons.addWidget(self.model_button)
 
+        # ── 模型提议栏：像 Cursor 那样给出"接受 / 拒绝" ──────────────────
+        # 差异正文显示在**中栏**（那里有地方、也已有一套红绿 diff 渲染），
+        # 这里只放一行摘要与两个按钮 —— 工具区本来就矮，不该再塞一个大 diff 框。
+        self.proposal_label = QLabel()
+        self.proposal_label.setObjectName("proposalLabel")
+        self.proposal_label.setWordWrap(True)
+        self.accept_button = QPushButton("接受")
+        self.accept_button.setObjectName("proposalAcceptButton")
+        self.reject_button = QPushButton("拒绝")
+        self.reject_button.setObjectName("proposalRejectButton")
+        self.accept_button.clicked.connect(lambda: self.proposal_accepted.emit())
+        self.reject_button.clicked.connect(lambda: self.proposal_rejected.emit())
+        self.proposal_bar = QWidget()
+        self.proposal_bar.setObjectName("proposalBar")
+        proposal_layout = QHBoxLayout(self.proposal_bar)
+        proposal_layout.setContentsMargins(0, 0, 0, 0)
+        proposal_layout.addWidget(self.proposal_label, 1)
+        proposal_layout.addWidget(self.accept_button)
+        proposal_layout.addWidget(self.reject_button)
+        self.proposal_bar.setVisible(False)
+        # 状态位单独记：`isVisible()` 在父级（工具区页签）没被选中时永远是 False，
+        # 用它当"有没有提议"会把"在别的页签里等着"误判成"没有提议"（用例里踩到过）。
+        self._has_proposal = False
+
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
+        layout.addWidget(self.proposal_bar)
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.input)
@@ -166,6 +193,23 @@ class ChatPanel(QWidget):
             self.session_combo.setCurrentIndex(index if index >= 0 else 0)
         finally:
             self.session_combo.blockSignals(False)
+
+    def show_proposal(self, summary: str) -> None:
+        """显示"模型提出了修改"这一行（差异正文在中栏），带接受/拒绝。"""
+        self.proposal_label.setText(summary)
+        self.proposal_bar.setVisible(True)
+        self._has_proposal = True
+
+    def clear_proposal(self) -> None:
+        self.proposal_bar.setVisible(False)
+        # 状态位单独记：`isVisible()` 在父级（工具区页签）没被选中时永远是 False，
+        # 用它当"有没有提议"会把"在别的页签里等着"误判成"没有提议"（用例里踩到过）。
+        self._has_proposal = False
+        self.proposal_label.clear()
+
+    def has_proposal(self) -> bool:
+        """有没有待决定的提议（与"当前是否可见"无关：它可能正在别的页签里等着）。"""
+        return self._has_proposal
 
     def set_models(self, models) -> None:
         """铺可用模型列表；**保留当前选择**（刷新不该把已选的模型弄丢）。"""

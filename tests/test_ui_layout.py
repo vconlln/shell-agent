@@ -292,20 +292,25 @@ def test_section_header_is_plain_text(window, qtbot):
     assert section.header.property("collapsed") == "false"
 
 
-def test_left_pane_scrolls_instead_of_clipping_when_short(window, qtbot):
+def test_left_pane_scrolls_instead_of_clipping_when_short(qtbot):
     """左栏空间不够时要能**滚动**，而不是把内容裁掉看不见。
 
-    隔离的是 scroll.py 那层包装：没有它，QSS 的 min-height 会让控件保持高度、但整块内容
-    溢出面板被裁切（下半部分永远看不到，也没法滚过去）。
+    在**控件层面**隔离这件事（这正是 `scroll.py` 那层的职责）：把左栏直接缩到远小于内容高度。
+    不要再借窗口最小尺寸制造溢出 —— 2026-09-20 为高 DPI 下调各处最小高度之后，
+    窗口最小尺寸下左栏内容已经放得下（滚动范围 0），那条前提就没了。
     """
     from PySide6.QtWidgets import QScrollArea
 
-    area = window.left_pane.findChild(QScrollArea)
-    assert area is not None, "左栏内容没有包在滚动区里"
+    from tu_shell_agent.ui.panes.left import LeftPane
 
-    window.resize(window.minimumSize())
-    qtbot.wait(50)
-    # 内容比可视区高 → 必须出现可滚动范围（这正是"能不能看到下面那半"的关键）
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+    pane.resize(260, 180)          # 远小于内容高度
+    pane.show()
+    qtbot.wait(20)
+
+    area = pane.findChild(QScrollArea)
+    assert area is not None, "左栏内容没有包在滚动区里"
     assert area.verticalScrollBar().maximum() > 0, "内容溢出时没有可滚动范围（会被裁掉）"
 
     area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())

@@ -25,6 +25,7 @@ from .panes.templates import TemplatesPane
 from .pages.history import HistoryPage
 from .pages.selfcheck import SelfCheckPage
 from .chat import ChatPanel
+from .widgets.collapsible import CollapsibleSection
 from .pages.settings_page import SettingsPage
 from . import acrylic as acrylic_module
 from . import backdrop as backdrop_module
@@ -45,6 +46,17 @@ def _titled(widget: QWidget, title: str) -> QWidget:
     header = QLabel(title)
     header.setObjectName("paneHeader")
     layout.addWidget(header)
+    layout.addWidget(widget, 1)
+    return container
+
+
+def _card(widget: QWidget) -> QWidget:
+    """给控件套一张卡片（大圆角 + 极淡边框），**不加栏头** —— 栏头由内部控件自己提供。"""
+    container = QWidget()
+    container.setObjectName("paneCard")
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
     layout.addWidget(widget, 1)
     return container
 
@@ -167,8 +179,15 @@ class MainWindow(QMainWindow):
         self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
         self.vertical_splitter.setObjectName("verticalSplitter")
         self.vertical_splitter.addWidget(self.splitter)
-        self.vertical_splitter.addWidget(_titled(self.tool_tabs, "工具区"))
-        self.vertical_splitter.setSizes([560, 320])
+        # 工具区默认**收起**，只留一行标题：用户反馈"工具区有点太占用空间了，
+        # 软件的主要作用是写 shell 脚本"。点它的标题、或点某个页签、或需要看提议时
+        # （见 focus_tool_tab）会自动展开，展开的高度记在分割器尺寸里（跟其它尺寸一起持久化）。
+        self.tool_section = CollapsibleSection("工具区", self.tool_tabs)
+        self.tool_section.setObjectName("toolSection")
+        self.vertical_splitter.addWidget(_card(self.tool_section))
+        self.vertical_splitter.setSizes([900, 40])
+        self.tool_section.header.mousePressEvent = self._on_tool_header_clicked  # type: ignore[method-assign]
+        self.tool_tabs.currentChanged.connect(lambda _index: self.expand_tool_area())
 
         root_layout = QVBoxLayout()
         root_layout.addWidget(self.vertical_splitter, 1)
@@ -235,6 +254,58 @@ class MainWindow(QMainWindow):
         self.controller = None
         if wire_controller:
             self._wire_controller()
+
+    def expand_tool_area(self, *, minimum: int = 300) -> bool:
+        """展开工具区（已展开则不动），返回是否发生了变化。
+
+        默认收起是为了把高度让给脚本视图；一旦用户真的要在这里看东西（点页签、
+        或对话里出现需要他决定的提议），就必须自动展开 —— 否则"东西在那儿但他看不见"。
+        """
+        changed = False
+        if self.tool_section.is_collapsed():
+            self.tool_section.set_collapsed(False)
+            changed = True
+        if changed:
+            self._set_tool_area_height(minimum)
+            self._persist_tool_area(collapsed=False)
+        return changed
+
+    def _set_tool_area_height(self, height: int) -> None:
+        """把工具区设成指定高度。**必须等布局更新之后**再调（见 showEvent 的同一坑）。"""
+        def apply() -> None:
+            sizes = self.vertical_splitter.sizes()
+            if len(sizes) != 2:
+                return
+            total = sum(sizes)
+            tool = max(40, min(height, max(40, total - 240)))
+            self.vertical_splitter.setSizes([max(1, total - tool), tool])
+
+        QTimer.singleShot(0, apply)
+
+    def _persist_tool_area(self, *, collapsed: bool) -> None:
+        if getattr(self.settings, "tool_area_collapsed", True) == collapsed:
+            return
+        try:
+            self.settings.tool_area_collapsed = collapsed
+            self.settings.save()
+        except (OSError, ValueError) as error:
+            self.set_status(f"工具区状态未能保存：{error}")
+
+    def focus_tool_tab(self, page: QWidget) -> None:
+        """切到某个工具页并确保工具区展开（提议出现、点"把脚本放进中栏"这类流程用它）。"""
+        index = self.tool_tabs.indexOf(page)
+        if index >= 0:
+            self.tool_tabs.setCurrentIndex(index)
+        self.expand_tool_area()
+
+    def _on_tool_header_clicked(self, event) -> None:
+        """点"工具区"标题：收起/展开切换（收起是默认，所以要能给用户收回去）。"""
+        if self.tool_section.is_collapsed():
+            self.expand_tool_area()
+            return
+        self.tool_section.set_collapsed(True)
+        self._set_tool_area_height(40)
+        self._persist_tool_area(collapsed=True)
 
     def _wire_scroll_repaints(self) -> None:
         """任何滚动条动一下就让整窗重绘一次（半透明窗口防重影，见 paintEvent 的说明）。"""
@@ -416,6 +487,15 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as error:
             self.set_status(f"布局未能保存：{error}")
 
+    def _apply_tool_area_state(self) -> None:
+        """按设置里的"收起/展开"落地工具区高度（默认收起 = 只留标题那一条）。"""
+        if getattr(self.settings, "tool_area_collapsed", True):
+            self.tool_section.set_collapsed(True)
+            self._set_tool_area_height(40)
+        else:
+            self.tool_section.set_collapsed(False)
+            self._set_tool_area_height(300)
+
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         """首次显示时还原布局尺寸。
 
@@ -427,6 +507,9 @@ class MainWindow(QMainWindow):
         if not self._layout_restored:
             self._layout_restored = True
             self._restore_layout()
+            # 工具区状态在**还原布局之后**落地：它是"收起/展开"的开关，
+            # 优先于上次拖出来的分割器尺寸（否则用户收起过、下次开窗又变回一大块）
+            self._apply_tool_area_state()
 
     def _restore_layout(self) -> None:
         """按上次拖出来的尺寸还原；没存过或存坏了就用默认比例。"""

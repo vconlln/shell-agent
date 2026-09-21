@@ -60,6 +60,23 @@ def render_diff_html(old: str, new: str) -> str:
     return header + "".join(rows)
 
 
+def diff_counts(old: str, new: str) -> tuple[int, int]:
+    """(新增行数, 删除行数) —— 与 `render_diff_html` 用**同一套**判定。
+
+    单独抽出来是因为"提议栏"要显示 +N −M，而它不该去解析自己刚生成的 HTML。
+    """
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    return added, removed
+
+
 def _row(
     css_class: str, style: str, marker: str, text: str, old_no: int | None, new_no: int | None
 ) -> str:

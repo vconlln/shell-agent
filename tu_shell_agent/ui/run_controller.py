@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +62,9 @@ _NOTES_SEPARATOR = "\n\n## 假设\n"
 # 关窗时没能在超时内停下的线程挂在这里，由模块级列表持有强引用。
 # Qt 的硬规则：QThread 在仍运行时被析构 = 进程 abort；保留引用是唯一不崩的选择。
 _ORPHANS: list[Any] = []
+
+# 流式期间的提议刷新间隔：逐字重算 diff 会把界面拖卡，400ms 已经够"边写边看"。
+_PROPOSAL_THROTTLE_S = 0.4
 
 
 def _split_notes(text: str) -> tuple[str, tuple[str, ...]]:
@@ -148,6 +152,8 @@ class RunController(QObject):
         # 用户点了「新对话」：下一次提问**不要**又自动恢复最近那段（否则点了等于没点）
         self._force_new_chat = False
         self._chat_model = ""          # 这段对话用的模型（provider/model，空 = 沿用会话）
+        self._pending_proposal = ""    # 模型提出、还没被接受/拒绝的脚本
+        self._proposal_at = 0.0        # 上次刷新提议的时间（流式期间节流用）
         self._config: RunConfig | None = None
         self._template: TemplateSpec | None = None
         self._plan_text = ""
@@ -178,6 +184,8 @@ class RunController(QObject):
         chat.send_requested.connect(self.ask)
         chat.cancel_requested.connect(self.cancel_chat)
         chat.script_extracted.connect(self._on_script_extracted)
+        chat.proposal_accepted.connect(self.accept_proposal)
+        chat.proposal_rejected.connect(self.reject_proposal)
         chat.session_selected.connect(self._on_session_selected)
         chat.model_changed.connect(self._on_chat_model_changed)
         chat.models_requested.connect(self._on_models_requested)
@@ -440,7 +448,7 @@ class RunController(QObject):
             self._chat_model or str(self._config_from_ui().model or ""),
         )
         self._chat_reply: list[str] = []
-        worker.delta.connect(chat.append_delta)
+        worker.delta.connect(lambda chunk: self._on_chat_delta(chunk, chat))
         worker.done.connect(self._on_chat_done)
         worker.failed.connect(self._on_chat_failed)
         self._chat_worker = worker
@@ -545,6 +553,68 @@ class RunController(QObject):
         RunStore(run_dir).init()
         return run_dir
 
+    def _on_chat_delta(self, chunk: str, chat: Any) -> None:
+        """流式增量：先把文字追加到记录区，再**节流**刷新"模型提议"的差异。
+
+        为什么要节流：增量是逐字的，每来一个字就重算一次 diff + 重画中栏会把界面拖卡。
+        400ms 一次已经足够"边写边看"，而且只在**脚本块成型**时才更新。
+        """
+        chat.append_delta(chunk)
+        self._chat_reply.append(chunk)
+        now = time.monotonic()
+        if now - self._proposal_at < _PROPOSAL_THROTTLE_S:
+            return
+        self._proposal_at = now
+        self._offer_proposal("".join(self._chat_reply), chat=chat)
+
+    def _offer_proposal(self, text: str, *, chat: Any = None) -> bool:
+        """回复里出现了脚本、且与中栏当前脚本不同 → 摆出"接受 / 拒绝"。
+
+        差异显示在**中栏**（红删绿增），对话面板只放摘要与两个按钮 —— 工具区本来就矮。
+        返回是否真的摆出了提议。
+        """
+        from .chat import extract_last_script
+
+        panel = chat if chat is not None else self.window.chat_panel
+        script = (extract_last_script(text) or "").strip()
+        center = self.window.center_pane
+        if not script or script == center.current_text().strip():
+            return False
+        added, removed = center.show_proposal(script)
+        self._pending_proposal = script
+        panel.show_proposal(
+            f"模型提出脚本修改：新增 {added} 行、删除 {removed} 行。"
+            "中栏已显示差异（红删绿增）；接受后放进中栏，再点「改后重跑」才会执行。"
+        )
+        panel.set_status("等待你的决定：接受或拒绝这次修改。")
+        # 把工具区展开并切到对话页：接受/拒绝的按钮在这里，藏在别的页签后面等于没问用户
+        self.window.focus_tool_tab(panel)
+        return True
+
+    def accept_proposal(self) -> None:
+        """接受提议：脚本进中栏，**不执行** —— 之后与手改脚本走同一条路（shellcheck + 确认）。"""
+        script = self._pending_proposal
+        chat = self.window.chat_panel
+        if not script:
+            self._clear_proposal()
+            return
+        self._clear_proposal()
+        self._on_script_extracted(script)
+        chat.set_status("已接受该修改；要跑它请点「改后重跑」。")
+
+    def reject_proposal(self) -> None:
+        """拒绝提议：中栏脚本保持不动，只在记录里留一句。"""
+        chat = self.window.chat_panel
+        self._clear_proposal()
+        chat.add_note("已拒绝这次修改，中栏脚本未改动。")
+        chat.set_status("已拒绝；可以继续提问或让它换个改法。")
+
+    def _clear_proposal(self) -> None:
+        self._pending_proposal = ""
+        self._proposal_at = 0.0
+        self.window.chat_panel.clear_proposal()
+        self.window.center_pane.clear_proposal()
+
     def _on_chat_done(self, reply: str) -> None:
         chat = self.window.chat_panel
         if not reply.strip():
@@ -552,7 +622,9 @@ class RunController(QObject):
         if self._run_dir:
             append_chat(self._run_dir, "model", reply)
         chat.set_busy(False)
-        chat.set_status("回复中的脚本可经「把最新脚本放进中栏」进行改后重跑。")
+        # 回复结束再定稿一次：流式期间可能因为节流错过了最后一段
+        if not self._offer_proposal(reply, chat=chat):
+            chat.set_status("回复中的脚本可经「把最新脚本放进中栏」进行改后重跑。")
 
     def _on_chat_failed(self, message: str) -> None:
         from ..opencode_adapter.errors import explain_provider_error

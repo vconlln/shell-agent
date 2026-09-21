@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..widgets.diff_view import render_diff_html
+from ..widgets.diff_view import diff_counts, render_diff_html
 from ..widgets.script_view import ScriptView
 from ..theme import DIFF_GUTTER_FG
 
@@ -66,7 +66,34 @@ class CenterPane(QWidget):
         self._current_round: int | None = None
         self._compare_with_previous = False
         self._compare_html = ""
+        self._proposal_html = ""
         self._refresh_compare()
+
+    # ── 模型提议（对话里给出脚本、等待用户接受/拒绝）──────────────────
+    def show_proposal(self, script: str) -> tuple[int, int]:
+        """把"模型提议的脚本"与**当前脚本**的差异显示在对比页，并切过去。
+
+        返回 (新增行数, 删除行数) —— 对话那边要拿它显示 +N −M。
+        这不改任何状态：接受与否由用户在对话面板里点，脚本只有被接受才进中栏。
+        """
+        current = self.current_text()
+        html = render_diff_html(current, script)
+        self._proposal_html = html
+        self.compare_view.setHtml(html)
+        self.tabs.setTabText(_COMPARE_TAB, "模型提议（未接受）")
+        self.tabs.setCurrentIndex(_COMPARE_TAB)
+        return diff_counts(current, script)
+
+    def proposal_html(self) -> str:
+        """当前提议的 diff HTML（空 = 没有提议）。测试与后续样式共用这份契约。"""
+        return self._proposal_html
+
+    def clear_proposal(self) -> None:
+        """撤掉提议展示：页签标题还原、回到「本轮」，对比页恢复成"对比上一轮"。"""
+        self._proposal_html = ""
+        self.tabs.setTabText(_COMPARE_TAB, "对比上一轮")
+        self._refresh_compare()
+        self.tabs.setCurrentIndex(_CURRENT_TAB)
 
     # ── 整屏重置 ──────────────────────────────────────────────────
     def reset(self) -> None:

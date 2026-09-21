@@ -115,9 +115,12 @@ def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     # 按 set 比：findChildren 的遍历顺序是实现细节，不是契约
-    # 排布调整后左栏改叫「方案与运行参数」（模板库移进了工具区），并多了「工具区」栏头
+    # 排布调整后左栏改叫「方案与运行参数」（模板库移进了工具区）。
+    # 工具区现在是**可折叠区块**（默认收起、把高度让给脚本），栏头对象名是 sectionHeader，
+    # 所以它不在 paneHeader 这一组里 —— 单独断言它的标题。
     headers = {label.text() for label in window.findChildren(QLabel, "paneHeader")}
-    assert headers == {"方案与运行参数", "脚本与轮次", "校验与输出", "工具区"}
+    assert headers == {"方案与运行参数", "脚本与轮次", "校验与输出"}
+    assert window.tool_section.header.text() == "工具区"
 
 
 def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):

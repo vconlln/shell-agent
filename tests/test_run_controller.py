@@ -986,8 +986,11 @@ def _wait_for_chat(qtbot, controller) -> None:
     **不能用 `controller._busy()`**：它只看引擎那个 worker，对话的 worker 是另一个字段，
     于是等待会立刻返回、断言跑在回复之前（写这两个用例时踩到过）。
     """
+    # 等"槽函数跑过"的可观察状态：发送按钮在 _on_chat_done 里重新可用。
+    # 只等线程停会让断言跑在 done 的队列投递之前（踩过假红）。
     qtbot.waitUntil(
-        lambda: controller._chat_worker is None or not controller._chat_worker.isRunning(),
+        lambda: controller.window.chat_panel.send_button.isEnabled()
+        and (controller._chat_worker is None or not controller._chat_worker.isRunning()),
         timeout=10_000,
     )
 

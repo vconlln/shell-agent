@@ -133,3 +133,60 @@ def test_right_pane_sections_stay_usable_when_the_window_is_short(qtbot):
     ):
         assert widget.height() >= 40, f"{name} 在 1100x640 下只剩 {widget.height()}px"
     window.close()
+
+
+# ── 工具区：默认收起（把高度还给脚本） ────────────────────────────────
+
+
+def test_tool_area_starts_collapsed_and_expands_on_demand(qtbot):
+    """底部工具区默认只留一行标题，点页签/标题时展开。
+
+    用户反馈："工具区有点太占用空间了，软件的主要作用是写 shell 脚本"。
+    """
+    window = _window(qtbot, ui_scale=0.8)
+    window.resize(1440, 900)
+    window.show()
+    window.apply_appearance()
+    for _ in range(3):
+        qtbot.wait(10)
+
+    assert window.tool_section.is_collapsed(), "工具区默认应当是收起的"
+    collapsed_height = window.tool_section.height()
+    assert collapsed_height <= 60, f"收起后仍占 {collapsed_height}px"
+    script_height_collapsed = window.center_pane.script_view.height()
+
+    # 选中某个工具页 → 自动展开（东西在那儿就得看得见）
+    window.tool_tabs.setCurrentWidget(window.chat_panel)
+    for _ in range(3):
+        qtbot.wait(10)
+    assert not window.tool_section.is_collapsed()
+    assert window.tool_section.height() >= 200, f"展开后只有 {window.tool_section.height()}px"
+    # 展开的代价是脚本视图变矮 —— 收起来就该把这段高度还回来
+    assert window.center_pane.script_view.height() < script_height_collapsed
+
+    # 点标题能收回去
+    window._on_tool_header_clicked(None)
+    for _ in range(3):
+        qtbot.wait(10)
+    assert window.tool_section.is_collapsed()
+    assert window.center_pane.script_view.height() == script_height_collapsed
+    window.close()
+
+
+def test_tool_area_state_is_remembered(qtbot, tmp_path):
+    """收起/展开要记进设置：用户收起过，下次开窗不该又变回一大块。"""
+    from tu_shell_agent.ui.settings import AppSettings
+
+    settings = AppSettings(run_root=str(tmp_path / "runs"), templates_dir=str(tmp_path / "tpl"))
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    window.apply_appearance()
+    assert settings.tool_area_collapsed is True
+
+    window.tool_tabs.setCurrentWidget(window.chat_panel)      # 点页签 → 展开并记录
+    for _ in range(3):
+        qtbot.wait(10)
+    assert settings.tool_area_collapsed is False
+    window.close()
