@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .widgets.selection_menu import install_ask_action
+from .widgets.wrap_row import WrapRow
 
 # 从回复里抠出代码块（```bash / ```sh / ``` 后面到下一个围栏）
 _FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\n(.*?)```", re.S)
@@ -92,7 +93,10 @@ class ChatPanel(QWidget):
         self._models_requested_once = False
         self.session_combo = QComboBox()
         self.session_combo.setObjectName("chatSessionCombo")
-        self.session_combo.setMinimumWidth(240)
+        # 240 会把整栏的**最小宽度**顶到 599px（控制台里它是矮面板时无所谓，搬进右列之后
+        # 就成了问题：1440 宽的窗口里右列吃 599，左栏被挤到 284）。下拉本身可以缩，
+        # 缩窄时显示走省略号，比"挤扁左栏"好。
+        self.session_combo.setMinimumWidth(150)
         self.session_combo.currentIndexChanged.connect(self._on_session_changed)
         self.refresh_button = QPushButton("扫描历史会话")
         self.refresh_button.setObjectName("chatSessionRefreshButton")
@@ -107,7 +111,7 @@ class ChatPanel(QWidget):
         self.model_combo.setObjectName("chatModelCombo")
         self.model_combo.setEditable(True)
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model_combo.setMinimumWidth(200)
+        self.model_combo.setMinimumWidth(110)   # 同上：给右列留出可缩的余地
         self.model_combo.addItem("", "")
         self.model_combo.lineEdit().setPlaceholderText("使用会话模型")
         self.model_combo.setToolTip(
@@ -163,14 +167,15 @@ class ChatPanel(QWidget):
         self.status.setProperty("role", "muted")
         self.status.setWordWrap(True)
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.send_button)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.extract_button)
-        buttons.addStretch(1)
-        buttons.addWidget(QLabel("模型"))
-        buttons.addWidget(self.model_combo)
-        buttons.addWidget(self.model_button)
+        # 底部这行：左边是动作（发送/取消/把最新脚本放进中栏），右边是模型选择。
+        # 用 WrapRow 而不是 QHBoxLayout：右列被压窄时它**折行**而不是让控件重叠
+        # （实测窗口 960 宽时右列 386px，模型下拉会盖住「可用模型」按钮）。
+        self.model_label = QLabel("模型")
+        self.controls_row = WrapRow(
+            [self.send_button, self.cancel_button, self.extract_button,
+             self.model_label, self.model_combo, self.model_button],
+            gap=3,
+        )
 
         # ── 模型提议栏：像 Cursor 那样给出"接受 / 拒绝" ──────────────────
         # 差异正文显示在**中栏**（那里有地方、也已有一套红绿 diff 渲染），
@@ -229,7 +234,7 @@ class ChatPanel(QWidget):
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.quote_bar)
         layout.addWidget(self.input)
-        layout.addLayout(buttons)
+        layout.addWidget(self.controls_row)
         layout.addWidget(self.status)
 
         self.send_button.clicked.connect(self._on_send)

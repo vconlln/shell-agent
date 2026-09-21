@@ -722,6 +722,26 @@ X11 抓屏拿到的也是"整块屏幕"而不是"窗口背后"。
 3. **引用栏必须显式上色**：不上色的 QWidget 会被通用 `QWidget { background-color: bg }` 填成窗口
    底色，在面板里像一道凹陷的黑条（与折叠区块"深黑色角"同源）。
 
+### 右列变宽之后连带发现的两个尺寸问题
+
+1. **右列的最小宽度把左栏挤扁**：对话面板里两个下拉写死了 240 / 200 的最小宽度，
+   整栏 `minimumSizeHint` 被顶到 599px —— 1440 宽的窗口里右列吃 599、左栏只剩 284
+   （意图是 320）。下拉改成 150 / 110（缩窄时显示走省略号），右列最小宽度降到 ~385，
+   实测三栏回到 [321, 563, 522]。用例：`test_default_columns_leave_room_for_the_left_pane`。
+2. **窄栏里底部控件行重叠**：底部那行（发送/取消/把最新脚本放进中栏 + 模型下拉 + 可用模型）
+   自然宽度约 490px；窗口缩到 960 时右列只有 386px，`QHBoxLayout` 的反应是让模型下拉
+   **盖住**「可用模型」按钮（实测坐标重叠）。新增 `ui/widgets/wrap_row.py`：
+   放不下就折行（宽的时候仍是一行、模型选择仍贴右端），折行时**整组**折，
+   别把「模型」标签留在上一行末尾。三个前提都写进了代码注释：
+   - 折行判定要按控件的**最小占位**算（`QComboBox` 的 sizeHint 只有 38px，但
+     `setMinimumWidth(110)` 之后布局压不下去，"算得下、排出来溢出"就是这么来的）；
+   - 要覆盖 `minimumSizeHint()`，否则布局把"当前这一行"的宽度写成控件最小宽度，折行永不触发；
+   - 外层布局要 `SetNoConstraint`，否则 Qt 会把布局最小尺寸设成控件最小尺寸（同上）。
+   用例：`tests/test_wrap_row.py` 4 条 + `tests/test_chat_panel.py` 2 条；
+   变异验证：撤掉折行、把最小宽度顶回 240、按 sizeHint 折行 —— 三条都转红。
+   默认三栏比例同时调成 `[320, 560, 520]`：右列比原来只放校验报告时宽一点，
+   且底部那行控件在 1440 窗口里一行放得下。
+
 ### 测试
 
 新增 `tests/test_chat_selection.py`（11 条：选中范围与来源、换行符、菜单项只在有选中时出现、
@@ -729,5 +749,5 @@ X11 抓屏拿到的也是"整块屏幕"而不是"窗口背后"。
 `tests/test_script_proposal.py` 加 2 条（接受并重跑确实走 `verify_edited`、无提议时是空操作），
 `tests/test_theme.py` 加 1 条（引用栏取色）。布局相关的旧用例按新排布重写：
 `test_ui_layout.py`（右栏折叠改为按**窗口高度**触发）、`test_dpi_layout.py`（工具区 → 控制台弹窗）、
-`test_appearance.py`（弹窗里的控件要先显示弹窗、逐帧取色）。整套 **456 passed / 1 skipped**，
-应用 `--self-test` exit=0。
+`test_appearance.py`（弹窗里的控件要先显示弹窗、逐帧取色）、新增 `tests/test_wrap_row.py`（4 条）。
+整套 **463 passed / 1 skipped**，应用 `--self-test` exit=0，Linux 产物重建后自检 exit=0。

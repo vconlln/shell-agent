@@ -145,7 +145,9 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(_titled(self.left_pane, "方案与运行参数"))
         self.splitter.addWidget(_titled(self.center_pane, "脚本与轮次"))
         self.splitter.addWidget(_card(self.right_tabs))
-        self.splitter.setSizes([340, 620, 480])
+        # 默认比例按新分工调过：右列现在是「模型对话 / 校验与输出」两个页签，比原来那条
+        # 只放校验报告的栏要宽一点；同时保证底部那行对话控件（发送…+ 模型选择）在一行里放得下。
+        self.splitter.setSizes([320, 560, 520])
 
         # 底栏左边是历史运行（列表 + 回放），右边是两个独立页。
         # 列表控件本身在 HistoryPage 里，objectName 仍是 historyList（界面骨架测试的契约）。

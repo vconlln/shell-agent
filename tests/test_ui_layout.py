@@ -329,3 +329,22 @@ def test_left_pane_scrolls_instead_of_clipping_when_short(qtbot):
     area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
     qtbot.wait(20)
     assert area.verticalScrollBar().value() > 0, "滚动条拖不动"
+
+
+def test_default_columns_leave_room_for_the_left_pane(window, qtbot):
+    """默认三栏比例：右列（模型对话）变宽之后，左栏仍然拿得到 300px 以上。
+
+    实测（修前）：对话面板里两个下拉写死了 240 / 200 的最小宽度，把右列的**最小宽度**顶到
+    599px —— 1440 宽的窗口里右列吃 599、左栏只剩 284（意图是 320）。这就是用户抱怨过的
+    "挤压到看不见"那一类：某一块的最小尺寸把别人的空间吃掉了。
+    """
+    window.resize(1440, 900)
+    qtbot.wait(50)
+
+    left, center, right = window.splitter.sizes()
+    assert left >= 300, f"左栏只剩 {left}px"
+    assert center >= 500, f"中栏只剩 {center}px"
+    assert right >= 480, f"右列只剩 {right}px"
+
+    minimum = window.right_tabs.minimumSizeHint().width()
+    assert minimum <= 420, f"右列的最小宽度是 {minimum}px，会把左栏挤扁"

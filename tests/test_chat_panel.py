@@ -99,3 +99,55 @@ def test_old_blur_setting_migrates_to_acrylic(qtbot, tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"backdrop": "blur"}), encoding="utf-8")
     assert AppSettings.load(path).backdrop == "acrylic"
+
+
+# ── 窄栏里折行而不是重叠（用户报过"挤压到看不见"）──────────────────────
+
+
+def _overlaps(panel, widgets) -> list[tuple[str, str]]:
+    found = []
+    boxes = [(w.objectName() or w.text(), w.geometry()) for w in widgets]
+    for index in range(len(boxes)):
+        for other in range(index + 1, len(boxes)):
+            if boxes[index][1].intersects(boxes[other][1]):
+                found.append((boxes[index][0], boxes[other][0]))
+    return found
+
+
+def _controls(panel):
+    return [panel.send_button, panel.cancel_button, panel.extract_button,
+            panel.model_label, panel.model_combo, panel.model_button]
+
+
+def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot):
+    """栏够宽时仍然是一行：模型选择与发送按钮同一行、且在右端（用户明确要求过）。"""
+    panel = _panel(qtbot)
+    panel.resize(560, 520)
+    qtbot.wait(20)
+
+    assert panel.controls_row.row_count() == 1
+    send_y = _top_left(panel, panel.send_button)[1]
+    for widget in _controls(panel):
+        assert abs(_top_left(panel, widget)[1] - send_y) <= 4, "控件不在同一行"
+    assert _top_left(panel, panel.model_combo)[0] > _top_left(panel, panel.extract_button)[0]
+    assert not _overlaps(panel, _controls(panel))
+
+
+def test_controls_wrap_instead_of_overlapping_when_narrow(qtbot):
+    """栏被压窄时折行、**不许重叠**（实测修前：右列 386px 时模型下拉盖住「可用模型」）。
+
+    真实触发路径是"窗口缩到最小 / 分割条往右拖"，这里直接量面板宽度，等价且更快。
+    """
+    panel = _panel(qtbot)
+    panel.resize(380, 520)
+    qtbot.wait(20)
+
+    assert panel.controls_row.row_count() >= 2, "窄栏里没有折行"
+    assert not _overlaps(panel, _controls(panel)), "折行之后仍然重叠"
+    for widget in _controls(panel):
+        geometry = widget.geometry()
+        assert geometry.right() <= panel.width(), f"{widget.objectName()} 越出面板右边缘"
+        assert geometry.x() >= 0
+
+    # 整组折行：模型标签与它的下拉留在同一行（别把标签留在上一行末尾）
+    assert panel.controls_row.row_of(panel.model_label) == panel.controls_row.row_of(panel.model_combo)
