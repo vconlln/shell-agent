@@ -435,11 +435,10 @@ def build_palette(*, backdrop: str = "off") -> QPalette:
 def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]:
     """按"背景效果"给出底色令牌。
 
-    **亚克力模糊**（Windows 11 的 Acrylic / macOS 的毛玻璃）需要窗口管理器支持：真正能拿到的是
-    "窗口半透明 + 由窗口管理器去模糊背后的内容"。所以这里做两件事：
-      1. 把底色变成带 alpha 的颜色（半透明）—— 这一步与平台无关，任何合成器都能生效；
-      2. 平台模糊由 ui/backdrop.py 尝试（Windows 走 DWM，其它平台通常不可用）。
-    不可用时**只保留半透明**，界面明确说明，不声称模糊已生效。
+    **两种效果都是界面自绘的**（不依赖窗口管理器/合成器）：半透明 = 壁纸不模糊 + 淡色调，
+    亚克力 = 壁纸模糊 + 浓色调；模糊在 ui/acrylic.py 里用 Qt 自己算，窗口本身始终不透明。
+    为什么不再问系统要模糊（Windows 的 DWM、KDE 的 KWin）：两条路在真机上都靠不住，
+    原因与实测写在 ui/backdrop.py 的模块说明里。
 
     `off` 保持完全不透明：像素测试与"看不清就调不透明度"这类麻烦都不引入。
     """
@@ -792,7 +791,8 @@ def apply_theme(
 
     - `scale` 同时放大字号与所有尺寸（圆角、行高、内边距）——只放大字号会让界面变挤；
     - `ui_font` / `mono_font` 为空表示"使用系统默认 / 自动选择等宽字体"；
-    - `backdrop` 见 `backdrop_colors()`；窗口级的半透明与平台模糊由 `ui/backdrop.py` 处理。
+    - `backdrop` 见 `backdrop_colors()`；窗口级的底色层与重绘擦除由 `ui/backdrop.py` 处理
+      （两个效果都是界面自绘，不依赖系统）。
     """
     app.setStyle("Fusion")          # 原生样式会带来各自的立体感，Fusion 才吃调色板
 

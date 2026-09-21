@@ -139,17 +139,20 @@ def test_build_scripts_check_the_same_qt_plugins():
 
 
 def test_ui_layer_keeps_its_platform_branches_in_one_place():
-    """界面层的平台分支只允许出现在两个文件里（两版一致性靠这条守住）。
+    """界面层的平台分支只允许出现在**一个**文件里（两版一致性靠这条守住）。
 
     外观、布局、主题、会话、模型这些代码一旦长出 `sys.platform` 分支，Windows 与 Linux
-    就会开始漂移 —— 而 Windows 侧在开发机上根本跑不到。允许的两个文件：
-      - `ui/backdrop.py`：窗口半透明与系统模糊（DWM / KWin）
+    就会开始漂移 —— 而 Windows 侧在开发机上根本跑不到。
+
+    2026-09-20 收紧：`ui/backdrop.py` 里的 DWM/KWin 那两条路（`try_enable_blur` /
+    `_enable_windows_acrylic` / `_enable_kde_blur`）是**不可达代码**（真机上都不生效，
+    两个效果已改为界面自绘），删掉之后它不再需要这个豁免。现在只剩：
       - `ui/acrylic.py`：Windows 壁纸探测（注册表 + 主题缓存）
     """
     from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
-    allowed = {"backdrop.py", "acrylic.py"}
+    allowed = {"acrylic.py"}
     offenders: list[str] = []
     for path in sorted((repo / "tu_shell_agent" / "ui").rglob("*.py")):
         text = path.read_text(encoding="utf-8")

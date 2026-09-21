@@ -79,3 +79,17 @@ class Grab:
 
     def rgb(self, x: int, y: int) -> tuple[int, int, int]:
         return tuple(self.color(x, y).getRgb()[:3])
+
+    def dominant(self, x: int, y: int, width: int, height: int) -> str:
+        """区域内出现次数最多的颜色名（"底色"类断言用这个，别用单个像素）。
+
+        单像素取样太脆：字体度量一变，采样点就可能落到字形上 —— 实测「主按钮浅底深字」
+        与「引用条底色」两条用例，在别的用例先跑过（改了全局字体/缩放）之后取到了文字颜色
+        （#b7b8ba / #9e9ea2），而底色本身是对的。底色是"面积最大"的那个颜色，用它来判。
+        """
+        counts: dict[str, int] = {}
+        for dy in range(height):
+            for dx in range(width):
+                name = self.name(x + dx, y + dy)
+                counts[name] = counts.get(name, 0) + 1
+        return max(counts, key=lambda key: counts[key])

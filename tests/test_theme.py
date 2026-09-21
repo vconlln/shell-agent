@@ -105,15 +105,17 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
 
     # 「执行输出」在右栏第二个页签里（未选中时不渲染），主按钮在控制台弹窗里 —— 都不能从
     # 整窗帧按坐标取色，改成取**控件自己的帧**（弹窗要先显示，否则布局没算过、帧是空的）。
-    def own_center(widget) -> str:
+    def own_fill(widget) -> str:
+        # 取"面积最大的那个颜色"而不是中心那个像素：按钮中心就是文字，字体一变采样点
+        # 就可能落在字形上（实测被别的用例改过全局字体之后取到了 #b7b8ba）。
         frame = Grab(widget)
-        return frame.name(widget.width() // 2, widget.height() // 2)
+        return frame.dominant(2, 2, widget.width() - 4, widget.height() - 4)
 
     window.right_tabs.setCurrentWidget(window.right_pane)
     window.open_console(window.run_page)      # 主操作（开始）在里面
     qtbot.wait(50)
-    assert own_center(window.right_pane.output_view) == "#0b0c0e"
-    assert own_center(window.start_button) == "#ecedf0"               # 浅底深字
+    assert own_fill(window.right_pane.output_view) == "#0b0c0e"
+    assert own_fill(window.start_button) == "#ecedf0"                 # 浅底深字
 
 
 def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
@@ -240,7 +242,9 @@ def test_quote_bar_is_themed(themed_app, qtbot):
     bar = window.chat_panel.quote_bar
     grab = Grab(window)
     origin = bar.mapTo(window, bar.rect().topLeft())
-    center = grab.name(origin.x() + bar.width() // 2, origin.y() + bar.height() // 2)
+    # 条内取"面积最大的颜色"：引用条里有一行说明文字，单像素取样会取到文字色
+    # （实测 #9e9ea2 就是说明文字的颜色，而条的底色是对的）
+    center = grab.dominant(origin.x() + 2, origin.y() + 2, bar.width() - 4, bar.height() - 4)
     corner = grab.name(origin.x(), origin.y())
 
     assert center == "#17181c", f"引用条底色是 {center}，不是卡片色（没吃到主题）"

@@ -818,3 +818,27 @@ X11 抓屏拿到的也是"整块屏幕"而不是"窗口背后"。
 `QT_SCALE_FACTOR=1.5` 跑完整套：**466 passed / 2 skipped**（跳过的两条：需要真 opencode 凭据的
 live 冒烟、以及本机测试屏装不下右列对话页的那条，后者跳过理由写在用例里）。
 默认（100%）跑完整套：**466 passed / 2 skipped**。
+
+
+### 附：顺手清掉的不可达平台代码（同一晚）
+
+`ui/backdrop.py` 里还留着 `enable_translucent` / `disable_translucent` / `try_enable_blur` /
+`_enable_windows_acrylic`（DWM）/ `_enable_kde_blur`（KWin），以及**重复定义了两遍**的
+`erase_damage` —— 这是改自绘方案时的合并残留（文件中间那段注释写着"这里曾经有…"，
+但函数本体还在下面）。产品里对它们的引用数是 0，也就是说：
+
+- 它们是**Windows 专有、开发机上跑不到、也没有用例**的代码，正是"Windows 版本可能出问题"
+  最典型的一类来源；
+- 模块文档字符串还在描述旧方案（"拿不到模糊时不假装成功"、"Windows 走 DWM"），与现状不符。
+
+处理：删掉这五个函数与重复定义，文档字符串改写成现状（两种效果都是界面自绘，窗口始终不透明，
+并保留"为什么不再问系统要模糊"的实测原因）；`theme.py` 里两处过时说明同步改掉。
+`test_ui_layer_keeps_its_platform_branches_in_one_place` 的豁免名单从两个文件**收紧到一个**
+（只剩 `ui/acrylic.py` 的 Windows 壁纸探测）—— 变异验证：往 `ui/chat.py` 或 `ui/backdrop.py`
+里塞一个 `sys.platform` 分支，这条用例立刻转红。
+
+顺带修掉一条**脆弱的取色断言**：`test_theme.py` 里"主按钮浅底深字"与"引用条底色"用的是
+**单个像素**，而那个像素正好在文字上 —— 别的用例改过全局字体之后采样点落进字形，
+断言就红了（实测取到 `#b7b8ba` / `#9e9ea2`，也就是文字的颜色）。改成
+`tests/conftest.py::Grab.dominant()`：取区域内**出现次数最多**的颜色（底色必然面积最大），
+这类断言从此与字体度量无关。
