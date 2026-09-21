@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QFontDatabase, QPainter, QPaintEvent, QPalette, QResizeEvent, QTextCursor,
 )
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
+
+from .selection_menu import install_ask_action, selected_text
 
 _RIGHT_PADDING = 8  # 行号与文本之间的呼吸位，贴太紧两位数会挤到正文上
 _TAB_WIDTH = 4      # shell 脚本里 tab 按 4 空格显示才对得上缩进
@@ -19,6 +21,9 @@ _TAB_WIDTH = 4      # shell 脚本里 tab 按 4 空格显示才对得上缩进
 
 class ScriptView(QPlainTextEdit):
     """带行号的只读脚本视图；jump_to_line 供右栏的报告点击跳转用。"""
+
+    # 选中一段后右键「就选中的代码提问」：(选中的代码, 来源说明如「本轮脚本 · 第 3–9 行」)
+    ask_about_selection = Signal(str, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -35,7 +40,32 @@ class ScriptView(QPlainTextEdit):
         self.updateRequest.connect(self._on_update_request)
         self._update_area_width()
 
+        # 选中 → 右键 →「就选中的代码提问」（用户要求"选中代码进行对话"）。
+        # 由控件自己算行号来源：它本来就在管行号区，别让外面再数一遍。
+        install_ask_action(self, self._ask_about_selection)
+        self.setToolTip("选中代码后右键可「就选中的代码提问」，选中的片段会作为引用带进对话。")
+
     # ── 对外接口 ──────────────────────────────────────────────────
+    def selected_code(self) -> str:
+        """选中的代码（新行统一成 `\\n`）；没有选中返回空串。"""
+        return selected_text(self)
+
+    def selection_source(self) -> str:
+        """选中内容的来源说明：`本轮脚本 · 第 3–9 行`（单行时写 `第 3 行`）。"""
+        cursor = self.textCursor()
+        if cursor is None or not cursor.hasSelection():
+            return ""
+        document = self.document()
+        start = document.findBlock(cursor.selectionStart()).blockNumber() + 1
+        # 在一行行首结束的选区，selectionEnd 落在**下一块**的开头 —— 减一格才是最后一行
+        end_position = max(cursor.selectionStart(), cursor.selectionEnd() - 1)
+        end = document.findBlock(end_position).blockNumber() + 1
+        span = f"第 {start} 行" if start == end else f"第 {start}–{end} 行"
+        return f"本轮脚本 · {span}"
+
+    def _ask_about_selection(self, text: str) -> None:
+        self.ask_about_selection.emit(text, self.selection_source())
+
     def set_text(self, text: str) -> None:
         """替换正文并把光标移回第 1 行：新一轮脚本总是从顶部开始读。"""
         self.setPlainText(text)

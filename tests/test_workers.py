@@ -93,7 +93,7 @@ def test_app_exits_without_aborting_while_a_worker_runs(tmp_path):
         app = QApplication([])
         window = MainWindow(settings=AppSettings())
         window.show()
-        window.tool_tabs.setCurrentWidget(window.chat_panel)   # 触发拉模型列表
+        window.right_tabs.setCurrentWidget(window.chat_panel)   # 触发拉模型列表
         window.controller._on_models_requested()               # 再点一次（原先会覆盖引用）
         QTimer.singleShot(100, app.quit)
         app.exec()

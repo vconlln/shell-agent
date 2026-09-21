@@ -100,10 +100,18 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
 
     assert rendered(window) == "#101114"                              # 主背景
     assert rendered(window.center_pane.script_view) == "#0b0c0e"      # 只读底（更深一档）
-    assert rendered(window.right_pane.output_view) == "#0b0c0e"
-    # 主操作（开始）是浅底深字；取中心点避开圆角
-    center = QPoint(window.start_button.width() // 2, window.start_button.height() // 2)
-    assert rendered(window.start_button, center) == "#ecedf0"
+
+    # 「执行输出」在右栏第二个页签里（未选中时不渲染），主按钮在控制台弹窗里 —— 都不能从
+    # 整窗帧按坐标取色，改成取**控件自己的帧**（弹窗要先显示，否则布局没算过、帧是空的）。
+    def own_center(widget) -> str:
+        frame = widget.grab().toImage()
+        return QColor(frame.pixel(widget.width() // 2, widget.height() // 2)).name()
+
+    window.right_tabs.setCurrentWidget(window.right_pane)
+    window.open_console(window.run_page)      # 主操作（开始）在里面
+    qtbot.wait(50)
+    assert own_center(window.right_pane.output_view) == "#0b0c0e"
+    assert own_center(window.start_button) == "#ecedf0"               # 浅底深字
 
 
 def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
@@ -115,12 +123,14 @@ def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     # 按 set 比：findChildren 的遍历顺序是实现细节，不是契约
-    # 排布调整后左栏改叫「方案与运行参数」（模板库移进了工具区）。
-    # 工具区现在是**可折叠区块**（默认收起、把高度让给脚本），栏头对象名是 sectionHeader，
-    # 所以它不在 paneHeader 这一组里 —— 单独断言它的标题。
+    # 排布调整后左栏改叫「方案与运行参数」（模板库移进了控制台弹窗）。
+    # 右栏现在是**页签**（模型对话 / 校验与输出），标题由页签本身承担，不再有 paneHeader；
+    # 工具区搬进控制台弹窗，也不再是主窗口里的可折叠区块。
     headers = {label.text() for label in window.findChildren(QLabel, "paneHeader")}
-    assert headers == {"方案与运行参数", "脚本与轮次", "校验与输出"}
-    assert window.tool_section.header.text() == "工具区"
+    assert headers == {"方案与运行参数", "脚本与轮次"}
+    assert [window.right_tabs.tabText(i) for i in range(window.right_tabs.count())] == [
+        "模型对话", "校验与输出",
+    ]
 
 
 def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
@@ -140,9 +150,9 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
         point = widget.mapTo(window, widget.rect().topLeft() + offset)
         return QColor(image.pixel(point.x(), point.y())).name()
 
-    # 对话面板在工具区页签里（未选中时不渲染），所以用**控件自己的帧**取色：
+    # 对话面板在右栏页签里（未选中时不渲染），所以用**控件自己的帧**取色：
     # 从整窗帧里按坐标取会被页签裁切/相邻控件遮挡影响（这条用例第一版就是这么失败的）。
-    window.tool_tabs.setCurrentWidget(window.chat_panel)
+    window.right_tabs.setCurrentWidget(window.chat_panel)
     qtbot.wait(50)
 
     def own_color(widget) -> str:
@@ -174,12 +184,20 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
     window.show()
     qtbot.waitExposed(window)
 
+    # 历史运行搬进控制台弹窗了：不显示弹窗，列表控件不在窗口的渲染路径上，取色会拿到空白帧。
+    window.open_console(window.history_page)
+    qtbot.wait(50)
+
     history = window.history_page.list_widget      # bg_elevated + 14px 圆角（QSS 里定的）
     assert isinstance(history, QListWidget)
-    image = window.grab().toImage()
+
+    # 取色必须在**弹窗自己的帧**里做：弹窗是顶层窗口，把它的控件映射到主窗口上拿到的是
+    # 无意义的坐标（跨顶层窗口映射），第一版就是在这里取到了相邻控件的颜色。
+    dialog = window.console_dialog
+    image = dialog.grab().toImage()
 
     def sample(offset: QPoint) -> str:
-        point = history.mapTo(window, history.rect().topLeft() + offset)
+        point = history.mapTo(dialog, history.rect().topLeft() + offset)
         return QColor(image.pixel(point.x(), point.y())).name()
 
     center = sample(QPoint(history.width() // 2, history.height() // 2))
@@ -193,6 +211,38 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
         return sum(abs(x - y) for x, y in zip(pa.getRgb()[:3], pb.getRgb()[:3]))
 
     assert distance(corner, "#101114") < distance(corner, "#17181c")
+
+
+def test_quote_bar_is_themed(themed_app, qtbot):
+    """「引用」条必须**自己**上色。
+
+    不上色的 QWidget 会被通用 `QWidget {{ background-color: bg }}` 规则填成窗口底色
+    （#101114），在 bg_surface 的面板里就是一道凹陷的黑条 —— 折叠区块的"深黑色角"
+    是同一类问题（用户报过一次）。所以这条按像素验：条内是卡片色，圆角外是面板底色。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor
+
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    apply_theme(themed_app)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1440, 900)
+    window.show()
+    qtbot.waitExposed(window)
+    window.right_tabs.setCurrentWidget(window.chat_panel)
+    window.chat_panel.set_quote("echo one\necho two", "本轮脚本 · 第 3–4 行")
+    qtbot.wait(30)
+
+    bar = window.chat_panel.quote_bar
+    image = window.grab().toImage()
+    origin = bar.mapTo(window, bar.rect().topLeft())
+    center = QColor(image.pixel(origin.x() + bar.width() // 2, origin.y() + bar.height() // 2)).name()
+    corner = QColor(image.pixel(origin.x(), origin.y())).name()
+
+    assert center == "#17181c", f"引用条底色是 {center}，不是卡片色（没吃到主题）"
+    assert corner == "#101114", f"引用条圆角外是 {corner}，不是面板底色"
 
 
 def test_tab_corners_are_actually_rounded(themed_app, qtbot):

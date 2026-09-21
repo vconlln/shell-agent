@@ -553,6 +553,15 @@ QWidget#historyPage, QWidget#settingsPage, QWidget#selfCheckPage, QWidget#chatPa
     background-color: {_color('bg_surface', colors)};
 }}
 QWidget#chatPanel {{ border: 1px solid {_color('border_light', colors)}; border-radius: {sized('radius_lg', scale)}; }}
+/* 「引用」条（选中代码带进对话时的那一行）：必须显式上色 —— 不写规则的 QWidget 会被上面
+   那条通用 QWidget 规则填成窗口底色（#101114），在 bg_surface 的面板里像一道凹陷的黑条
+   （折叠区块的"深黑色角"就是同一类原因）。 */
+QWidget#chatQuoteBar {{
+    background-color: {_color('bg_card', colors)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QPushButton#chatQuoteClearButton {{ padding: 2px 8px; min-height: 18px; }}
 /* 三栏/底栏的"卡片"：大圆角 + 极淡边框。栏与栏的分隔靠它，而不是靠那条透明的分割条。 */
 QWidget#paneCard {{
     background-color: {_color('bg_card', colors)};

@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -125,17 +126,26 @@ class MainWindow(QMainWindow):
         self.center_pane.setObjectName("centerPane")
         self.right_pane = RightPane()
         self.right_pane.setObjectName("rightPane")
+        # 对话面板要进右栏分页，所以在这里就建好（下面 _titled 那段不再重复创建）
+        self.chat_panel = ChatPanel()
 
         # 每栏顶部一行小标题（Codex 的分区感来自"小号、次级色、字距略宽"的栏头）。
         # 用包装控件而不是往各 pane 里塞标签：pane 的布局归 pane 自己管，
         # 而且骨架测试是按 objectName 找 pane 的，包一层不影响 findChild。
 
+        # 右栏分页：**模型对话与校验报告同一栏**（用户要求"模型对话放到右边"）。
+        # 一栏放两件事而不是再加一栏：高 DPI 的小屏上四栏会窄到没法用。
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setObjectName("rightTabs")
+        self.right_tabs.addTab(self.chat_panel, "模型对话")
+        self.right_tabs.addTab(self.right_pane, "校验与输出")
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")   # 测试契约
         self.splitter.addWidget(_titled(self.left_pane, "方案与运行参数"))
         self.splitter.addWidget(_titled(self.center_pane, "脚本与轮次"))
-        self.splitter.addWidget(_titled(self.right_pane, "校验与输出"))
-        self.splitter.setSizes([360, 620, 460])
+        self.splitter.addWidget(_card(self.right_tabs))
+        self.splitter.setSizes([340, 620, 480])
 
         # 底栏左边是历史运行（列表 + 回放），右边是两个独立页。
         # 列表控件本身在 HistoryPage 里，objectName 仍是 historyList（界面骨架测试的契约）。
@@ -145,17 +155,14 @@ class MainWindow(QMainWindow):
         self.selfcheck_page = SelfCheckPage()
         self.settings_page = SettingsPage()
         self.settings_page.set_settings(self.settings)
-        self.chat_panel = ChatPanel()
 
         # 工具区：低频面板都收进这一行的页签（用户裁定的排布）。
         # 主区三栏因此各自只干一件事：方案与参数 / 脚本与轮次 / 校验与输出。
+        # 低频面板与运行操作一起收进「控制台」弹窗（用户要求："开始、取消、继续修复这里
+        # 作成一个按钮，点开工具区就出现弹窗可以设置"）。主窗口因此只剩三栏 + 一条底栏，
+        # 高度全给脚本与对话。
         self.tool_tabs = QTabWidget()
         self.tool_tabs.setObjectName("toolTabs")
-        self.tool_tabs.addTab(self.history_page, "历史运行")
-        self.tool_tabs.addTab(self.templates_pane, "模板库")
-        self.tool_tabs.addTab(self.chat_panel, "模型对话")
-        self.tool_tabs.addTab(self.selfcheck_page, "环境自检")
-        self.tool_tabs.addTab(self.settings_page, "设置")
 
         self.start_button = QPushButton("开始")
         # 主操作用白底黑字（Codex 的主按钮就这样），其余按钮是"白 5% 叠加 + 1px 边框"
@@ -164,33 +171,60 @@ class MainWindow(QMainWindow):
         self.continue_button = QPushButton("继续修复")
         self.verify_button = QPushButton("改后重跑")
         self.open_dir_button = QPushButton("打开运行目录")
-        bottom = QHBoxLayout()
+        self.run_hint = QLabel(
+            "开始前请在左栏选择方案文档。运行期间可取消；失败后可继续修复，"
+            "改了脚本用「改后重跑」只跑校验与执行。"
+        )
+        self.run_hint.setObjectName("runHint")
+        self.run_hint.setWordWrap(True)
+        self.run_page = run_page = QWidget()   # 留个名字：测试与"接受提议后重跑"都要用它
+        run_layout = QVBoxLayout(run_page)
+        run_layout.setContentsMargins(0, 0, 0, 0)
+        run_layout.addWidget(self.run_hint)
+        run_row = QHBoxLayout()
         for button in (self.start_button, self.cancel_button, self.continue_button,
                        self.verify_button, self.open_dir_button):
-            bottom.addWidget(button)
+            run_row.addWidget(button)
+        run_row.addStretch(1)
+        run_layout.addLayout(run_row)
+        run_layout.addStretch(1)
+
+        self.tool_tabs.addTab(run_page, "运行")
+        self.tool_tabs.addTab(self.history_page, "历史运行")
+        self.tool_tabs.addTab(self.templates_pane, "模板库")
+        self.tool_tabs.addTab(self.selfcheck_page, "环境自检")
+        self.tool_tabs.addTab(self.settings_page, "设置")
+
+        self.console_dialog = QDialog(self)
+        self.console_dialog.setObjectName("consoleDialog")
+        self.console_dialog.setWindowTitle("控制台 — 运行 / 历史 / 模板 / 自检 / 设置")
+        self.console_dialog.resize(860, 560)
+        console_layout = QVBoxLayout(self.console_dialog)
+        console_layout.addWidget(self.tool_tabs, 1)
+        self.console_close_button = QPushButton("关闭")
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_row.addWidget(self.console_close_button)
+        console_layout.addLayout(close_row)
+        self.console_close_button.clicked.connect(self.console_dialog.accept)
+
+        self.console_button = QPushButton("控制台")
+        self.console_button.setObjectName("consoleButton")
+        self.console_button.setToolTip("运行操作、历史运行、模板库、环境自检、设置")
+        self.console_button.clicked.connect(self.open_console)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.console_button)
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("statusLabel")
         bottom.addWidget(self.status_label, 1)
 
 
-        # 上下两层（三栏区 / 历史与设置区）放进竖向分割器：原来是一个 QVBoxLayout 的
-        # addWidget(..., 1) + addLayout(..., 1)，比例固定 1:1，用户**根本没法调** ——
-        # 这就是"不能调节竖向的长度"。现在拖中间那条就能改，而且尺寸会记进设置。
-        self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.vertical_splitter.setObjectName("verticalSplitter")
-        self.vertical_splitter.addWidget(self.splitter)
-        # 工具区默认**收起**，只留一行标题：用户反馈"工具区有点太占用空间了，
-        # 软件的主要作用是写 shell 脚本"。点它的标题、或点某个页签、或需要看提议时
-        # （见 focus_tool_tab）会自动展开，展开的高度记在分割器尺寸里（跟其它尺寸一起持久化）。
-        self.tool_section = CollapsibleSection("工具区", self.tool_tabs)
-        self.tool_section.setObjectName("toolSection")
-        self.vertical_splitter.addWidget(_card(self.tool_section))
-        self.vertical_splitter.setSizes([900, 40])
-        self.tool_section.header.mousePressEvent = self._on_tool_header_clicked  # type: ignore[method-assign]
-        self.tool_tabs.currentChanged.connect(lambda _index: self.expand_tool_area())
-
+        # 主区直接占满窗口，底栏只放一个「控制台」按钮与状态文字。
+        # 曾经这里有个"三栏区 / 历史与设置区"的竖向分割器，是为了在两者之间让高度；
+        # 低频面板搬进「控制台」弹窗之后它没有东西可分了，已删除（分割器的键同步从设置里去掉）。
+        # 竖向调节仍然可用：中栏自己的分割器管"脚本 / 轮次时间线"。
         root_layout = QVBoxLayout()
-        root_layout.addWidget(self.vertical_splitter, 1)
+        root_layout.addWidget(self.splitter, 1)
         root_layout.addLayout(bottom)
 
         root = QWidget()
@@ -205,13 +239,13 @@ class MainWindow(QMainWindow):
         self._apply_settings_to_inputs()
         # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
         # 用户一改就该立刻反映，不能等到下次运行。
-        self.left_pane.blocking_combo.currentTextChanged.connect(
-            self._on_blocking_level_changed
-        )
+        self.left_pane.blocking_combo.currentTextChanged.connect(self._on_blocking_level_changed)
         self.settings_page.saved.connect(self._on_settings_saved)
         # 外观控件改动 → 立即应用（只改内存，不落盘；落盘仍由"保存"负责）。
         # 没有这一步，用户改完缩放要先去点"保存"才看得到效果，体感就是"改了不管用"。
         self.settings_page.appearance_changed.connect(self._preview_appearance)
+        # 中栏（脚本 / 差异页）里"就选中的代码提问" → 右栏对话面板带上这段引用。
+        self.center_pane.ask_about_selection.connect(self.quote_into_chat)
 
         # 把手宽度写进代码而不是只靠 QSS：样式表没加载时（或换主题时）它会退回 Qt 默认的
         # 4px，而 4px 抓不住 —— 用户"不能调节竖向的长度"就是这么来的。命中目标不能依赖样式。
@@ -255,57 +289,39 @@ class MainWindow(QMainWindow):
         if wire_controller:
             self._wire_controller()
 
-    def expand_tool_area(self, *, minimum: int = 300) -> bool:
-        """展开工具区（已展开则不动），返回是否发生了变化。
-
-        默认收起是为了把高度让给脚本视图；一旦用户真的要在这里看东西（点页签、
-        或对话里出现需要他决定的提议），就必须自动展开 —— 否则"东西在那儿但他看不见"。
-        """
-        changed = False
-        if self.tool_section.is_collapsed():
-            self.tool_section.set_collapsed(False)
-            changed = True
-        if changed:
-            self._set_tool_area_height(minimum)
-            self._persist_tool_area(collapsed=False)
-        return changed
-
-    def _set_tool_area_height(self, height: int) -> None:
-        """把工具区设成指定高度。**必须等布局更新之后**再调（见 showEvent 的同一坑）。"""
-        def apply() -> None:
-            sizes = self.vertical_splitter.sizes()
-            if len(sizes) != 2:
-                return
-            total = sum(sizes)
-            tool = max(40, min(height, max(40, total - 240)))
-            self.vertical_splitter.setSizes([max(1, total - tool), tool])
-
-        QTimer.singleShot(0, apply)
-
-    def _persist_tool_area(self, *, collapsed: bool) -> None:
-        if getattr(self.settings, "tool_area_collapsed", True) == collapsed:
-            return
-        try:
-            self.settings.tool_area_collapsed = collapsed
-            self.settings.save()
-        except (OSError, ValueError) as error:
-            self.set_status(f"工具区状态未能保存：{error}")
+    def open_console(self, page: QWidget | None = None) -> None:
+        """打开「控制台」弹窗；`page` 指定要选中的页（不指定就保持上次那页）。"""
+        if page is not None:
+            index = self.tool_tabs.indexOf(page)
+            if index >= 0:
+                self.tool_tabs.setCurrentIndex(index)
+        self.console_dialog.show()
+        self.console_dialog.raise_()
+        self.console_dialog.activateWindow()
 
     def focus_tool_tab(self, page: QWidget) -> None:
-        """切到某个工具页并确保工具区展开（提议出现、点"把脚本放进中栏"这类流程用它）。"""
-        index = self.tool_tabs.indexOf(page)
-        if index >= 0:
-            self.tool_tabs.setCurrentIndex(index)
-        self.expand_tool_area()
-
-    def _on_tool_header_clicked(self, event) -> None:
-        """点"工具区"标题：收起/展开切换（收起是默认，所以要能给用户收回去）。"""
-        if self.tool_section.is_collapsed():
-            self.expand_tool_area()
+        """把某个面板显示给用户：对话在右栏分页里，其余面板在控制台弹窗里。"""
+        if page is self.chat_panel:
+            self.right_tabs.setCurrentWidget(self.chat_panel)
             return
-        self.tool_section.set_collapsed(True)
-        self._set_tool_area_height(40)
-        self._persist_tool_area(collapsed=True)
+        self.open_console(page)
+
+    def quote_into_chat(self, text: str, source: str) -> None:
+        """把一段选中内容作为引用交给对话面板（用户要求的"选中代码进行对话"）。
+
+        接线是纯界面的事（中栏选中 → 右栏对话），所以放在窗口里而不是控制器里：
+        控制器管引擎与会话，这里一步子进程都不起。
+        """
+        if not text.strip():
+            return
+        self.right_tabs.setCurrentWidget(self.chat_panel)
+        self.chat_panel.set_quote(text, source)
+        self.chat_panel.set_status(
+            f"已引用{source}；输入问题后发送，引用会随这条问题一起发给模型。"
+            if source
+            else "已引用选中内容；输入问题后发送，引用会随这条问题一起发给模型。"
+        )
+        self.chat_panel.input.setFocus()
 
     def _wire_scroll_repaints(self) -> None:
         """任何滚动条动一下就让整窗重绘一次（半透明窗口防重影，见 paintEvent 的说明）。"""
@@ -471,11 +487,14 @@ class MainWindow(QMainWindow):
 
     # ── 布局记忆 ────────────────────────────────────────────────────
     def _splitter_state(self) -> dict[str, list[int]]:
-        """四个分割器的尺寸。存**尺寸**而不是 saveState() 的字节：尺寸是可读的 JSON，
-        换 Qt 版本也不会失效，出问题时用户能自己看一眼。"""
+        """两个分割器的尺寸（横向三栏 / 中栏内部）。存**尺寸**而不是 saveState() 的字节：
+        尺寸是可读的 JSON，换 Qt 版本也不会失效，出问题时用户能自己看一眼。
+
+        键少了不要紧：`_restore_layout` 只认它知道的键，用户设置里遗留的 `vertical`
+        （旧版那条竖向分割器）会被忽略，不会把布局弄坏。
+        """
         return {
             "main": self.splitter.sizes(),
-            "vertical": self.vertical_splitter.sizes(),
             "center": self.center_pane.splitter.sizes(),
         }
 
@@ -486,15 +505,6 @@ class MainWindow(QMainWindow):
             self.settings.save()
         except (OSError, ValueError) as error:
             self.set_status(f"布局未能保存：{error}")
-
-    def _apply_tool_area_state(self) -> None:
-        """按设置里的"收起/展开"落地工具区高度（默认收起 = 只留标题那一条）。"""
-        if getattr(self.settings, "tool_area_collapsed", True):
-            self.tool_section.set_collapsed(True)
-            self._set_tool_area_height(40)
-        else:
-            self.tool_section.set_collapsed(False)
-            self._set_tool_area_height(300)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         """首次显示时还原布局尺寸。
@@ -507,9 +517,6 @@ class MainWindow(QMainWindow):
         if not self._layout_restored:
             self._layout_restored = True
             self._restore_layout()
-            # 工具区状态在**还原布局之后**落地：它是"收起/展开"的开关，
-            # 优先于上次拖出来的分割器尺寸（否则用户收起过、下次开窗又变回一大块）
-            self._apply_tool_area_state()
 
     def _restore_layout(self) -> None:
         """按上次拖出来的尺寸还原；没存过或存坏了就用默认比例。"""
@@ -524,7 +531,6 @@ class MainWindow(QMainWindow):
             return
         for key, splitter in (
             ("main", self.splitter),
-            ("vertical", self.vertical_splitter),
             ("center", self.center_pane.splitter),
         ):
             sizes = saved.get(key)

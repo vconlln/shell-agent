@@ -185,6 +185,7 @@ class RunController(QObject):
         chat.cancel_requested.connect(self.cancel_chat)
         chat.script_extracted.connect(self._on_script_extracted)
         chat.proposal_accepted.connect(self.accept_proposal)
+        chat.proposal_accepted_run.connect(self.accept_proposal_and_run)
         chat.proposal_rejected.connect(self.reject_proposal)
         chat.session_selected.connect(self._on_session_selected)
         chat.model_changed.connect(self._on_chat_model_changed)
@@ -584,7 +585,8 @@ class RunController(QObject):
         self._pending_proposal = script
         panel.show_proposal(
             f"模型提出脚本修改：新增 {added} 行、删除 {removed} 行。"
-            "中栏已显示差异（红删绿增）；接受后放进中栏，再点「改后重跑」才会执行。"
+            "中栏已显示差异（红删绿增）；「接受」只放进中栏，「接受并重跑」会接着走"
+            "校验与执行（执行前仍要人工确认）。"
         )
         panel.set_status("等待你的决定：接受或拒绝这次修改。")
         # 把工具区展开并切到对话页：接受/拒绝的按钮在这里，藏在别的页签后面等于没问用户
@@ -593,14 +595,29 @@ class RunController(QObject):
 
     def accept_proposal(self) -> None:
         """接受提议：脚本进中栏，**不执行** —— 之后与手改脚本走同一条路（shellcheck + 确认）。"""
+        if self._apply_pending_proposal():
+            self.window.chat_panel.set_status("已接受该修改；要跑它请点「改后重跑」。")
+
+    def accept_proposal_and_run(self) -> None:
+        """接受提议并立刻重跑：只把"接受"和"改后重跑"合成一次点击。
+
+        走的还是 `verify_edited` 那条路（shellcheck → 人工确认 → 执行），
+        没有任何闸门被跳过 —— 快捷的是操作步骤，不是安全边界。
+        """
+        if not self._apply_pending_proposal():
+            return
+        self.window.chat_panel.set_status("已接受该修改，正在按「改后重跑」校验并执行。")
+        self.verify_edited()
+
+    def _apply_pending_proposal(self) -> bool:
+        """把待决定的提议放进中栏；没有提议就返回 False（调用方据此决定要不要继续）。"""
         script = self._pending_proposal
-        chat = self.window.chat_panel
         if not script:
             self._clear_proposal()
-            return
+            return False
         self._clear_proposal()
         self._on_script_extracted(script)
-        chat.set_status("已接受该修改；要跑它请点「改后重跑」。")
+        return True
 
     def reject_proposal(self) -> None:
         """拒绝提议：中栏脚本保持不动，只在记录里留一句。"""

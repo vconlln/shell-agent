@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QSplitter, QTabWidget, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from ..widgets.diff_view import diff_counts, render_diff_html
 from ..widgets.script_view import ScriptView
+from ..widgets.selection_menu import install_ask_action, selected_text
 from ..theme import DIFF_GUTTER_FG
 
 _CURRENT_TAB = 0
@@ -22,6 +23,9 @@ _COMPARE_TAB = 1
 
 class CenterPane(QWidget):
     """脚本正文、与上一轮的差异、以及每一轮发生了什么。"""
+
+    # 「就选中的代码提问」：中栏任何一处选中的内容都可以带进对话问（用户要求"询问代码"）
+    ask_about_selection = Signal(str, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,6 +40,13 @@ class CenterPane(QWidget):
         # 与脚本视图保持一致：脚本不折行，长行靠横向滚动条看
         self.compare_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.compare_view.setOpenExternalLinks(False)
+        # 对比页里的片段（含 +/− 前缀）同样可以选中提问：读 diff 时最常见的动作就是
+        # "这一行为什么要改" —— 让选中内容直接进对话，比让人手抄一行过去实际。
+        install_ask_action(
+            self.compare_view,
+            lambda text: self.ask_about_selection.emit(text, self._compare_source()),
+            label="就选中的差异提问",
+        )
         # 各块都要有能用的最小高度，否则窗口一缩小就被压成一条缝（实测 12~35px）
         # 140 是"宽屏舒服"的值，但在高 DPI（Windows 150% 时 1080p 只有 720 逻辑像素高）下
         # 它把整窗地板抬到 666，比屏幕还高 —— 于是布局只能违反最小尺寸，右栏与对话面板被压。
@@ -68,6 +79,19 @@ class CenterPane(QWidget):
         self._compare_html = ""
         self._proposal_html = ""
         self._refresh_compare()
+
+        # 脚本页的选中提问直接转出去（来源说明由 ScriptView 自己算，它管着行号）
+        self.script_view.ask_about_selection.connect(self.ask_about_selection)
+
+    # ── 选中提问 ──────────────────────────────────────────────────
+    def selected_code(self) -> str:
+        """当前「本轮」页里选中的代码；没有选中返回空串（测试与外部都走这个口）。"""
+        return selected_text(self.script_view)
+
+    def _compare_source(self) -> str:
+        """对比页的来源说明：提议的 diff 与"上一轮 diff"要分得清，问的时候含义不同。"""
+        title = self.tabs.tabText(_COMPARE_TAB)
+        return f"{title} · 选中片段"
 
     # ── 模型提议（对话里给出脚本、等待用户接受/拒绝）──────────────────
     def show_proposal(self, script: str) -> tuple[int, int]:

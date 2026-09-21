@@ -147,3 +147,37 @@ def test_a_reply_without_a_script_makes_no_proposal(qtbot, tmp_path):
 
     assert not window.chat_panel.has_proposal()
     assert window.center_pane.proposal_html() == ""
+
+
+def test_accept_and_run_goes_through_the_verify_path(qtbot, tmp_path):
+    """「接受并重跑」= 接受 + 改后重跑，走的是同一条路（闸门一个都不少）。
+
+    用户要的是 Cursor 那种"接着就能跑"的流程；这里快捷的是点击次数，不是安全边界 ——
+    所以断言它调用的**就是** `verify_edited`（那里面有 shellcheck 与人工确认）。
+    """
+    controller, window, _agent = _controller(qtbot, tmp_path)
+    controller.ask("把脚本改一下")
+    _wait_for_chat(qtbot, controller)
+
+    calls: list[str] = []
+    real_verify = controller.verify_edited
+    controller.verify_edited = lambda: (calls.append("verify"), real_verify())[1]
+
+    window.chat_panel.accept_run_button.click()
+
+    assert calls == ["verify"], "「接受并重跑」没有走到校验与执行那条路"
+    assert window.center_pane.current_text().strip() == NEW_SCRIPT.strip(), "脚本没进中栏"
+    assert not window.chat_panel.has_proposal()
+    assert "校验并执行" in window.chat_panel.status.text()
+
+
+def test_accept_and_run_without_a_proposal_is_a_no_op(qtbot, tmp_path):
+    """没有待决定的提议时点它不能出事（按钮可能还留在界面上）。"""
+    controller, window, _agent = _controller(qtbot, tmp_path)
+    calls: list[str] = []
+    controller.verify_edited = lambda: calls.append("verify")
+
+    window.chat_panel.accept_run_button.click()
+
+    assert calls == []
+    assert window.center_pane.current_text().strip() == OLD_SCRIPT.strip()

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QSplitter
 
 from tu_shell_agent.ui.main_window import MainWindow
@@ -60,44 +60,44 @@ def test_all_splitters_have_a_grabbable_handle(window):
         assert splitter.handleWidth() >= 6, f"{splitter.objectName()} 的把手只有 {splitter.handleWidth()}px，抓不住"
 
 
-def test_top_and_bottom_areas_can_be_resized_vertically(window):
-    """三栏区与下方"历史+设置"区之间必须能改高度比例。
+def test_center_areas_can_be_resized_vertically(window):
+    """竖向比例要能调。
 
-    原实现是 QVBoxLayout 的 addWidget(1) + addLayout(1)：比例写死 1:1，用户无法调整。
+    以前调的是"三栏区 / 底部工具区"那条分割器；工具区搬进「控制台」弹窗之后，主窗口里
+    唯一还需要竖向调节的就是中栏的"脚本正文 / 轮次时间线"。
     """
-    vertical = window.findChild(QSplitter, "verticalSplitter")
-    assert vertical is not None, "上下两块之间没有分割器 → 竖向比例不可调"
+    vertical = window.center_pane.splitter
     assert vertical.orientation() == Qt.Orientation.Vertical
     assert vertical.count() == 2
 
     before = vertical.sizes()
     assert before[0] > 0 and before[1] > 0
-    # 模拟拖动：往"上面小、下面大"拖。注意分割器会尊重子控件的最小高度，所以这里断言
-    # "确实动得动、且方向正确"，而不是断言等于我传入的数字。
-    vertical.setSizes([400, 600])
+    # 模拟拖动：往"上面小、下面大"拖。分割器会尊重子控件最小高度，所以断言"动得动、
+    # 方向也对"，而不是断言等于传入的数字。
+    vertical.setSizes([200, 700])
     after = vertical.sizes()
-    assert after[0] < before[0] - 40, f"上部压不下去：{before} → {after}"
-    assert after[1] > before[1] + 40, f"下部顶不上来：{before} → {after}"
+    assert after[0] < before[0], f"上部压不下去：{before} → {after}"
+    assert after[1] > before[1], f"下部顶不上来：{before} → {after}"
 
 
 def test_resized_layout_is_remembered_in_settings(window, qtbot):
     """拖过的尺寸要写进设置并在下次开窗时还原（否则每次都得重拖）。"""
-    window.vertical_splitter.setSizes([380, 620])
+    window.center_pane.splitter.setSizes([380, 620])
     window._save_layout()
 
     saved = json.loads(window.settings.layout)
-    assert len(saved["vertical"]) == 2
-    assert all(isinstance(value, int) and value > 0 for value in saved["vertical"])
+    assert len(saved["center"]) == 2, "中栏的脚本/时间线比例没被记下来"
+    assert all(isinstance(value, int) and value > 0 for value in saved["center"])
 
     # 契约是"存什么还原什么"（不是"拖出来的比例一定如何"：分割器会尊重子控件最小高度，
     # 夹取后的结果才是真相，所以拿夹取后的实际尺寸去比）
-    actual = window._splitter_state()["vertical"]
+    actual = window._splitter_state()["center"]
     again = MainWindow(wire_controller=False, settings=window.settings)
     qtbot.addWidget(again)
     again.resize(1440, 900)
     again.show()
     qtbot.waitExposed(again)          # 还原发生在 showEvent 里，要等它显示出来
-    assert again.vertical_splitter.sizes() == actual, "存进去的尺寸没有还原"
+    assert again.center_pane.splitter.sizes() == actual, "存进去的尺寸没有还原"
 
 
 def test_corrupt_layout_setting_is_ignored_not_fatal(window):
@@ -108,21 +108,21 @@ def test_corrupt_layout_setting_is_ignored_not_fatal(window):
     window._restore_layout()
 
 
-def test_center_area_and_tool_area_are_resizable(window):
-    """中栏内部（页签 / 轮次时间线）与"主区 / 工具区"之间的比例都要能调。
+def test_center_area_and_columns_are_resizable(window):
+    """能拖的比例都要真的能拖：三栏横向，以及中栏内部（脚本 / 轮次时间线）竖向。
 
-    排布调整后：底部不再是"历史 + 两页"的横向分割器（历史已收进工具区页签），
-    能调的横向比例只剩三栏本身；竖向仍是"主区 / 工具区"。
+    排布调整后主窗口里只剩横向三栏 + 中栏自己那条竖向分割条（工具区搬进了控制台弹窗，
+    不再从主窗口高度里切一块）。
     """
+    main = window.splitter
+    before = main.sizes()
+    main.setSizes([260, 700, 480])
+    assert main.sizes() != before, "三栏横向比例拖不动"
+
     center = window.center_pane.splitter
     before = center.sizes()
     center.setSizes([300, 260])
     assert center.sizes() != before, "中栏内部（脚本 / 时间线）比例拖不动"
-
-    vertical = window.vertical_splitter
-    before_v = vertical.sizes()
-    vertical.setSizes([400, 600])
-    assert vertical.sizes() != before_v
 
 
 def test_handle_width_does_not_depend_on_the_stylesheet(qtbot, tmp_path):
@@ -185,8 +185,10 @@ def test_panes_and_inner_panels_declare_minimums(window):
 
     for column in (window.left_pane, window.center_pane, window.right_pane):
         assert column.minimumWidth() >= 240, f"{column.objectName()} 缺少最小宽度"
-    # 工具区也要有下限：它现在装着 5 个页签（历史/模板库/对话/自检/设置）
+    # 工具区（在控制台弹窗里）也要有下限：它装着 5 个页签（运行/历史/模板库/自检/设置）
     assert window.tool_tabs.minimumHeight() >= 180
+    # 右列的页签装着对话面板，页签本体的下限不该低于里面最高的一页
+    assert window.right_tabs.minimumSizeHint().height() >= window.chat_panel.minimumSizeHint().height()
 
 
 def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
@@ -198,8 +200,14 @@ def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
     qtbot.wait(50)
 
     assert window.width() <= window.minimumSize().width() + 5     # 真的缩到了下限
-    # 注意：历史列表现在在工具区页签里 —— 它没被选中时高度是 0，那是"没显示"而不是"被压没"，
-    # 所以这里只检查主区三栏里常驻可见的控件。
+    # 「校验与输出」在右栏第二个页签里，不选中它高度就是 0 —— 那是"没显示"不是"被压没"，
+    # 所以先把它切到前台再量。
+    window.right_tabs.setCurrentWidget(window.right_pane)
+    qtbot.wait(50)
+    # 对话面板（右栏第一页）在下限尺寸下也要装得下
+    assert window.right_tabs.height() >= window.chat_panel.minimumSizeHint().height(), (
+        f"右栏只有 {window.right_tabs.height()}px，装不下对话面板"
+    )
     for widget, minimum in (
         (window.left_pane.plan_preview, 88),      # 留 2px 容差给样式边距
         (window.center_pane.script_view, 78),
@@ -209,46 +217,53 @@ def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
         assert widget.height() >= minimum, f"{widget.objectName() or widget} 在下限尺寸下被压没了"
 
 
-def test_tool_area_is_tall_enough_for_its_tallest_tab(window, qtbot):
-    """工具区的最小高度必须装得下里面最高的页签，否则内容会溢出被裁掉。
+def test_console_dialog_fits_its_tallest_page(window, qtbot):
+    """控制台弹窗的页签区必须装得下里面最高的一页，否则内容会溢出被裁掉。
 
-    实测：对话面板 minimumSizeHint 305px，而工具区当时最小只有 200px —— 结果是输入框
-    盖在记录区上、记录区看不全（取色时发现的：按坐标取到的像素属于下面那个输入框）。
+    实测（搬进弹窗之前，历史事故）：对话面板 minimumSizeHint 305px，而工具区当时最小只有
+    200px —— 结果是输入框盖在记录区上、记录区看不全。现在这些页在弹窗里，弹窗得自己够高；
+    页签区高度按"最高一页的 minimumSizeHint"算，不是按弹窗总高拍脑袋。
     """
-    assert window.tool_tabs.minimumHeight() >= 300
+    window.open_console()
+    qtbot.wait(50)
 
-    for index in range(window.tool_tabs.count()):
-        page = window.tool_tabs.widget(index)
+    tabs = window.tool_tabs
+    content_height = tabs.height() - tabs.tabBar().height()
+    for index in range(tabs.count()):
+        page = tabs.widget(index)
         needed = page.minimumSizeHint().height()
-        # 模板面板要 465px，所以这里只要求"对话面板/历史页这类常看的页签装得下"；
-        # 更高的页签靠工具区自己可拖大来满足（竖向分割器还在）。
-        if page is window.chat_panel:
-            assert window.tool_tabs.minimumHeight() >= min(needed, 300), (
-                f"{window.tool_tabs.tabText(index)} 需要 {needed}px，工具区最小只有 "
-                f"{window.tool_tabs.minimumHeight()}px"
-            )
+        assert content_height >= needed, (
+            f"「{tabs.tabText(index)}」需要 {needed}px，页签区只有 {content_height}px（会溢出被裁）"
+        )
 
 
 def test_right_pane_collapses_automatically_by_height(window, qtbot):
     """右栏三块按**可用高度自动**收起（用户裁定：这里不需要手动折叠）。
 
-    优先级：校验报告 > 执行输出 > 模型取舍说明与假设。用真实操作触发（缩窗口 + 拖竖向分割条），
-    不是直接改控件的尺寸 —— 右栏挂在布局里，直接 resize() 会被布局覆盖（这条测试第一版就踩了）。
+    优先级：校验报告 > 执行输出 > 模型取舍说明与假设。
+
+    新布局（2026-09）下右栏是右列的「校验与输出」页签，高度由**窗口高度**决定，不再由竖向
+    分割条决定（主线里已经没有竖向分割器了）。所以这里用窗口高度触发，并且先临时放开最小
+    尺寸来模拟 Windows 150% 缩放下的小屏可用高度 —— 在 1080p 上主窗口本来就只能拿到
+    700 逻辑像素左右，右栏确实会被压到需要收起的高度。
     """
     sections = window.right_pane.sections
 
     def collapsed() -> set[str]:
         return {key for key, section in sections.items() if section.is_collapsed()}
 
-    window.resize(1440, 900)
+    # 隐藏的页签不参与布局（取到的是过期几何），要先切到这个页签上
+    window.right_tabs.setCurrentWidget(window.right_pane)
     qtbot.wait(50)
     assert collapsed() == set(), "空间足够时不该折叠"
 
-    window.resize(window.minimumSize())           # 缩到允许的最小尺寸
-    qtbot.wait(50)
-    window.vertical_splitter.setSizes([300, 460])  # 再把上半压小，右栏更矮
+    window.setMinimumSize(QSize(560, 360))      # 模拟小屏：允许窗口比"推荐最小值"更矮
+    window.resize(1200, 400)
     qtbot.wait(50)
     assert "notes" in collapsed(), "空间不足时应先收起「模型取舍说明与假设」"
+
+    window.resize(1200, 320)
+    qtbot.wait(50)
     assert "output" in collapsed(), "更挤时应连「执行输出」一起收起"
     assert "findings" not in collapsed(), "「校验报告」是主要结论，不该被自动收起"
 
@@ -256,18 +271,16 @@ def test_right_pane_collapses_automatically_by_height(window, qtbot):
 def test_right_pane_expands_again_when_space_returns(window, qtbot):
     """把空间还回来要自动展开 —— 这才是"不需要手动"的关键。"""
     sections = window.right_pane.sections
-    # 不要用 window.minimumSize()：最小尺寸现在按屏幕收敛（更矮），
-    # 那样 setSizes 里的"大尺寸"根本分配不到，用例会假红。
-    window.resize(1400, 950)
-    qtbot.wait(50)
-    window.vertical_splitter.setSizes([260, 420])   # 上半变小 → 应当收起
+    window.right_tabs.setCurrentWidget(window.right_pane)
+    window.setMinimumSize(QSize(560, 360))
+    window.resize(1200, 320)
     qtbot.wait(50)
     assert any(section.is_collapsed() for section in sections.values())
 
-    window.vertical_splitter.setSizes([760, 120])   # 把上半拖回大尺寸
+    window.resize(1400, 900)                    # 空间回来了
     qtbot.wait(50)
     collapsed = {key for key, section in sections.items() if section.is_collapsed()}
-    assert "output" not in collapsed, "空间回来了，「执行输出」应当自动展开"
+    assert collapsed == set(), f"空间回来了还收着：{sorted(collapsed)}"
 
 
 def test_section_header_is_plain_text(window, qtbot):

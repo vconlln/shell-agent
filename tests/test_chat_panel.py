@@ -72,7 +72,7 @@ def test_scrolling_repaints_the_whole_window(qtbot):
     qtbot.addWidget(window)
     window.resize(1200, 800)
     window.show()
-    window.tool_tabs.setCurrentWidget(window.settings_page)
+    window.open_console(window.settings_page)      # 设置页搬进控制台弹窗了
 
     from PySide6.QtWidgets import QScrollArea
 

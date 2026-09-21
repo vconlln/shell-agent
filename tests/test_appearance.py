@@ -101,6 +101,9 @@ def test_scaled_controls_really_grow(restore_app, qtbot, tmp_path):
     qtbot.addWidget(normal)
     normal.show()
     normal.apply_appearance()
+    # 「开始」在控制台弹窗里（工具区搬进弹窗之后）：不显示弹窗，按钮就没被布局算过，
+    # 两个缩放档量到的都是默认高度 34 —— 用例会以"没变高"这种假红失败（实测）。
+    normal.open_console(normal.run_page)
     qtbot.wait(30)
     base_height = normal.start_button.height()
 
@@ -108,6 +111,7 @@ def test_scaled_controls_really_grow(restore_app, qtbot, tmp_path):
     qtbot.addWidget(big)
     big.show()
     big.apply_appearance()
+    big.open_console(big.run_page)
     qtbot.wait(30)
 
     assert big.start_button.height() > base_height, (
@@ -324,7 +328,7 @@ def test_saved_font_survives_opening_the_settings_page(restore_app, qtbot, tmp_p
     window.apply_appearance()
 
     # 点开设置页（延迟填充在这里发生）
-    window.tool_tabs.setCurrentWidget(window.settings_page)
+    window.open_console(window.settings_page)      # 设置页搬进控制台弹窗了
     qtbot.waitExposed(window.settings_page)
     qtbot.wait(30)
 
@@ -545,7 +549,7 @@ def test_combo_popup_stays_readable_in_transparent_modes(restore_app, qtbot, tmp
         qtbot.addWidget(window)
         window.resize(1400, 900)
         window.show()
-        window.tool_tabs.setCurrentWidget(window.settings_page)
+        window.open_console(window.settings_page)      # 设置页搬进控制台弹窗了
         window.apply_appearance()
 
         combo = window.settings_page.blocking_combo
@@ -610,19 +614,24 @@ def test_appearance_text_is_formal(restore_app, qtbot, tmp_path):
     assert "不依赖系统" in hint
 
 
-def test_panel_corners_show_the_card_not_the_window(restore_app, qtbot, tmp_path):
-    """面板圆角外露出的必须是**卡片色**，不能是更深的窗口底色。
+def test_panel_corners_show_the_pane_surface_not_a_deeper_wedge(restore_app, qtbot, tmp_path):
+    """面板圆角切开的位置露出的是**它所在栏的底色**，既不是控件自己的底色，也不是更深的杂色。
 
     用户圈出「校验与输出」栏里"几个深黑的色角"，根因：折叠区块的外壳与内容容器是纯布局容器，
     但 Qt 给它们标了 `WA_StyledBackground` —— `不透明` 模式下没有对应 QSS 规则时，Qt 用调色板的
-    Window 色（窗口底色 #101114）填充，于是在每个面板圆角外露出一圈比卡片（#17181c）更深的楔形，
-    看起来就是一块深黑的小方角。
+    Window 色填充，于是在面板圆角外露出一圈既不属于面板、也不属于它背后那层的楔形。
+
+    现在的布局：右栏是右列的「校验与输出」页签（**未选中时页签页不渲染**，取色会拿到
+    过期几何 —— 第一版改装后就是这么假红的），所以取色前先把它切到前台。
+    取样区里允许出现的只有：面板底色、栏底色、以及两者的描边混色。
     """
     window = _window(tmp_path, backdrop="off", ui_scale=0.8)
     qtbot.addWidget(window)
     window.resize(1400, 950)
     window.show()
     window.apply_appearance()
+    window.right_tabs.setCurrentWidget(window.right_pane)
+    qtbot.wait(30)
 
     from PySide6.QtCore import QPoint
     from PySide6.QtGui import QColor, QImage, QPainter
@@ -633,24 +642,41 @@ def test_panel_corners_show_the_card_not_the_window(restore_app, qtbot, tmp_path
     window.render(painter, QPoint(0, 0))
     painter.end()
 
-    card = (23, 24, 28)          # bg_elevated：卡片
-    window_bg = (16, 17, 20)     # bg：窗口底色（更深的那个）
+    pane_bg = (16, 17, 20)       # #101114：栏底色（off 模式下 bg_surface == bg）
+    fills = {
+        "报告视图": (11, 12, 14),    # #0b0c0e 只读底
+        "输出视图": (11, 12, 14),
+        "校验报告": (23, 24, 28),    # #17181c 列表底
+    }
     for name, widget in (
         ("报告视图", window.right_pane.notes_view),
         ("输出视图", window.right_pane.output_view),
         ("校验报告", window.right_pane.findings_tree),
     ):
+        fill = fills[name]
         origin = widget.mapTo(window, widget.rect().topLeft())
-        # 面板左上角外侧那一小块（圆角切开的位置）
         colors = {
             tuple(image.pixelColor(origin.x() + dx, origin.y() + dy).getRgb()[:3])
             for dx in range(0, 11)
             for dy in range(0, 9)
         }
-        assert window_bg not in colors, (
-            f"{name} 的圆角外出现了窗口底色 {window_bg} —— 那就是角上的深黑方块"
+        assert fill in colors, f"{name} 的面板底色没吃到主题"
+        assert pane_bg in colors, (
+            f"{name} 的圆角外没看到栏底色 {pane_bg} —— 圆角没生效，或者被别的色盖住了"
         )
-        assert card in colors, f"{name} 的圆角外没看到卡片色 {card}（取样区域可能不对）"
+        # 极角那个像素：圆角生效时它落在圆外，应当是栏底色（或它与面板底色的过渡）；
+        # 它等于面板底色就说明这个角是直角。
+        extreme = tuple(image.pixelColor(origin.x(), origin.y()).getRgb()[:3])
+        assert extreme != fill, f"{name} 的角是直角（角上的像素就是面板底色）"
+        assert all(
+            min(fill[i], pane_bg[i]) - 2 <= extreme[i] <= max(fill[i], pane_bg[i]) + 2
+            for i in range(3)
+        ), f"{name} 的角上出现了既不属于面板也不属于栏底色的 {extreme}"
+        # 反锯齿只会产生"两种底色之间"的过渡色，不会比两者都深；
+        # 出现更深的第三种色就是"深黑角"那一类问题（有东西在角上刷了别的底色）。
+        floor = min(sum(fill), sum(pane_bg))
+        strays = {color for color in colors if sum(color) < floor - 4}
+        assert not strays, f"{name} 的圆角处出现了比面板与栏底色都深的杂色 {sorted(strays)}"
 
 
 def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot, tmp_path):
@@ -671,13 +697,16 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
     window.show()
     window.apply_appearance()
 
-    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(255, 0, 255))
-    painter = QPainter(image)
-    window.render(painter, QPoint(0, 0))
-    painter.end()
+    def capture(frame) -> "QImage":
+        """把一帧画到品红画布上：圆角切开的位置会露出背后的颜色（品红=没画到）。"""
+        image = QImage(frame.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(255, 0, 255))
+        painter = QPainter(image)
+        frame.render(painter, QPoint(0, 0))
+        painter.end()
+        return image
 
-    def rgb(x: int, y: int) -> tuple[int, int, int]:
+    def rgb(image, x: int, y: int) -> tuple[int, int, int]:
         return tuple(image.pixelColor(x, y).getRgb()[:3])
 
     def between(color, first, second) -> bool:
@@ -686,32 +715,49 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
             for index in range(3)
         )
 
+    # 面板现在分散在三处：主窗口的常驻栏、右列的两个页签、控制台弹窗的页签。
+    # **没被选中的页签根本不渲染**，硬从一帧里按坐标取色会取到过期几何下的别的控件
+    # （这类假红踩过两次），所以每个面板都在"它真的显示着"的那一帧里取色。
+    window.right_tabs.setCurrentWidget(window.chat_panel)
+    window.open_console(window.history_page)
+    qtbot.wait(30)
+    chat_frame = capture(window)
+    history_frame = capture(window.console_dialog)
+
+    window.open_console(window.templates_pane)
+    qtbot.wait(30)
+    templates_frame = capture(window.console_dialog)
+
+    window.right_tabs.setCurrentWidget(window.right_pane)
+    qtbot.wait(30)
+    pane_frame = capture(window)
+
     border = (43, 45, 51)      # 1px 描边与底色的混色属于正常渲染
-    panels = {
-        "脚本视图": window.center_pane.script_view,
-        "时间线": window.center_pane.timeline,
-        "方案预览": window.left_pane.plan_preview,
-        "额外说明": window.left_pane.extra_edit,
-        "校验报告": window.right_pane.findings_tree,
-        "输出视图": window.right_pane.output_view,
-        "报告视图": window.right_pane.notes_view,
-        "对话记录": window.chat_panel.transcript,
-        "历史列表": window.history_page.list_widget,
-        "模板列表": window.templates_pane.list_widget,
-    }
+    panels = (
+        ("脚本视图", window.center_pane.script_view, window, pane_frame),
+        ("时间线", window.center_pane.timeline, window, pane_frame),
+        ("方案预览", window.left_pane.plan_preview, window, pane_frame),
+        ("额外说明", window.left_pane.extra_edit, window, pane_frame),
+        ("校验报告", window.right_pane.findings_tree, window, pane_frame),
+        ("输出视图", window.right_pane.output_view, window, pane_frame),
+        ("报告视图", window.right_pane.notes_view, window, pane_frame),
+        ("对话记录", window.chat_panel.transcript, window, chat_frame),
+        ("历史列表", window.history_page.list_widget, window.console_dialog, history_frame),
+        ("模板列表", window.templates_pane.list_widget, window.console_dialog, templates_frame),
+    )
     problems: list[str] = []
-    for name, widget in panels.items():
+    for name, widget, frame, image in panels:
         rect = widget.rect()
         if rect.width() < 20 or rect.height() < 16:
             continue
-        origin = widget.mapTo(window, rect.topLeft())
+        origin = widget.mapTo(frame, rect.topLeft())
         if origin.x() < 8 or origin.y() < 8:
             continue
-        fill = rgb(origin.x() + 6, origin.y() + 6)
-        outside = rgb(origin.x() - 6, origin.y() + 6)
+        fill = rgb(image, origin.x() + 6, origin.y() + 6)
+        outside = rgb(image, origin.x() - 6, origin.y() + 6)
         for dx in range(0, 9):
             for dy in range(0, 7):
-                color = rgb(origin.x() + dx, origin.y() + dy)
+                color = rgb(image, origin.x() + dx, origin.y() + dy)
                 allowed = (
                     color in (fill, outside)
                     or between(color, fill, outside)

@@ -135,13 +135,14 @@ def test_right_pane_sections_stay_usable_when_the_window_is_short(qtbot):
     window.close()
 
 
-# ── 工具区：默认收起（把高度还给脚本） ────────────────────────────────
+# ── 工具区：搬进「控制台」弹窗，主窗口高度全给脚本与对话 ──────────────
 
 
-def test_tool_area_starts_collapsed_and_expands_on_demand(qtbot):
-    """底部工具区默认只留一行标题，点页签/标题时展开。
+def test_tool_area_leaves_the_main_window_to_the_console_dialog(qtbot):
+    """主窗口里不再有常驻工具区：工具页签收进「控制台」弹窗，脚本正文拿到整栏高度。
 
-    用户反馈："工具区有点太占用空间了，软件的主要作用是写 shell 脚本"。
+    用户反馈："工具区有点太占用空间了，软件的主要作用是写 shell 脚本" +
+    "工具区可以放到底部，'开始、取消、继续修复'这里作成一个按钮，点开工具区就出现弹窗"。
     """
     window = _window(qtbot, ui_scale=0.8)
     window.resize(1440, 900)
@@ -150,43 +151,45 @@ def test_tool_area_starts_collapsed_and_expands_on_demand(qtbot):
     for _ in range(3):
         qtbot.wait(10)
 
-    assert window.tool_section.is_collapsed(), "工具区默认应当是收起的"
-    collapsed_height = window.tool_section.height()
-    assert collapsed_height <= 60, f"收起后仍占 {collapsed_height}px"
-    script_height_collapsed = window.center_pane.script_view.height()
+    assert not window.console_dialog.isVisible(), "控制台默认不该自己弹出来"
+    assert not hasattr(window, "tool_section"), "主窗口里不该再有常驻工具区"
+    # 中栏整高只分给"脚本正文 / 轮次时间线"两块，工具区不再从里面切走一条；
+    # 脚本正文占大头就是"把高度还给脚本"的量化说法。
+    pane_height = window.center_pane.height()
+    script_height = window.center_pane.script_view.height()
+    assert script_height >= pane_height * 0.6, (
+        f"脚本正文只拿到 {script_height}px / 中栏 {pane_height}px"
+    )
+    script_height_without_console = script_height
 
-    # 选中某个工具页 → 自动展开（东西在那儿就得看得见）
-    window.tool_tabs.setCurrentWidget(window.chat_panel)
+    window.open_console(window.run_page)      # 底栏那个按钮 → 弹窗出现且停在「运行」页
     for _ in range(3):
         qtbot.wait(10)
-    assert not window.tool_section.is_collapsed()
-    assert window.tool_section.height() >= 200, f"展开后只有 {window.tool_section.height()}px"
-    # 展开的代价是脚本视图变矮 —— 收起来就该把这段高度还回来
-    assert window.center_pane.script_view.height() < script_height_collapsed
-
-    # 点标题能收回去
-    window._on_tool_header_clicked(None)
+    assert window.console_dialog.isVisible(), "点了控制台按钮弹窗没出来"
+    assert window.tool_tabs.currentWidget() is window.run_page, "弹窗没停在请求的那一页"
+    # 运行操作都在弹窗里，不再占主窗口
+    assert window.start_button.isVisible()
+    assert window.center_pane.script_view.height() == script_height_without_console, (
+        "弹窗不该改变主窗口里脚本正文的高度"
+    )
+    window.console_close_button.click()
     for _ in range(3):
         qtbot.wait(10)
-    assert window.tool_section.is_collapsed()
-    assert window.center_pane.script_view.height() == script_height_collapsed
+    assert not window.console_dialog.isVisible(), "关闭按钮没关掉弹窗"
     window.close()
 
 
-def test_tool_area_state_is_remembered(qtbot, tmp_path):
-    """收起/展开要记进设置：用户收起过，下次开窗不该又变回一大块。"""
-    from tu_shell_agent.ui.settings import AppSettings
-
-    settings = AppSettings(run_root=str(tmp_path / "runs"), templates_dir=str(tmp_path / "tpl"))
-    window = MainWindow(wire_controller=False, settings=settings)
-    qtbot.addWidget(window)
+def test_chat_is_a_page_of_the_right_column(qtbot):
+    """模型对话在右栏的分页里（用户要求"模型对话放到右边"），且和校验输出同栏可切换。"""
+    window = _window(qtbot, ui_scale=0.8)
     window.resize(1440, 900)
     window.show()
     window.apply_appearance()
-    assert settings.tool_area_collapsed is True
-
-    window.tool_tabs.setCurrentWidget(window.chat_panel)      # 点页签 → 展开并记录
     for _ in range(3):
         qtbot.wait(10)
-    assert settings.tool_area_collapsed is False
+
+    assert window.right_tabs.count() == 2
+    assert window.right_tabs.tabText(0) == "模型对话"
+    assert window.right_tabs.widget(0) is window.chat_panel
+    assert window.right_tabs.widget(1) is window.right_pane
     window.close()

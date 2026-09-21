@@ -8,7 +8,7 @@ templatesPane / historyList / toolTabs）是后续任务与审查者共同依赖
 `templatesPane` 从左列移进工具区 —— 契约跟着更新，不是放宽。
 """
 
-from PySide6.QtWidgets import QSplitter, QTabWidget
+from PySide6.QtWidgets import QDialog, QSplitter, QTabWidget
 
 from tu_shell_agent.ui.main_window import MainWindow
 
@@ -21,11 +21,19 @@ def test_main_window_has_three_panes_and_tool_tabs(qtbot):
     assert splitter is not None, "三区必须是 QSplitter"
     assert splitter.count() == 3, "左/中/右三栏"
 
+    # 低频面板与运行操作收进「控制台」弹窗（主窗口只留三栏 + 一条底栏）
     tabs = window.findChild(QTabWidget, "toolTabs")
-    assert tabs is not None, "底部工具区页签不见了"
+    assert tabs is not None, "控制台里的页签不见了"
     assert [tabs.tabText(i) for i in range(tabs.count())] == [
-        "历史运行", "模板库", "模型对话", "环境自检", "设置",
+        "运行", "历史运行", "模板库", "环境自检", "设置",
     ]
+    assert window.findChild(QDialog, "consoleDialog") is not None, "没有控制台弹窗"
+    assert window.console_button.text() == "控制台"
+
+    # 对话在**右栏分页**里（用户要求"模型对话放到右边"）
+    right = window.findChild(QTabWidget, "rightTabs")
+    assert right is not None, "右栏应当是分页（模型对话 / 校验与输出）"
+    assert [right.tabText(i) for i in range(right.count())] == ["模型对话", "校验与输出"]
 
 
 def test_main_window_exposes_named_panes(qtbot):

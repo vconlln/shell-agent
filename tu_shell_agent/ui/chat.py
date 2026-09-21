@@ -25,8 +25,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .widgets.selection_menu import install_ask_action
+
 # 从回复里抠出代码块（```bash / ```sh / ``` 后面到下一个围栏）
 _FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\n(.*?)```", re.S)
+
+# 引用片段的上限：选中整份脚本（几百行）一次发给模型既贵又慢，模型注意力也会散。
+# 超了就截断，并在交给模型的消息里**写明被截断**，不悄悄少发一段。
+_QUOTE_MAX_LINES = 120
+_QUOTE_MAX_CHARS = 6000
+
+
+def _clamp_quote(text: str) -> tuple[str, bool]:
+    """限长引用，返回 (正文, 是否截断过)。
+
+    按行与字符两个上限取先到的那个：一行几万字符的压缩脚本也要挡（否则"行数没超"
+    却照样把提示词撑爆）。
+    """
+    lines = text.rstrip("\n").split("\n")
+    truncated = False
+    if len(lines) > _QUOTE_MAX_LINES:
+        lines = lines[:_QUOTE_MAX_LINES]
+        truncated = True
+    body = "\n".join(lines)
+    if len(body) > _QUOTE_MAX_CHARS:
+        body = body[:_QUOTE_MAX_CHARS].rstrip()
+        truncated = True
+    return body, truncated
 
 
 def extract_last_script(text: str) -> str | None:
@@ -52,6 +77,7 @@ class ChatPanel(QWidget):
     sessions_refresh_requested = Signal()
     new_session_requested = Signal()
     proposal_accepted = Signal()       # 用户接受模型提议的脚本
+    proposal_accepted_run = Signal()   # 接受并立刻重跑（校验 + 执行，仍走人工确认闸门）
     proposal_rejected = Signal()       # 用户拒绝（中栏脚本保持不动）
     model_changed = Signal(str)        # 对话用的模型改了（provider/model，空 = 用会话默认）
     models_requested = Signal()        # 需要可用模型列表（首次显示 / 点刷新）
@@ -112,6 +138,12 @@ class ChatPanel(QWidget):
         self.transcript.setPlaceholderText(
             "显示与模型的对话；运行期间的模型输出也会追加在此处。"
         )
+        # 记录区里选中的内容也能提问（想追问模型上一句里的某段代码时最常用）
+        install_ask_action(
+            self.transcript,
+            lambda text: self._quote(text, "对话记录"),
+            label="就选中的内容提问",
+        )
 
         self.input = QPlainTextEdit()
         self.input.setObjectName("chatInput")
@@ -150,6 +182,11 @@ class ChatPanel(QWidget):
         self.accept_button.setObjectName("proposalAcceptButton")
         self.reject_button = QPushButton("拒绝")
         self.reject_button.setObjectName("proposalRejectButton")
+        # 「接受并重跑」：接受之后的下一步永远是"改后重跑"，合成一次点击
+        # （走后同一条闸门：shellcheck → 人工确认 → 执行，不跳过任何一道）。
+        self.accept_run_button = QPushButton("接受并重跑")
+        self.accept_run_button.setObjectName("proposalAcceptRunButton")
+        self.accept_run_button.clicked.connect(lambda: self.proposal_accepted_run.emit())
         self.accept_button.clicked.connect(lambda: self.proposal_accepted.emit())
         self.reject_button.clicked.connect(lambda: self.proposal_rejected.emit())
         self.proposal_bar = QWidget()
@@ -158,17 +195,39 @@ class ChatPanel(QWidget):
         proposal_layout.setContentsMargins(0, 0, 0, 0)
         proposal_layout.addWidget(self.proposal_label, 1)
         proposal_layout.addWidget(self.accept_button)
+        proposal_layout.addWidget(self.accept_run_button)
         proposal_layout.addWidget(self.reject_button)
         self.proposal_bar.setVisible(False)
         # 状态位单独记：`isVisible()` 在父级（工具区页签）没被选中时永远是 False，
         # 用它当"有没有提议"会把"在别的页签里等着"误判成"没有提议"（用例里踩到过）。
         self._has_proposal = False
 
+        # ── 引用条：从中栏选中的代码 / 记录里选中的片段 ──────────────────
+        # 用户要求"对话也可以选中代码进行对话，询问代码"。引用内容会**原样**出现在
+        # 发出的消息里（记录里也看得到），不做隐藏的提示词注入：用户能看到自己发了什么。
+        self.quote_label = QLabel()
+        self.quote_label.setObjectName("chatQuoteLabel")
+        self.quote_label.setProperty("role", "hint")
+        self.quote_clear_button = QPushButton("取消引用")
+        self.quote_clear_button.setObjectName("chatQuoteClearButton")
+        self.quote_clear_button.clicked.connect(self.clear_quote)
+        self.quote_bar = QWidget()
+        self.quote_bar.setObjectName("chatQuoteBar")
+        quote_layout = QHBoxLayout(self.quote_bar)
+        quote_layout.setContentsMargins(8, 4, 8, 4)
+        quote_layout.addWidget(self.quote_label, 1)
+        quote_layout.addWidget(self.quote_clear_button)
+        self.quote_bar.setVisible(False)
+        self._quote_text = ""
+        self._quote_source = ""
+        self._quote_truncated = False
+
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
         layout.addWidget(self.proposal_bar)
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
+        layout.addWidget(self.quote_bar)
         layout.addWidget(self.input)
         layout.addLayout(buttons)
         layout.addWidget(self.status)
@@ -210,6 +269,58 @@ class ChatPanel(QWidget):
     def has_proposal(self) -> bool:
         """有没有待决定的提议（与"当前是否可见"无关：它可能正在别的页签里等着）。"""
         return self._has_proposal
+
+    # ── 引用（选中代码/记录提问）──────────────────────────────────────────
+    def set_quote(self, text: str, source: str = "") -> None:
+        """放进一段引用：显示引用条，并把它作为下一条消息的上下文。
+
+        截断在这里做，且**说明**清楚：消息体里会写"（引用已截断…）"，
+        用户在记录里能看到自己实际问了什么。
+        """
+        if not text.strip():
+            self.clear_quote()
+            return
+        self._quote_text, truncated = _clamp_quote(text)
+        self._quote_source = (source or "").strip()
+        self._quote_truncated = truncated
+        lines = self._quote_text.count("\n") + 1
+        head = f"已引用 {self._quote_source}" if self._quote_source else "已引用选中内容"
+        tail = f"（{lines} 行，超出部分已截断）" if truncated else f"（{lines} 行）"
+        self.quote_label.setText(f"{head}{tail}")
+        self.quote_bar.setVisible(True)
+
+    def clear_quote(self) -> None:
+        self._quote_text = ""
+        self._quote_source = ""
+        self._quote_truncated = False
+        self.quote_label.clear()
+        self.quote_bar.setVisible(False)
+
+    def quote(self) -> tuple[str, str]:
+        """当前引用的 (正文, 来源)；没有引用时是 ("", "")。"""
+        return self._quote_text, self._quote_source
+
+    def has_quote(self) -> bool:
+        """有没有引用（与"是否可见"无关，理由同 has_proposal）。"""
+        return bool(self._quote_text.strip())
+
+    def _quote(self, text: str, source: str) -> None:
+        """右键菜单进来的入口：引用后把焦点交回输入框，用户可以接着打字。"""
+        self.set_quote(text, source)
+        self.input.setFocus()
+
+    def compose_message(self, question: str) -> str:
+        """把问题与引用拼成实际发给模型的那一条消息。
+
+        引用用 `~~~` 围栏而不是 ``` ：脚本/报告里本来就可能出现三个反引号，
+        用反引号围栏会被内容提前闭合（这类"围栏被内容截断"的问题在 diff 里也踩过）。
+        """
+        text, source = self.quote()
+        if not text:
+            return question
+        head = f"关于以下引用内容（{source}）：" if source else "关于以下引用内容："
+        note = "（引用已截断，只发送了开头部分）" if self._quote_truncated else ""
+        return f"{head}{note}\n\n~~~\n{text}\n~~~\n\n{question}"
 
     def set_models(self, models) -> None:
         """铺可用模型列表；**保留当前选择**（刷新不该把已选的模型弄丢）。"""
@@ -324,8 +435,11 @@ class ChatPanel(QWidget):
         if not text:
             return
         self.input.clear()
-        self.add_user(text)
-        self.send_requested.emit(text)
+        # 引用是**这一条**消息的上下文：发出去就撤掉，免得下一条问题又莫名其妙带上它
+        message = self.compose_message(text)
+        self.add_user(message)
+        self.clear_quote()
+        self.send_requested.emit(message)
 
     def _on_extract(self) -> None:
         script = extract_last_script(self.transcript_text())
