@@ -499,3 +499,76 @@ def test_full_run_with_the_cli_backend_succeeds(
     meta = json.loads((Path(controller._run_dir) / "meta.json").read_text(encoding="utf-8"))
     assert meta["outcome"] == "succeeded"
     assert meta["sessionId"]                       # 我们用 UUID 建的会话，id 落在 meta 里
+
+
+# ── 模型：候选与"检测"按钮随后端变 ────────────────────────────────────
+
+
+def test_model_candidates_follow_the_selected_backend(qtbot):
+    """命令行后端没有"列出模型"的命令，但下拉里要有可选的候选，不能是空的。
+
+    用户反馈："模型也无法选择和检测可用模型"。opencode 能列（`opencode models`），
+    命令行后端不能列 —— 那就用后端自己声明的候选（claude 系是 sonnet/opus/haiku），
+    并且允许直接输入完整模型名。
+    """
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("codeagent"))
+    candidates = [page.model_combo.itemText(i) for i in range(page.model_combo.count())]
+    assert "sonnet" in candidates and "opus" in candidates, f"命令行后端没有模型候选：{candidates}"
+    assert page.model_combo.isEditable(), "必须可编辑：完整模型名要能直接输入"
+
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("opencode"))
+    assert page.model_combo.count() == 1, "opencode 的模型靠运行时列出，不该预置候选"
+
+
+def test_detect_models_button_is_useful_on_a_cli_backend(qtbot, monkeypatch):
+    """命令行后端点「检测可用模型」要给出候选与说明，而不是抛一句"不提供"就完事。
+
+    也不能真去跑 `opencode models`（那会把"这台机器没装 opencode"报成"检测失败"）。
+    """
+    from tu_shell_agent.ui import engine_worker
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    started: list[object] = []
+    monkeypatch.setattr(
+        engine_worker.ModelsWorker, "start", lambda self: started.append(self), raising=False
+    )
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("codeagent"))
+    page._refresh_models()
+
+    assert not started, "命令行后端不该去跑 opencode models"
+    hint = page.model_hint.text()
+    assert "可用候选" in hint and "sonnet" in hint
+    assert page.model_combo.count() > 1
+
+
+# ── 组件路径：opencode 那行随后端启用/禁用 ────────────────────────────
+
+
+def test_opencode_path_row_follows_the_selected_backend(qtbot):
+    """`opencode` 路径只在后端是 opencode 时才有意义 —— 其余后端要标出来并置灰。
+
+    用户问过："组件路径也还是 opencode，那我要是选择 codeagent 呢？"
+    """
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("opencode"))
+    assert page.opencode_path_edit.isEnabled()
+    assert "opencode" in page.opencode_path_label.text()
+
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("codeagent"))
+    assert not page.opencode_path_edit.isEnabled(), "非 opencode 后端时这一行应当置灰"
+    assert "仅" in page.opencode_path_label.text()
+    hint = page.components_hint.text()
+    assert "后端 agent" in hint, "说明要告诉用户 agent 命令在哪里设"
+    assert "shellcheck" in hint and "任何后端都需要" in hint, "说明要讲清执行侧两件套仍然必需"

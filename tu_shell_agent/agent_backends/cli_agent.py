@@ -34,6 +34,7 @@ from ..orchestrator.cli_contract import (
     with_output_instructions,
 )
 from ..shell_toolchain.execute import kill_tree
+from .invocation import invocation_argv, resolve_command
 from ..types import DetectedTool, GeneratedScript
 
 # 版本探测的默认超时：`claude --version` 是纯本地操作，20s 已经很宽松。
@@ -123,7 +124,7 @@ def probe_version(
         return None, (f"找不到命令 {command or '（未填写）'}：{install_hint}".rstrip("："))
     try:
         completed = subprocess.run(
-            [resolved, *version_args],
+            invocation_argv(command, version_args),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -455,7 +456,7 @@ class CliAgentAdapter:
         可能被当成工具名吃掉。
         """
         spec = self._spec
-        argv: list[str] = [self._command, *self._extra_args]
+        argv: list[str] = [*self._extra_args]
         argv += [spec.prompt_flag, spec.output_format_flag, spec.output_format]
         if spec.verbose_flag:
             argv.append(spec.verbose_flag)
@@ -475,7 +476,9 @@ class CliAgentAdapter:
             argv += [spec.allowed_tools_flag, ",".join(spec.allowed_tools)]
         if spec.denied_tools and spec.disallowed_tools_flag:
             argv += [spec.disallowed_tools_flag, ",".join(spec.denied_tools)]
-        return argv
+        # 最后统一把"命令 + 参数"转成能起的 argv：Windows 上 npm 装的 CLI 是 `.cmd` 包壳，
+        # 必须经 cmd.exe /c 才能起（详见 invocation.py 的说明）。
+        return invocation_argv(self._command, argv)
 
     def _take_new_session(self, session_id: str) -> bool:
         """这一次调用是"建立新会话"还是"续上既有会话"？问完即改状态。

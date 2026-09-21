@@ -43,4 +43,5 @@ DESCRIPTOR = BackendDescriptor(
     factory=make_adapter,
     # opencode 的结构约束来自 API 的 JSON schema，没有命令行旗标可配，所以 cli 约定为空。
     cli=None,
+    model_hint="留空则使用 opencode 的默认模型；未配置默认模型时会落到其免费档，而免费档仅限官方客户端调用。点「检测可用模型」可列出全部可用模型。",
 )

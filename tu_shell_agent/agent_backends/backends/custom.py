@@ -24,6 +24,7 @@ DESCRIPTOR = BackendDescriptor(
     install_hint=INSTALL_HINT,
     factory=make_adapter,
     cli=CLI_SPEC,
+    model_hint="模型名会原样传给 --model。留空则使用该后端自己的默认模型。",
 )
 
 __all__ = ["DENIED_TOOLS", "DESCRIPTOR", "INSTALL_HINT", "make_adapter"]

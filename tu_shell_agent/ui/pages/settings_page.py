@@ -80,11 +80,18 @@ class SettingsPage(QWidget):
         self.shellcheck_path_edit = QLineEdit()
         self.shellcheck_path_edit.setPlaceholderText("留空则从 PATH 中查找 shellcheck")
 
+        self.opencode_path_label = QLabel("opencode")
+        self.components_hint = QLabel()
+        self.components_hint.setObjectName("componentsHint")
+        self.components_hint.setProperty("role", "muted")
+        self.components_hint.setWordWrap(True)
+
         components = QGroupBox("组件路径")
         components_form = QFormLayout(components)
-        components_form.addRow("opencode", self.opencode_path_edit)
+        components_form.addRow(self.opencode_path_label, self.opencode_path_edit)
         components_form.addRow("Git Bash", self.bash_path_edit)
         components_form.addRow("shellcheck", self.shellcheck_path_edit)
+        components_form.addRow("", self.components_hint)
 
         # ── 后端 agent ───────────────────────────────────────────────
         # 用哪个 agent 生成脚本属于**运行参数**（改完保存后生效），所以这里不做即时预览；
@@ -130,7 +137,7 @@ class SettingsPage(QWidget):
         self.model_combo.setEditable(True)                 # 列表取不到时也能手输
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.addItem("", "")
-        self.model_combo.lineEdit().setPlaceholderText("provider/model，如 deepseek/deepseek-v4-pro")
+        self.model_combo.lineEdit().setPlaceholderText("留空 = 用该后端的默认模型")
         self.model_refresh_button = QPushButton("检测可用模型")
         self.model_refresh_button.setObjectName("modelRefreshButton")
         self.model_refresh_button.clicked.connect(self._refresh_models)
@@ -349,6 +356,8 @@ class SettingsPage(QWidget):
         self._refresh_backdrop_hint()
         self._refresh_backend_hint()
         self._refresh_model_hint()
+        self._apply_backend_model_choices()
+        self._refresh_components_hint()
         path = settings.loaded_from
         self.status_label.setText(f"保存位置：{path}" if path is not None else "尚未确定保存位置")
 
@@ -393,10 +402,16 @@ class SettingsPage(QWidget):
         from ..engine_worker import ModelsWorker
 
         if self.selected_backend_id() != "opencode":
-            # 模型列表是 `opencode models` 给的东西，只有那个后端有；命令行后端的模型名由用户
-            # 自己填（claude 那类接受 sonnet / opus 这样的别名）。这里照实说明，不去跑一条
-            # 明知会失败的命令 —— 那只会把"这台机器没装 opencode"报成"检测模型失败"。
-            self.model_hint.setText("当前后端不提供模型列表，请直接填写模型名称。")
+            # 命令行后端没有"列出模型"的命令（`claude` / `codeagent` 都没有）。用户点这个按钮是
+            # 想知道"我能填什么"，所以给出该后端声明的候选，并说清"值会原样传下去、也能手输" ——
+            # 而不是把按钮变成一句"本后端不提供"就算了（那等于按钮没用）。
+            descriptor = backend_descriptor(self.selected_backend_id())
+            self._apply_backend_model_choices()
+            names = "、".join(descriptor.model_suggestions) or "（该后端未声明候选）"
+            self.model_hint.setText(
+                f"该后端不提供模型列表。可用候选：{names}；也可直接输入完整模型名，"
+                "取值会原样传给命令行后端。留空则使用其后端自己的默认模型。"
+            )
             return
 
         self.model_refresh_button.setEnabled(False)
@@ -456,19 +471,77 @@ class SettingsPage(QWidget):
         except BackendError:
             return ""
 
+    def _apply_backend_model_choices(self) -> None:
+        """按当前后端刷新模型候选与说明。
+
+        两种后端的模型来源不同：opencode 能**列出**可用模型（`opencode models`），
+        命令行后端没有这个能力 —— 那就给一组常用别名当候选、并允许直接输入。
+        无论哪种，值都会被原样传给后端（opencode 走请求体，命令行走 `--model`）。
+        """
+        try:
+            descriptor = backend_descriptor(self.selected_backend_id())
+        except Exception:  # noqa: BLE001 - 未知后端由下拉保证不会出现，这里只做兜底
+            return
+        current = self.model_combo.currentText().strip()
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            self.model_combo.addItem("", "")
+            for name in descriptor.model_suggestions:
+                self.model_combo.addItem(name, name)
+            index = self.model_combo.findText(current)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+            else:
+                self.model_combo.setEditText(current)
+        finally:
+            self.model_combo.blockSignals(False)
+        self.model_hint.setText(descriptor.model_hint)
+
     def _on_backend_changed(self) -> None:
         """下拉或命令框变了：丢掉旧结论，重铺提示行（保存后才真正生效）。"""
         self._backend_probe = None
+        self._apply_backend_model_choices()
+        self._refresh_components_hint()
         self._refresh_backend_hint()
         self._refresh_model_hint()
 
     def _refresh_model_hint(self) -> None:
-        """模型这一栏的说明跟着后端走（opencode 的免费档提示对命令行后端不适用）。"""
+        """模型这一栏的说明跟着后端走（opencode 的免费档提示对命令行后端不适用）。
+
+        说明语由**后端自己的文件**声明（`model_hint`）；没声明才退回两个通用常量 ——
+        这样加一个新后端时，说明不会漏写、也不用改这个文件。
+        """
         try:
-            needs_serve = backend_descriptor(self.selected_backend_id()).needs_serve
+            descriptor = backend_descriptor(self.selected_backend_id())
         except BackendError:
-            needs_serve = True
-        self.model_hint.setText(_OPENCODE_MODEL_HINT if needs_serve else _CLI_MODEL_HINT)
+            self.model_hint.setText(_OPENCODE_MODEL_HINT)
+            return
+        self.model_hint.setText(
+            descriptor.model_hint or (_OPENCODE_MODEL_HINT if descriptor.needs_serve else _CLI_MODEL_HINT)
+        )
+
+    def _refresh_components_hint(self) -> None:
+        """`opencode` 路径只在"后端 = opencode"时有意义，其余后端要把它标出来并置灰。
+
+        用户问过："组件路径也还是 opencode，那我要是选择 codeagent 呢？" —— 答案是
+        agent 命令在「后端 agent」里设置；bash 与 shellcheck 任何后端都要用（引擎执行脚本
+        的是它们，换 agent 不换执行者）。界面必须把这件事说清楚，而不是留一个人人误会的输入框。
+        """
+        is_opencode = self.selected_backend_id() == "opencode"
+        self.opencode_path_edit.setEnabled(is_opencode)
+        self.opencode_path_label.setText("opencode" if is_opencode else "opencode（仅该后端使用）")
+        self.components_hint.setText(
+            "Git Bash 与 shellcheck 由引擎执行脚本时使用，任何后端都需要。"
+            if not is_opencode
+            else "当前后端是 opencode，上面的路径生效。"
+        )
+        if not is_opencode:
+            self.components_hint.setText(
+                "opencode 路径仅在后端为 opencode 时使用；当前后端是 "
+                f"{self.backend_combo.currentText()}，其命令在上面的「后端 agent」中设置。"
+                "Git Bash 与 shellcheck 由引擎执行脚本时使用，任何后端都需要。"
+            )
 
     def _refresh_backend_hint(self) -> None:
         """把"当前后端 / 解析出的命令 / 上一次检测的结论"如实铺在提示行里。"""

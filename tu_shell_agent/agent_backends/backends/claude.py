@@ -89,6 +89,13 @@ def make_adapter(command: str, note: Callable[[str], None] | None = None) -> Cli
     return CliAgentAdapter(command=command, spec=CLI_SPEC, note=note)
 
 
+# Claude Code 的模型既可用别名（sonnet / opus / haiku），也可用完整名（如 claude-sonnet-4-6）。
+# 这个后端没有"列出模型"的命令，所以给一组常用别名做候选；用户可以自己改成完整名。
+MODEL_SUGGESTIONS: tuple[str, ...] = ("sonnet", "opus", "haiku")
+
+MODEL_HINT = "模型名会原样传给 --model（可用别名，也可填完整名）。留空则使用该后端自己的默认模型；本后端不提供模型列表。"
+
+
 DESCRIPTOR = BackendDescriptor(
     id="claude",
     display_name="Claude Code",
@@ -99,6 +106,8 @@ DESCRIPTOR = BackendDescriptor(
     install_hint=INSTALL_HINT,
     factory=make_adapter,
     cli=CLI_SPEC,
+    model_suggestions=MODEL_SUGGESTIONS,
+    model_hint=MODEL_HINT,
 )
 
 __all__ = ["ALLOWED_TOOLS", "CLI_SPEC", "DENIED_TOOLS", "DESCRIPTOR", "INSTALL_HINT", "make_adapter"]

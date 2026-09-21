@@ -37,6 +37,12 @@ class BackendDescriptor:
     # 命令必须由用户填写（自定义后端）：留空时要在探测与运行两处都给出明确错误，
     # 而不是拿一个空字符串去撞子进程。
     requires_command: bool = False
+    # 该后端**没有**"列出可用模型"的能力时给出的建议值（可编辑下拉的候选项）。
+    # 有列表能力的后端（opencode 的 `opencode models`）留空 —— 那是运行时探测出来的，
+    # 不该在这里写死一份会过期的清单。
+    model_suggestions: tuple[str, ...] = ()
+    # 模型字段的说明语：告诉用户"这里的值会被原样传给谁、留空是什么意思"。
+    model_hint: str = ""
     # 命令行后端的旗标约定；走 HTTP 的后端（opencode）为 None。
     cli: CliSpec | None = None
 

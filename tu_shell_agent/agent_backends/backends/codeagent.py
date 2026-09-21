@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from ..descriptor import BackendDescriptor
-from .claude import CLI_SPEC, DENIED_TOOLS, make_adapter
+from .claude import CLI_SPEC, DENIED_TOOLS, MODEL_HINT, MODEL_SUGGESTIONS, make_adapter
 
 INSTALL_HINT = "请确认 codeagent 已安装并在 PATH 中，或在本页「命令」中填写它的完整路径"
 
@@ -22,8 +22,17 @@ DESCRIPTOR = BackendDescriptor(
     install_hint=INSTALL_HINT,
     factory=make_adapter,
     cli=CLI_SPEC,
+    model_suggestions=MODEL_SUGGESTIONS,
+    model_hint=MODEL_HINT,
 )
 
 # `DENIED_TOOLS` / `make_adapter` 从 claude 条目再导出：这个后端禁用的是同一份清单、
 # 用的是同一个适配器。放在 __all__ 里，是为了让"从这里就能查到它禁了什么"成立。
-__all__ = ["DENIED_TOOLS", "DESCRIPTOR", "INSTALL_HINT", "make_adapter"]
+__all__ = [
+    "DENIED_TOOLS",
+    "DESCRIPTOR",
+    "INSTALL_HINT",
+    "MODEL_HINT",
+    "MODEL_SUGGESTIONS",
+    "make_adapter",
+]
