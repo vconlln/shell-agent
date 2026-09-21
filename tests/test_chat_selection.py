@@ -294,3 +294,21 @@ def test_quote_bar_does_not_squeeze_the_input(chat, qtbot):
     chat.clear_quote()
     qtbot.wait(20)
     assert chat.transcript.height() == transcript_before, "撤掉引用后记录区没收回那一段高度"
+
+
+def test_crlf_quote_is_normalized(chat):
+    """Windows 来的文本可能是 CRLF：引用要规范化成 `\n` 再进提示词。
+
+    `\r` 混在围栏代码块里会让 diff、行数与围栏判定全都变脏（Qt 控件那条路已经换成 `\n`，
+    但 `set_quote()` 是公开入口，别的调用方不一定经过控件 —— Windows 上尤其如此）。
+    """
+    sent: list[str] = []
+    chat.send_requested.connect(sent.append)
+    chat.set_quote("echo one\r\necho two\r\n", "本轮脚本 · 第 1–2 行")
+    text, _source = chat.quote()
+    assert text == "echo one\necho two"
+    assert "\r" not in text
+
+    chat.input.setPlainText("这两行有问题吗？")
+    chat._on_send()
+    assert "\r" not in sent[0], f"消息里还带着 \\r：{sent[0]!r}"

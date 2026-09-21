@@ -74,12 +74,45 @@ def available_screen_size() -> tuple[int, int]:
 def window_minimum_for(available: tuple[int, int]) -> tuple[int, int]:
     """按屏幕可用区分摊窗口最小尺寸（纯函数，便于用例钉住规则）。
 
-    取可用区的九成（高度取八成半），并保留一个下限（720x520）—— 比这更小的窗口已经
-    没法用了，宁可让用户去放大窗口，也不要把界面压成重叠。
+    规则：取可用区的九成（高度八成半），收敛在舒适值以内，并保留一个下限（720x520）。
+    **但下限永远不能超过屏幕本身**：屏幕比下限还小时（高 DPI 缩放后逻辑像素很少，
+    例如 1366x768 的笔记本在 150% 下只有 910x512 逻辑像素），把下限收敛到可用区的九五成。
+    不这么做的话，窗口管理器会照给那个"最小尺寸"，布局只能违反最小尺寸 ——
+    症状就是用户报过的"文字出框 / 面板与输入框重叠 / 某栏被压没"。
+    实测（QT_SCALE_FACTOR=1.5 模拟）：逻辑屏幕 533x533 时旧公式给出 720x520，比屏幕还宽。
     """
-    width = max(720, min(960, int(available[0] * 0.9)))
-    height = max(520, min(780, int(available[1] * 0.85)))
-    return (width, height)
+
+    def _pick(available_px: int, floor: int, comfortable: int, ratio: float) -> int:
+        if available_px <= 0:                       # 拿不到屏幕信息：用保守值，别算出 0
+            return floor
+        target = max(floor, min(comfortable, int(available_px * ratio)))
+        return min(target, max(int(available_px * 0.95), 1))
+
+    return (
+        _pick(available[0], 720, 960, 0.90),
+        _pick(available[1], 520, 780, 0.85),
+    )
+
+
+def console_dialog_size_for(available: tuple[int, int]) -> tuple[int, int]:
+    """「控制台」弹窗的目标尺寸（纯函数，便于用例钉住规则）。
+
+    弹窗里装着 5 个页签 + 一行关闭按钮，舒适尺寸是 860x560。但**固定尺寸会在小屏上出界**：
+    1366x768 的笔记本在 150% 缩放下只有 910x512 逻辑像素，560 高的弹窗比屏幕还高，
+    底部那行按钮点不到。所以按可用区的九成/八成半收敛，并且（与主窗口同一条规则）
+    下限不许超过屏幕 —— 屏幕更小时收敛到九五成。
+    """
+
+    def _pick(available_px: int, floor: int, comfortable: int, ratio: float) -> int:
+        if available_px <= 0:
+            return floor
+        target = max(floor, min(comfortable, int(available_px * ratio)))
+        return min(target, max(int(available_px * 0.95), 1))
+
+    return (
+        _pick(available[0], 520, 860, 0.90),
+        _pick(available[1], 360, 560, 0.85),
+    )
 
 
 class MainWindow(QMainWindow):
@@ -200,6 +233,7 @@ class MainWindow(QMainWindow):
         self.console_dialog = QDialog(self)
         self.console_dialog.setObjectName("consoleDialog")
         self.console_dialog.setWindowTitle("控制台 — 运行 / 历史 / 模板 / 自检 / 设置")
+        # 舒适尺寸；每次打开都会按**当前屏幕**重算（小屏上固定尺寸会让底部按钮出界）——见 open_console
         self.console_dialog.resize(860, 560)
         console_layout = QVBoxLayout(self.console_dialog)
         console_layout.addWidget(self.tool_tabs, 1)
@@ -292,11 +326,22 @@ class MainWindow(QMainWindow):
             self._wire_controller()
 
     def open_console(self, page: QWidget | None = None) -> None:
-        """打开「控制台」弹窗；`page` 指定要选中的页（不指定就保持上次那页）。"""
+        """打开「控制台」弹窗；`page` 指定要选中的页（不指定就保持上次那页）。
+
+        打开时检查一次尺寸：**装不下才收敛**，用户自己调过的尺寸不动（弹窗可能被拖到
+        另一块分辨率不同的屏上 —— 那种情况下固定尺寸会让底部的「关闭」按钮出界）。
+        """
         if page is not None:
             index = self.tool_tabs.indexOf(page)
             if index >= 0:
                 self.tool_tabs.setCurrentIndex(index)
+        screen = self.screen()
+        if screen is not None:
+            rect = screen.availableGeometry()
+            available = (rect.width(), rect.height())
+            size = self.console_dialog.size()
+            if size.width() > available[0] or size.height() > available[1]:
+                self.console_dialog.resize(*console_dialog_size_for(available))
         self.console_dialog.show()
         self.console_dialog.raise_()
         self.console_dialog.activateWindow()

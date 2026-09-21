@@ -46,11 +46,25 @@ def test_window_minimum_never_exceeds_the_screen():
         assert height <= available[1], f"{available} 下最小高度 {height} 超出屏幕"
 
 
-def test_window_minimum_keeps_a_usable_floor():
-    """再小的屏幕也不能把最小尺寸压到"没法用"：界面本身有下限。"""
-    for available in ((800, 600), (640, 480), (1024, 600)):
+def test_window_minimum_keeps_a_usable_floor_when_the_screen_allows():
+    """屏幕装得下时保留 720x520 的可用下限；装不下时下限**让位给屏幕**。
+
+    这两条要求在 640x480 这种屏幕上直接冲突（屏幕放不下 720x520），必须选一条：
+    选"不超过屏幕"。理由是用户实测的那三条症状 —— 最小尺寸比屏幕还大时，窗口管理器照给，
+    布局只能违反最小尺寸（文字出框 / 面板与输入框重叠 / 某栏被压没）；
+    反过来（窗口比屏幕小）只是界面挤一点，不会互相覆盖。
+    """
+    for available in ((800, 600), (1024, 600), (1280, 720)):
         width, height = window_minimum_for(available)
         assert width >= 720 and height >= 520, f"{available} 下最小尺寸被压得不可用：{width}x{height}"
+
+    # 屏幕比地板还小：收敛到屏幕的九五成（旧公式在这里给出 720x520，比 640x480 的屏幕还大）
+    for available in ((640, 480), (533, 533)):
+        width, height = window_minimum_for(available)
+        assert width <= available[0] and height <= available[1], (
+            f"{available} 下最小尺寸 {width}x{height} 超过了屏幕"
+        )
+        assert width >= int(available[0] * 0.9), f"{available} 下窗口被压得太小：{width}"
 
 
 def test_window_minimum_grows_with_big_screens_but_is_capped():
@@ -192,4 +206,47 @@ def test_chat_is_a_page_of_the_right_column(qtbot):
     assert window.right_tabs.tabText(0) == "模型对话"
     assert window.right_tabs.widget(0) is window.chat_panel
     assert window.right_tabs.widget(1) is window.right_pane
+    window.close()
+
+
+# ── 控制台弹窗：小屏上不许出界（底部是「关闭」按钮那一行）────────────────
+
+
+def test_console_dialog_size_never_exceeds_a_small_screen():
+    """弹窗尺寸规则：舒适值 860x560，小屏上收敛，**且下限不许超过屏幕**。
+
+    1366x768 的笔记本在 150% 缩放下只有 910x512 逻辑像素 —— 560 高的弹窗比屏幕还高，
+    底部的「关闭」按钮就点不到了。
+    """
+    from tu_shell_agent.ui.main_window import console_dialog_size_for
+
+    assert console_dialog_size_for((1920, 1080)) == (860, 560), "大屏上应当是舒适尺寸"
+    assert console_dialog_size_for((1280, 720)) == (860, 560), "用户的 1080p/150% 场景"
+
+    for available in ((910, 512), (640, 480), (533, 533), (1024, 600)):
+        width, height = console_dialog_size_for(available)
+        assert width <= available[0] and height <= available[1], (
+            f"{available} 下弹窗 {width}x{height} 超出屏幕"
+        )
+        # 别缩得没必要：装得下舒适尺寸就用舒适尺寸，装不下才收敛
+        assert width >= min(860, int(available[0] * 0.9)), f"{available} 下弹窗被压得太窄：{width}"
+
+
+def test_open_console_resizes_itself_to_fit_the_screen(qtbot):
+    """真的打开一次：弹窗必须落在屏幕可用区之内，且「关闭」按钮可见可点。"""
+    from tu_shell_agent.ui.main_window import available_screen_size
+
+    window = _window(qtbot, ui_scale=0.8)
+    window.show()
+    window.open_console()
+    qtbot.wait(30)
+
+    dialog = window.console_dialog
+    available = available_screen_size()
+    assert dialog.width() <= available[0] and dialog.height() <= available[1], (
+        f"弹窗 {dialog.width()}x{dialog.height()} 超出屏幕 {available}"
+    )
+    assert window.console_close_button.isVisible()
+    assert window.start_button.isVisible(), "运行页的按钮也要在弹窗里看得见"
+    dialog.accept()
     window.close()

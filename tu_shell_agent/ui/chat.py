@@ -38,11 +38,16 @@ _QUOTE_MAX_CHARS = 6000
 
 
 def _clamp_quote(text: str) -> tuple[str, bool]:
-    """限长引用，返回 (正文, 是否截断过)。
+    """规范化并限长引用，返回 (正文, 是否截断过)。
 
-    按行与字符两个上限取先到的那个：一行几万字符的压缩脚本也要挡（否则"行数没超"
-    却照样把提示词撑爆）。
+    先统一换行：Windows 上来的文本可能是 CRLF（模型输出、脚本文件都可能是），
+    而 `\r` 进了提示词与围栏判定只会变脏 —— Qt 控件那条路已经换成 `\n` 了，
+    但 `set_quote()` 是公开入口，别的调用方不一定经过控件。
+
+    限长按行与字符两个上限取先到的那个：一行几万字符的压缩脚本也要挡
+    （否则"行数没超"却照样把提示词撑爆）。
     """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.rstrip("\n").split("\n")
     truncated = False
     if len(lines) > _QUOTE_MAX_LINES:

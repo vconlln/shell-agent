@@ -751,3 +751,70 @@ X11 抓屏拿到的也是"整块屏幕"而不是"窗口背后"。
 `test_ui_layout.py`（右栏折叠改为按**窗口高度**触发）、`test_dpi_layout.py`（工具区 → 控制台弹窗）、
 `test_appearance.py`（弹窗里的控件要先显示弹窗、逐帧取色）、新增 `tests/test_wrap_row.py`（4 条）。
 整套 **463 passed / 1 skipped**，应用 `--self-test` exit=0，Linux 产物重建后自检 exit=0。
+
+
+## 修订十九（2026-09-20）：用「150% 缩放」模拟 Windows 形状，揪出一条真 bug
+
+用户睡觉前的要求是"确保 windows 版本无误"。开发机是 Linux，真机行为没法直接验，
+所以能做的就是**把 Windows 的形状在本机复现出来**，再让用例去撞。
+
+### 复现手段
+
+`QT_SCALE_FACTOR=1.5`（或 2）跑同一套用例：逻辑屏幕像素会按比例缩小
+（offscreen 测试屏 800x800 → 150% 下只有 533x533），凡是"按屏幕可用区收敛"的规则
+都会走进小屏分支 —— 这正是 Windows 150% 缩放（1080p 只有 720 逻辑像素高）的形状。
+
+### 撞出来的真 bug：最小尺寸可以比屏幕还大
+
+`window_minimum_for()` 里那个"舒适下限"是 `max(720, …)`，屏幕更小时它照样返回 720：
+
+| 屏幕可用区 | 旧公式 | 新规则 |
+| --- | --- | --- |
+| 1920×1080 | 960×780 | 960×780（不变） |
+| 1280×720（1080p/150%，用户机） | 960×612 | 960×612（不变） |
+| 800×800（本机测试屏） | 720×680 | 720×680（不变） |
+| 533×533（150% 模拟） | **720×520（比屏幕还大）** | 506×506 |
+| 640×480 | **720×520（比屏幕还大）** | 608×456 |
+
+"最小尺寸比屏幕还大"正是用户报过的那三条症状的根因：窗口管理器照给最小尺寸，
+布局只能违反它 —— 文字出框、面板与输入框重叠、某栏被压没。
+新规则：下限只在屏幕装得下时生效，否则收敛到可用区的九五成（宽 758 / 高 547 以下才触发，
+所以大屏与用户机的取值逐值不变）。
+
+**修法**：`window_minimum_for` 改成 `_pick(available, floor, comfortable, ratio)`
+（先取"下限与舒适值之间的目标"，再用屏幕的九五成封顶）；
+新增 `console_dialog_size_for`（同一套规则，「控制台」弹窗原来固定 860×560 ——
+1366×768 笔记本在 150% 下只有 512 逻辑像素高，弹窗比屏幕还高，底部「关闭」按钮点不到）。
+弹窗在 `open_console()` 里**装不下才收敛**，用户自己调过的尺寸不动。
+
+用例：`test_window_minimum_never_exceeds_a_small_screen`、
+`test_console_dialog_size_never_exceeds_a_small_screen`、
+`test_open_console_resizes_itself_to_fit_the_screen`；
+原来那条 `test_window_minimum_keeps_a_usable_floor` 把两条**互相冲突**的要求同时钉住了
+（640×480 的屏幕上不可能既 ≥720×520 又 ≤ 屏幕），已改写为"屏幕装得下时才保留下限"。
+
+### 连带修的测试方法问题：取色没算 devicePixelRatio
+
+150% 下 `widget.grab()` 出来的是**物理像素**图（1.5 倍），而所有取色用例都在用逻辑坐标
+`image.pixel(x, y)` —— 于是取到了别的地方（实测："脚本只读底"那一格取到了行号区的颜色，
+三条用例假红）。新增 `tests/conftest.py::Grab`：按 `devicePixelRatioF()` 换算后再取色，
+`test_theme.py` 与 `test_appearance.py` 的取色全部改走它。改完之后 150% 与 100% 两套
+跑出来的结论一致 —— 这也是"像素级用例在高 DPI 下仍然可信"的前提。
+
+### 其它 Windows 方向的核对（都做了，结论写在 packaging/build.md）
+
+- **打包收集**：Linux 产物用**同一份 spec**，PyInstaller 分析表里 `wrap_row` / `selection_menu`
+  都在（新模块都在包内，自动收集），模板库由 `BUILTIN_TEMPLATES` 在首次 `list()` 时写进用户数据
+  目录 —— 打包产物不会出现空模板库；
+- **CRLF**：`set_quote()` 显式把 CRLF 规范化成 `\n`（Qt 控件那条路本来就是 U+2029 → `\n`，
+  但公开入口不能假设调用方经过控件），用例 `test_crlf_quote_is_normalized`；
+- **打包脚本**：`build.bat`（纯 ASCII + CRLF）与 `build.sh` 共用同一份 spec、抽查同一组 Qt 插件，
+  这两条都有契约用例守着；本次没有新增数据文件，两个脚本都不需要改；
+- **手测清单**：`packaging/build.md` 新增 §6.2（B1~B9：控制台弹窗、右列页签、选中引用、
+  接受并重跑、窄栏折行、150% 缩放），以及"高 DPI 形状怎么在没有 Windows 的机器上验"的说明。
+
+### 测试
+
+`QT_SCALE_FACTOR=1.5` 跑完整套：**466 passed / 2 skipped**（跳过的两条：需要真 opencode 凭据的
+live 冒烟、以及本机测试屏装不下右列对话页的那条，后者跳过理由写在用例里）。
+默认（100%）跑完整套：**466 passed / 2 skipped**。

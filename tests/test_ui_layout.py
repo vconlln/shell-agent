@@ -148,18 +148,45 @@ def test_window_minimum_is_usable_and_fits_the_screen(window):
 
     以前写死 960x780，在 Windows 150% 缩放（1080p 只有 720 逻辑像素高）下比屏幕还高 ——
     窗口管理器照给，布局只能违反最小尺寸，于是出现重叠与出框（用户反馈的三条症状）。
-    现在的规则：按屏幕可用区的九成/八成半收敛，并保留 720x520 的可用下限。
+    现在的规则：按屏幕可用区的九成/八成半收敛，保留 720x520 的下限，**但下限不许超过屏幕**。
+    屏幕比下限还小时（高 DPI 缩放后逻辑像素很少）收敛到可用区的九五成 —— 否则窗口管理器
+    照样给那个"最小尺寸"，布局只能违反它（用户报的三条症状就是这么来的）。
     """
     from tu_shell_agent.ui.main_window import available_screen_size, window_minimum_for
 
-    expected = window_minimum_for(available_screen_size())
+    available = available_screen_size()
+    expected = window_minimum_for(available)
     minimum = window.minimumSize()
     assert (minimum.width(), minimum.height()) == expected
-    assert minimum.width() >= 720 and minimum.height() >= 520, "最小尺寸被压到不可用"
-    available = available_screen_size()
     assert minimum.width() <= available[0] and minimum.height() <= available[1], (
         "最小尺寸超过了屏幕可用区 —— 布局会被迫违反最小尺寸"
     )
+    assert minimum.width() >= min(720, int(available[0] * 0.95)), "最小宽度被压到不可用"
+    assert minimum.height() >= min(520, int(available[1] * 0.95)), "最小高度被压到不可用"
+
+
+def test_window_minimum_never_exceeds_a_small_screen():
+    """屏幕比"舒适下限"还小时，最小尺寸必须让位给屏幕（高 DPI 笔记本就是这个场景）。
+
+    实测（修前）：`QT_SCALE_FACTOR=1.5` 下逻辑屏幕只有 533x533，旧公式给出 720x520 ——
+    比屏幕还宽 187px。窗口管理器照给这个尺寸，布局只能违反最小尺寸，于是出现
+    "文字出框 / 面板与输入框重叠 / 某栏被压没"（用户在 Windows 150% 上报过这三条）。
+    """
+    from tu_shell_agent.ui.main_window import window_minimum_for
+
+    for size in ((533, 533), (400, 400), (910, 512), (1280, 720), (1920, 1080), (1280, 512)):
+        width, height = window_minimum_for(size)
+        assert width <= size[0], f"{size} 下最小宽度 {width} 超过了屏幕"
+        assert height <= size[1], f"{size} 下最小高度 {height} 超过了屏幕"
+        assert width >= 1 and height >= 1
+
+    # 屏幕够大时仍然是那套舒适值（别为了小屏把大屏的规则改坏了）：
+    # 宽 758 逻辑像素以上、高 547 以上时，新公式与旧公式逐值相同。
+    assert window_minimum_for((1920, 1080)) == (960, 780)
+    assert window_minimum_for((1000, 800)) == (900, 680)
+    assert window_minimum_for((800, 800)) == (720, 680)
+    assert window_minimum_for((1280, 720)) == (960, 612)
+    assert window_minimum_for((0, 0)) == (720, 520), "拿不到屏幕信息时用保守值"
 
 
 def test_panes_and_inner_panels_declare_minimums(window):
@@ -195,7 +222,22 @@ def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
     """把窗口缩到**允许的最小尺寸**，关键控件仍要有能用的高度。
 
     这是用户实际遇到的那个场景：一直缩小窗口，栏目越挤越扁，最后什么都看不见。
+
+    前提：屏幕装得下"内容真正需要的尺寸"。高 DPI 的小屏上（例如 400x400 逻辑像素）
+    窗口最小尺寸已被收敛到屏幕之内，小于内容需要 —— 那种情况下这条用例的前提不成立，
+    界面必然会挤（Qt 只能违反最小尺寸），跳过并写明原因，而不是假装通过。
     """
+    # 前提是**屏幕本身**装得下右列的对话页（页签条 + 对话面板，它是最高的那一页）。
+    # 判断只看环境（屏幕尺寸），不看控件缩完之后量到的尺寸 —— 否则"某次回归把右列压扁了"
+    # 也会被当成"屏幕太小"而跳过，这条用例就失去意义了。
+    from tu_shell_agent.ui.main_window import available_screen_size
+
+    available = available_screen_size()
+    chat_need = window.chat_panel.minimumSizeHint().height()
+    needed = chat_need + window.right_tabs.tabBar().sizeHint().height() + 60   # 60 ≈ 底栏与边距
+    if available[0] < 1000 or available[1] < needed:
+        pytest.skip(f"屏幕 {available} 装不下右列的对话页（需要约 {needed}px 高、1000px 宽）")
+
     window.resize(window.minimumSize())
     qtbot.wait(50)
 

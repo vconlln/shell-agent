@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 
 import pytest
+
+from conftest import Grab
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
@@ -92,11 +94,11 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
     window.show()
     qtbot.waitExposed(window)
 
-    image = window.grab().toImage()
+    grab = Grab(window)
 
     def rendered(widget, offset: QPoint = QPoint(6, 6)) -> str:
         point = widget.mapTo(window, widget.rect().topLeft() + offset)
-        return QColor(image.pixel(point.x(), point.y())).name()
+        return grab.name(point.x(), point.y())
 
     assert rendered(window) == "#101114"                              # 主背景
     assert rendered(window.center_pane.script_view) == "#0b0c0e"      # 只读底（更深一档）
@@ -104,8 +106,8 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
     # 「执行输出」在右栏第二个页签里（未选中时不渲染），主按钮在控制台弹窗里 —— 都不能从
     # 整窗帧按坐标取色，改成取**控件自己的帧**（弹窗要先显示，否则布局没算过、帧是空的）。
     def own_center(widget) -> str:
-        frame = widget.grab().toImage()
-        return QColor(frame.pixel(widget.width() // 2, widget.height() // 2)).name()
+        frame = Grab(widget)
+        return frame.name(widget.width() // 2, widget.height() // 2)
 
     window.right_tabs.setCurrentWidget(window.right_pane)
     window.open_console(window.run_page)      # 主操作（开始）在里面
@@ -144,11 +146,11 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
     window.show()
     qtbot.waitExposed(window)
 
-    image = window.grab().toImage()
+    grab = Grab(window)
 
     def rendered(widget, offset: QPoint = QPoint(8, 8)) -> str:
         point = widget.mapTo(window, widget.rect().topLeft() + offset)
-        return QColor(image.pixel(point.x(), point.y())).name()
+        return grab.name(point.x(), point.y())
 
     # 对话面板在右栏页签里（未选中时不渲染），所以用**控件自己的帧**取色：
     # 从整窗帧里按坐标取会被页签裁切/相邻控件遮挡影响（这条用例第一版就是这么失败的）。
@@ -156,8 +158,8 @@ def test_chat_panel_and_extra_box_are_themed(themed_app, qtbot):
     qtbot.wait(50)
 
     def own_color(widget) -> str:
-        frame = widget.grab().toImage()
-        return QColor(frame.pixel(widget.width() // 2, widget.height() // 2)).name()
+        frame = Grab(widget)
+        return frame.name(widget.width() // 2, widget.height() // 2)
 
     assert own_color(window.chat_panel.transcript) == "#0b0c0e"      # 只读记录区
     # 输入控件的底色与圆角由 test_form_controls_are_rounded... 用**隔离窗口**验证：
@@ -194,11 +196,11 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
     # 取色必须在**弹窗自己的帧**里做：弹窗是顶层窗口，把它的控件映射到主窗口上拿到的是
     # 无意义的坐标（跨顶层窗口映射），第一版就是在这里取到了相邻控件的颜色。
     dialog = window.console_dialog
-    image = dialog.grab().toImage()
+    grab = Grab(dialog)
 
     def sample(offset: QPoint) -> str:
         point = history.mapTo(dialog, history.rect().topLeft() + offset)
-        return QColor(image.pixel(point.x(), point.y())).name()
+        return grab.name(point.x(), point.y())
 
     center = sample(QPoint(history.width() // 2, history.height() // 2))
     corner = sample(QPoint(1, 1))
@@ -236,10 +238,10 @@ def test_quote_bar_is_themed(themed_app, qtbot):
     qtbot.wait(30)
 
     bar = window.chat_panel.quote_bar
-    image = window.grab().toImage()
+    grab = Grab(window)
     origin = bar.mapTo(window, bar.rect().topLeft())
-    center = QColor(image.pixel(origin.x() + bar.width() // 2, origin.y() + bar.height() // 2)).name()
-    corner = QColor(image.pixel(origin.x(), origin.y())).name()
+    center = grab.name(origin.x() + bar.width() // 2, origin.y() + bar.height() // 2)
+    corner = grab.name(origin.x(), origin.y())
 
     assert center == "#17181c", f"引用条底色是 {center}，不是卡片色（没吃到主题）"
     assert corner == "#101114", f"引用条圆角外是 {corner}，不是面板底色"
@@ -269,10 +271,10 @@ def test_tab_corners_are_actually_rounded(themed_app, qtbot):
             continue
         index = bar.currentIndex()
         rect = bar.tabRect(index)                     # 取选中的那个：它有填充色，才能比较
-        image = bar.grab().toImage()
+        grab = Grab(bar)
 
         def color(dx: int, dy: int) -> str:
-            return QColor(image.pixel(rect.x() + dx, rect.y() + dy)).name()
+            return grab.name(rect.x() + dx, rect.y() + dy)
 
         corner = color(1, 1)
         fill = color(rect.width() // 2, rect.height() - 4)
@@ -310,11 +312,11 @@ def test_form_controls_are_rounded_when_they_have_a_normal_height(themed_app, qt
     host.show()
     qtbot.waitExposed(host)
 
-    image = host.grab().toImage()
+    grab = Grab(host)
     for name, widget in controls.items():
         def color(x: int, y: int) -> str:
             point = widget.mapTo(host, QPoint(x, y))
-            return QColor(image.pixel(point.x(), point.y())).name()
+            return grab.name(point.x(), point.y())
 
         corner = color(1, 1)
         center = color(widget.width() // 2, widget.height() // 2)
@@ -397,9 +399,9 @@ def test_read_only_view_scrollbar_uses_the_read_only_surface(themed_app, qtbot):
     bar = view.verticalScrollBar()
     assert bar.isVisible(), "内容放不下时应当出现滚动条"
 
-    image = host.grab().toImage()
+    grab = Grab(host)
     strip = [
-        QColor(image.pixel(view.mapTo(host, QPoint(x, y)).x(), view.mapTo(host, QPoint(x, y)).y())).name()
+        grab.name(view.mapTo(host, QPoint(x, y)).x(), view.mapTo(host, QPoint(x, y)).y())
         for y in range(view.height())
         for x in range(view.width() - bar.width(), view.width())
     ]

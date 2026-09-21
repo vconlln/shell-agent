@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from conftest import Grab
 from PySide6.QtWidgets import QApplication
 
 from tu_shell_agent.ui.main_window import MainWindow
@@ -499,12 +501,14 @@ def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
     window.show()
     window.apply_appearance()
 
+    # 控制台弹窗的页签条（工具区搬进弹窗之后，页签都在这里）
+    window.open_console(window.run_page)
     bar = window.tool_tabs.tabBar()
-    image = window.grab().toImage()
+    grab = Grab(window.console_dialog)      # 弹窗是顶层窗口，只它的帧里能取到色
 
     def pixel(offset):
-        point = bar.mapTo(window, bar.rect().topLeft() + offset)
-        color = image.pixelColor(point)
+        point = bar.mapTo(window.console_dialog, bar.rect().topLeft() + offset)
+        color = grab.color(point.x(), point.y())
         return (color.red(), color.green(), color.blue(), color.alpha())
 
     # 条内纯底色取样：页签上方的内边距，不会落在文字或选中药丸上

@@ -54,3 +54,28 @@ def restore_app(qtbot):
         font = app.font()
         font.setPointSizeF(point_size)
         app.setFont(font)
+
+
+class Grab:
+    """`widget.grab()` 的**逻辑像素**取色包装（高 DPI 下必须用）。
+
+    为什么需要：`grab()` 出来的图片是**物理像素**图 —— `devicePixelRatio` 1.5（Windows 150%
+    缩放）时图宽是控件逻辑宽度的 1.5 倍。直接拿逻辑坐标去 `pixel()` 会取到别的地方
+    （实测：150% 下"脚本只读底"那一格取到的是行号区的颜色，三条用例因此假红）。
+    所有按坐标取色的用例都走这里，界面在什么缩放下都测得准。
+    """
+
+    def __init__(self, widget) -> None:
+        self.image = widget.grab().toImage()
+        self.ratio = float(widget.devicePixelRatioF() or 1.0)
+
+    def color(self, x: int, y: int):
+        px = min(max(int(round(x * self.ratio)), 0), self.image.width() - 1)
+        py = min(max(int(round(y * self.ratio)), 0), self.image.height() - 1)
+        return self.image.pixelColor(px, py)
+
+    def name(self, x: int, y: int) -> str:
+        return self.color(x, y).name()
+
+    def rgb(self, x: int, y: int) -> tuple[int, int, int]:
+        return tuple(self.color(x, y).getRgb()[:3])
