@@ -104,7 +104,9 @@ class ChatPanel(QWidget):
         self.transcript = QPlainTextEdit()
         self.transcript.setObjectName("chatTranscript")
         self.transcript.setReadOnly(True)
-        self.transcript.setMinimumHeight(120)
+        # 120 太高了：Windows 150% 缩放下工具区常常只有两三百逻辑像素，
+        # 记录 120 + 输入 72 就把面板顶到 324，窗口地板被抬到 666 —— 再没余量就重叠。
+        self.transcript.setMinimumHeight(64)
         self.transcript.setPlaceholderText(
             "显示与模型的对话；运行期间的模型输出也会追加在此处。"
         )
@@ -114,7 +116,7 @@ class ChatPanel(QWidget):
         self.input.setPlaceholderText(
             "输入问题，例如：该报告的含义 / 第二轮失败的原因 / 将脚本改为先备份再删除。（Ctrl+Enter 发送）"
         )
-        self.input.setFixedHeight(72)
+        self.input.setFixedHeight(56)
 
         self.send_button = QPushButton("发送")
         self.send_button.setObjectName("chatSendButton")

@@ -228,6 +228,43 @@ def _install_popup_keeper(app) -> None:
         app.installEventFilter(_popup_keeper)
 
 
+def fit_form_labels(root) -> int:
+    """把表单标签列撑到"文字真正需要的宽度"，返回处理过的标签数量。
+
+    为什么需要：Qt 的 `QLabel.sizeHint()` **不含 QSS 的 padding**，而 QFormLayout 就是按
+    sizeHint 分配标签列宽度的 —— 于是每个标签都比文字窄一点点（实测每种缩放下都差 4px），
+    中文标签"运行根目录"直接被截尾。换字体/改缩放之后不会自动重算，所以这个函数在每次
+    应用外观之后都要跑一遍。
+    """
+    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtWidgets import QFormLayout, QLabel
+
+    handled = 0
+    for form in [root, *root.findChildren(QFormLayout)]:
+        if not isinstance(form, QFormLayout):
+            continue
+        width = 0
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, QLabel):
+                metrics = QFontMetrics(widget.font())
+                width = max(width, metrics.horizontalAdvance(widget.text()) + _LABEL_PADDING)
+        if not width:
+            continue
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, QLabel) and widget.setText:
+                widget.setMinimumWidth(width)
+                handled += 1
+    return handled
+
+
+# 标签列额外留白：QSS 给 QLabel 的 padding 不计入 sizeHint，这里补回来（4px 实测差 + 余量）。
+_LABEL_PADDING = 10
+
+
 def unstack_viewports(root) -> int:
     """让滚动区的**视口**不再重复画一遍底色，返回处理过的数量。
 

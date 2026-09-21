@@ -37,8 +37,13 @@ class CenterPane(QWidget):
         self.compare_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.compare_view.setOpenExternalLinks(False)
         # 各块都要有能用的最小高度，否则窗口一缩小就被压成一条缝（实测 12~35px）
-        self.script_view.setMinimumHeight(140)
-        self.compare_view.setMinimumHeight(140)
+        # 140 是"宽屏舒服"的值，但在高 DPI（Windows 150% 时 1080p 只有 720 逻辑像素高）下
+        # 它把整窗地板抬到 666，比屏幕还高 —— 于是布局只能违反最小尺寸，右栏与对话面板被压。
+        # 80 仍然能看几行脚本，余下的高度留给"窗口地板低于屏幕"这件更要紧的事。
+        self.script_view.setMinimumHeight(80)
+        # 与 script_view 同理：两个视图在同一个页签里，页签高度取两者的最大值，
+        # 留一个 140 会把整窗地板抬到 666（见 script_view 的注释）。
+        self.compare_view.setMinimumHeight(80)
 
         self.tabs.addTab(self.script_view, "本轮")
         self.tabs.addTab(self.compare_view, "对比上一轮")

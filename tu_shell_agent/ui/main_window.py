@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -47,6 +47,26 @@ def _titled(widget: QWidget, title: str) -> QWidget:
     layout.addWidget(header)
     layout.addWidget(widget, 1)
     return container
+
+
+def available_screen_size() -> tuple[int, int]:
+    """主屏**可用区**的逻辑像素（扣掉任务栏/停靠区）；拿不到时给一个保守值。"""
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return (1280, 720)
+    rect = screen.availableGeometry()
+    return (rect.width(), rect.height())
+
+
+def window_minimum_for(available: tuple[int, int]) -> tuple[int, int]:
+    """按屏幕可用区分摊窗口最小尺寸（纯函数，便于用例钉住规则）。
+
+    取可用区的九成（高度取八成半），并保留一个下限（720x520）—— 比这更小的窗口已经
+    没法用了，宁可让用户去放大窗口，也不要把界面压成重叠。
+    """
+    width = max(720, min(960, int(available[0] * 0.9)))
+    height = max(520, min(780, int(available[1] * 0.85)))
+    return (width, height)
 
 
 class MainWindow(QMainWindow):
@@ -204,7 +224,12 @@ class MainWindow(QMainWindow):
         # 高度的下限按"工具区里最高的那个页签装得下"来定：实测对话面板 minimumSizeHint
         # 305px、模板面板 465px、历史页 452px —— 给 300 会让对话面板溢出被裁掉（症状是
         # 输入框盖在记录区上、内容看不全）。所以工具区最小 300、窗口相应留到 780。
-        self.setMinimumSize(960, 780)
+        # 窗口最小尺寸按**屏幕可用区**收敛，而不是写死。
+        # 用户反馈（Windows 150% 缩放）：左侧文字出框、对话面板与输入框重叠、右栏被压缩。
+        # 根因就是写死的 960x780：1080p 在 150% 缩放下只有 720 逻辑像素高，窗口的最小高度
+        # 比屏幕还高，窗口管理器照给，布局只能违反最小尺寸 —— 于是重叠与出框。
+        min_width, min_height = window_minimum_for(available_screen_size())
+        self.setMinimumSize(min_width, min_height)
 
         self._layout_restored = False
         self.controller = None
@@ -257,6 +282,10 @@ class MainWindow(QMainWindow):
             if widget is not self:
                 backdrop_module.apply_to(widget)
 
+        # 字体/缩放变了，表单标签列要按新字体重算宽度（QSS padding 不计入 sizeHint）
+        from .theme import fit_form_labels
+
+        fit_form_labels(self)
         layer_ready = self._refresh_acrylic()
         if mode != "off" and not layer_ready:
             self.set_status("未找到壁纸图片，已使用纯色背景。请在设置的「背景壁纸」中指定。")

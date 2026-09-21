@@ -124,9 +124,9 @@ class RightPane(QWidget):
         notes_body = self._wrap([self.notes_header, self.notes_view], stretch=True)
         # 三块各自的最小高度：折叠能解决"没空间"，但**展开着**的时候不能让布局把某一块压成一条缝
         # （实测过：窗口高 560px 时报告树与输出区各剩 35px，等于看不见）。
-        self.findings_tree.setMinimumHeight(110)
-        self.output_view.setMinimumHeight(110)
-        self.notes_view.setMinimumHeight(80)
+        self.findings_tree.setMinimumHeight(52)
+        self.output_view.setMinimumHeight(52)
+        self.notes_view.setMinimumHeight(40)
         self.sections = {
             "findings": CollapsibleSection("校验报告", findings_body),
             "output": CollapsibleSection("执行输出", output_body),

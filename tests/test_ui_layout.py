@@ -143,11 +143,23 @@ def test_handle_width_does_not_depend_on_the_stylesheet(qtbot, tmp_path):
 # ── 缩小窗口时内容不许被压没（用户报过"挤压到看不见"）─────────────────────
 
 
-def test_window_refuses_to_shrink_below_a_usable_size(window):
-    """窗口自身要有最小尺寸：低于它，三栏 + 上下两块本来就放不下。"""
+def test_window_minimum_is_usable_and_fits_the_screen(window):
+    """窗口最小尺寸既要"够用"，也**不能超过屏幕**。
+
+    以前写死 960x780，在 Windows 150% 缩放（1080p 只有 720 逻辑像素高）下比屏幕还高 ——
+    窗口管理器照给，布局只能违反最小尺寸，于是出现重叠与出框（用户反馈的三条症状）。
+    现在的规则：按屏幕可用区的九成/八成半收敛，并保留 720x520 的可用下限。
+    """
+    from tu_shell_agent.ui.main_window import available_screen_size, window_minimum_for
+
+    expected = window_minimum_for(available_screen_size())
     minimum = window.minimumSize()
-    assert minimum.width() >= 900, f"最小宽度 {minimum.width()} 太小，三栏会被压扁"
-    assert minimum.height() >= 650, f"最小高度 {minimum.height()} 太小，上下两块会被压扁"
+    assert (minimum.width(), minimum.height()) == expected
+    assert minimum.width() >= 720 and minimum.height() >= 520, "最小尺寸被压到不可用"
+    available = available_screen_size()
+    assert minimum.width() <= available[0] and minimum.height() <= available[1], (
+        "最小尺寸超过了屏幕可用区 —— 布局会被迫违反最小尺寸"
+    )
 
 
 def test_panes_and_inner_panels_declare_minimums(window):
@@ -156,13 +168,17 @@ def test_panes_and_inner_panels_declare_minimums(window):
     没有它们的时候（实测）：窗口高 560px 时方案预览只剩 12px、右栏报告树与输出区各 35px ——
     等于看不见。QVBoxLayout 会把"没有最小高度"的控件一路压到零。
     """
+    # 数值在 2026-09-20 下调过一次：Windows 150% 缩放下 1080p 只有 720 逻辑像素高，
+    # 原来那套（脚本视图 140 / 对话记录 120 / 右栏 110+110+80）把整窗地板抬到 666，
+    # 屏幕装不下就开始违反最小尺寸 —— 于是右栏被压缩、对话面板与输入框重叠。
+    # 下调后仍保留"看得见几行"的下限，整窗地板降到 666 以内。
     for widget, minimum in (
         (window.left_pane.plan_preview, 90),
-        (window.center_pane.script_view, 140),
+        (window.center_pane.script_view, 80),
         (window.center_pane.timeline, 80),
-        (window.chat_panel.transcript, 120),
-        (window.right_pane.findings_tree, 110),
-        (window.right_pane.output_view, 110),
+        (window.chat_panel.transcript, 64),
+        (window.right_pane.findings_tree, 52),
+        (window.right_pane.output_view, 52),
         (window.history_page.list_widget, 90),
     ):
         assert widget.minimumHeight() >= minimum, f"{widget.objectName() or widget} 缺少最小高度"
@@ -186,9 +202,9 @@ def test_content_stays_visible_at_the_minimum_window_size(window, qtbot):
     # 所以这里只检查主区三栏里常驻可见的控件。
     for widget, minimum in (
         (window.left_pane.plan_preview, 88),      # 留 2px 容差给样式边距
-        (window.center_pane.script_view, 138),
-        (window.right_pane.findings_tree, 108),
-        (window.right_pane.output_view, 108),
+        (window.center_pane.script_view, 78),
+        (window.right_pane.findings_tree, 50),
+        (window.right_pane.output_view, 50),
     ):
         assert widget.height() >= minimum, f"{widget.objectName() or widget} 在下限尺寸下被压没了"
 
@@ -240,13 +256,15 @@ def test_right_pane_collapses_automatically_by_height(window, qtbot):
 def test_right_pane_expands_again_when_space_returns(window, qtbot):
     """把空间还回来要自动展开 —— 这才是"不需要手动"的关键。"""
     sections = window.right_pane.sections
-    window.resize(window.minimumSize())
+    # 不要用 window.minimumSize()：最小尺寸现在按屏幕收敛（更矮），
+    # 那样 setSizes 里的"大尺寸"根本分配不到，用例会假红。
+    window.resize(1400, 950)
     qtbot.wait(50)
-    window.vertical_splitter.setSizes([300, 460])
+    window.vertical_splitter.setSizes([260, 420])   # 上半变小 → 应当收起
     qtbot.wait(50)
     assert any(section.is_collapsed() for section in sections.values())
 
-    window.vertical_splitter.setSizes([900, 300])   # 把上半拖回大尺寸
+    window.vertical_splitter.setSizes([760, 120])   # 把上半拖回大尺寸
     qtbot.wait(50)
     collapsed = {key for key, section in sections.items() if section.is_collapsed()}
     assert "output" not in collapsed, "空间回来了，「执行输出」应当自动展开"
