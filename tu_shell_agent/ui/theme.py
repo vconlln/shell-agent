@@ -512,7 +512,7 @@ def build_stylesheet(
     # 列表视口会把圆角填成直角 —— 实测 off 模式下列表角落与中心同色）。
     containers_transparent_rule = (
         """QSplitter, QStackedWidget, QScrollArea, QTabWidget::pane,
-#leftPane, #centerPane, #rightPane, #toolTabs, #centerTabs,
+#leftPane, #centerPane, #rightPane, #toolTabs, #centerTabs, #rightTabs,
 #settingsPage, #selfCheckPage, #historyPage, #templatesPage, #chatPanel, #wallpaperPage {
     background: transparent;
 }"""
@@ -538,6 +538,15 @@ QMainWindow, QDialog {{ background-color: {_color('bg', colors)}; }}
    Window 色填充 —— 于是面板圆角外露出一圈**比卡片更深的窗口底色**，
    看起来就是"每个角上一块深黑的小方角"（用户报的就是这个）。 */
 CollapsibleSection, #sectionBody, #findingsBody, #outputBody, #notesBody {{
+    background: transparent;
+}}
+/* 纯布局容器**任何模式下都不上色**（第二组是"右列改成页签"那次漏掉的）：
+   `#rightTabs` 不在名单里 → 它吃到通用 `QWidget {{ background-color: bg }}`，
+   半透明/亚克力模式下给**整个右列**盖了一层深色（用户报的"会话底下的黑色底色"就是它：
+   实测右列空白处亮度 46~51，而左栏同样的空白处是 78 —— 壁纸被压掉了三成），
+   纯色模式下则在卡片里糊出一块比卡片更深的矩形。
+   `#chatSessionRow` / `#proposalBar` / `#controlsRow` 同理（都是放布局的纯容器）。 */
+#rightTabs, #chatSessionRow, #proposalBar, #controlsRow {{
     background: transparent;
 }}
 QLabel {{ background: transparent; }}

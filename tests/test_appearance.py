@@ -1026,3 +1026,81 @@ def test_editable_combo_has_no_dark_box_inside(restore_app, qtbot):
         assert got != input_fill, (
             f"可编辑下拉内部 ({x}, 中间) 是文本框底色 {input_fill} —— 浅底里套了一层深框"
         )
+
+
+def test_layout_containers_do_not_paint_their_own_background(restore_app, qtbot, tmp_path):
+    """纯布局容器不许自己上色 —— 半透明/亚克力模式下会在面板里糊出一条**深色带**。
+
+    用户报的"会话底下的黑色底色"就是它：`#chatSessionRow`（装"会话 + 下拉 + 两个按钮"的
+    纯容器）落进通用 `QWidget {{ background-color: bg }}` 规则里，于是整行被盖了一层深色；
+    同一类还有 `#proposalBar`、`#controlsRow`（底部控件行）与右列的页签容器 `#rightTabs`。
+
+    实测（均匀壁纸 + 半透明模式）：会话行内的空白处亮度 **46**，面板其他空白处 **68** ——
+    差 22，肉眼就是"会话底下一条黑带"。这条按像素钉住：容器内的空白必须与面板的空白同色。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtWidgets import QWidget
+
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.settings import AppSettings
+
+    # 均匀壁纸：壁纸本身有明暗时，"这一块比别处暗"可能只是壁纸的明暗，量不准
+    wallpaper = tmp_path / "uniform.png"
+    image = QImage(320, 200, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(120, 140, 160))
+    assert image.save(str(wallpaper))
+
+    apply_theme(restore_app, backdrop="translucent")
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(
+            run_root=str(tmp_path / "runs"),
+            templates_dir=str(tmp_path / "tpl"),
+            backdrop="translucent",
+            acrylic_wallpaper=str(wallpaper),
+        ),
+    )
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.apply_appearance()
+    window.right_tabs.setCurrentWidget(window.chat_panel)
+    qtbot.wait(50)
+    assert window._effective_backdrop == "translucent", "壁纸没被采纳，量不出透明层"
+
+    chat = window.chat_panel
+    grab = Grab(window)
+    panel_origin = chat.mapTo(window, chat.rect().topLeft())
+
+    def luminance(point) -> float:
+        color = grab.color(point.x(), point.y())
+        return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+    session_row = chat.findChild(QWidget, "chatSessionRow")
+    assert session_row is not None
+    controls_row = chat.findChild(QWidget, "controlsRow")
+    assert controls_row is not None
+
+    # 参照点：面板内**不属于任何容器**的空白 —— 取同一列、会话行下方那一带
+    reference_y = session_row.geometry().bottom() + 20
+    reference = luminance(chat.mapTo(window, QPoint(5, reference_y)))
+
+    # 容器内的取样点都取"行内靠上的空隙"：不落在文字/控件上（容器自己是透明的，
+    # 取到的就是容器的底色）
+    spots: dict[str, QPoint] = {
+        "会话行": session_row.mapTo(window, QPoint(5, 2)),
+        "控件行": controls_row.mapTo(
+            window,
+            QPoint((chat.extract_button.geometry().right() + chat.model_combo.geometry().left()) // 2, 2),
+        ),
+        # 右列页签容器：页签条上方那条边缘
+        "右列页签容器": window.right_tabs.mapTo(window, QPoint(window.right_tabs.width() // 2, 1)),
+    }
+
+    for name, point in spots.items():
+        got = luminance(point)
+        assert abs(got - reference) <= 6, (
+            f"{name} 的空白处亮度 {got:.0f}，面板其他空白处 {reference:.0f} —— "
+            f"容器自己上了色，在透明模式下就是一条深色带（用户报的会话底下的黑色底色）"
+        )

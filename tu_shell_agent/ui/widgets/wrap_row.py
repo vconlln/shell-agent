@@ -36,6 +36,9 @@ class WrapRow(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # 有名字才能被 QSS 点名：它是个纯布局容器，必须显式声明"不许自己上色"
+        # （否则通用 `QWidget { background-color: bg }` 会命中它 —— 见 theme.py 里那条规则）。
+        self.setObjectName("controlsRow")
         self._widgets = list(widgets)
         self._gap = gap
         self._spacing = spacing
