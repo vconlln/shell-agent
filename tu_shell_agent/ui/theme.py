@@ -608,7 +608,13 @@ QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QSpinBox, QComboBox {{
     background-color: {_color('bg_input', colors)};
     color: {_color('fg', colors)};
     border: 1px solid {_color('border', colors)};
-    border-radius: {sized('radius_lg', scale)};
+    /* 圆角用 `radius`（10px）而**不是** `radius_lg`（14px）：Qt 画圆角时，
+       半径 >= 控件高度的一半就整个退回**直角**（页签那条注释里记过同一件事）。
+       单行输入控件没有 min-height，高度由字体度量决定 —— 正好卡在这个边界上：
+       实测 ui_scale=1.0 时高 29px、半径 14px（勉强圆角），1.4/1.6 时高 35/39px、
+       半径 19.6/22.4px → **直角**；Windows 的字体度量还会再矮一点，1.0 就直角了
+       （用户报的"会话这里不是圆角的"就是这个）。改成 10px 之后各档都有余量。 */
+    border-radius: {sized('radius', scale)};
     padding: 4px 8px;
     selection-background-color: {_color('accent', colors)};
     selection-color: {_color('fg_on_accent', colors)};

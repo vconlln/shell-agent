@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 from tu_shell_agent.ui.main_window import MainWindow
 from tu_shell_agent.ui.settings import AppSettings
 from tu_shell_agent.ui.theme import (
+    TOKENS,
     apply_theme,
     backdrop_colors,
     build_stylesheet,
@@ -736,7 +737,17 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
     qtbot.wait(30)
     pane_frame = capture(window)
 
-    border = (43, 45, 51)      # 1px 描边与底色的混色属于正常渲染
+    # 允许色 = 面板底色 / 背后的底色 / 两者之间的过渡 / **底色与白色描边的过渡**。
+    # 描边是白色带 alpha（`border` 与 `border_heavy` 两个令牌），角上的反锯齿像素就是
+    # "底色 + 若干白"。这里按令牌算出来，不写死实测值 —— 写死的那个值在把输入类圆角的
+    # 半径从 14px 改成 10px 之后就失配了（角上多出的一像素是 `border_heavy` 与底色的混合）。
+    _alphas = [
+        TOKENS["border"][3] / 255,
+        TOKENS["border_heavy"][3] / 255,
+    ]
+
+    def _over_white(base, alpha):
+        return tuple(round(base[index] * (1 - alpha) + 255 * alpha) for index in range(3))
     panels = (
         ("脚本视图", window.center_pane.script_view, window, pane_frame),
         ("时间线", window.center_pane.timeline, window, pane_frame),
@@ -765,8 +776,11 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
                 allowed = (
                     color in (fill, outside)
                     or between(color, fill, outside)
-                    or between(color, fill, border)
-                    or between(color, outside, border)
+                    or any(between(color, fill, _over_white(fill, alpha)) for alpha in _alphas)
+                    or any(
+                        between(color, outside, _over_white(outside, alpha))
+                        for alpha in _alphas
+                    )
                 )
                 if not allowed:
                     problems.append(f"{name} 的角上出现了 {color}（自底色 {fill}／背后 {outside}）")
@@ -797,3 +811,104 @@ def test_switching_background_modes_switches_the_layer(restore_app, qtbot, tmp_p
         window.apply_appearance()
         assert (window._acrylic_image is not None) is has_layer, f"{mode} 模式的底色层不对"
         assert window.isVisible(), f"{mode} 模式切换后窗口不可见了"
+
+
+def test_input_corners_stay_rounded_at_natural_height_and_every_scale(restore_app, qtbot, tmp_path):
+    """输入控件的圆角在**自然高度**下、每个缩放档位都要真的画出来。
+
+    用户报的"会话这里不是圆角的"（会话下拉）：输入类的圆角原来写的是 `radius_lg`(14px)，
+    而 Qt 在**半径 >= 控件高度的一半**时整个退回直角。单行输入控件没有 min-height，
+    高度由字体度量决定 —— 正好卡在边界上：
+
+    | ui_scale | 输入控件自然高度 | 半径 | 结果 |
+    | --- | --- | --- | --- |
+    | 0.8 | 26px | 11.2px | 圆角（勉强） |
+    | 1.0 | 29px | 14px | 圆角（差 0.5px） |
+    | 1.4 | 35px | 19.6px | **直角** |
+    | 1.6 | 39px | 22.4px | **直角** |
+
+    Windows 的字体度量比这里更矮，1.0 档就已经是直角 —— 所以必须在 Linux 上就能拦住它。
+    这条**故意不给控件设最小高度**：老用例 `test_form_controls_are_rounded_...` 设了
+    `setMinimumHeight(30)`，正好把半径压到合法区间，于是这个 bug 从它眼皮底下过去了。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QComboBox, QLineEdit, QSpinBox, QVBoxLayout, QWidget
+
+    from tu_shell_agent.ui.theme import apply_theme, sized
+
+    for scale in (0.8, 1.0, 1.4, 1.6):
+        apply_theme(restore_app, scale=scale)
+        host = QWidget()
+        host.setObjectName("paneCard")
+        qtbot.addWidget(host)
+        host.resize(320, 260)
+        layout = QVBoxLayout(host)
+        controls = {
+            "QComboBox": QComboBox(),
+            "QSpinBox": QSpinBox(),
+            "QLineEdit": QLineEdit(),
+        }
+        for widget in controls.values():
+            layout.addWidget(widget)          # 不设最小高度：量的是自然高度
+        host.show()
+        qtbot.waitExposed(host)
+        qtbot.wait(20)
+
+        radius = float(sized("radius", scale).rstrip("px"))
+        grab = Grab(host)
+        for name, widget in controls.items():
+            height = widget.height()
+            assert radius < height / 2, (
+                f"scale={scale} 时 {name} 高 {height}px、半径 {radius}px —— "
+                f"半径不小于半高，Qt 会退回直角"
+            )
+            corner = widget.mapTo(host, QPoint(1, 1))
+            center = widget.mapTo(host, QPoint(widget.width() // 2, widget.height() // 2))
+            assert grab.name(corner.x(), corner.y()) != grab.name(center.x(), center.y()), (
+                f"scale={scale} 时 {name} 是矩形底（圆角被半径/高度比吃掉了）"
+            )
+        host.close()
+
+
+def test_every_input_in_the_window_stays_rounded_at_the_default_scale(restore_app, qtbot, tmp_path):
+    """"界面里所有单行输入控件"这条通用断言：半径必须小于半高（含平台字体差异的余量）。
+
+    这条不看像素、只看几何，所以它守的是**同一个 bug 在不同平台上**的表现：
+    用 Windows 的字体度量（控件更矮）也必须是圆角。
+    """
+    from PySide6.QtWidgets import QComboBox, QLineEdit, QSpinBox
+
+    from tu_shell_agent.ui.theme import sized
+
+    window = _window(tmp_path, backdrop="off")
+    qtbot.addWidget(window)
+    window.resize(1400, 950)
+    window.show()
+    window.apply_appearance()
+    qtbot.wait(30)
+
+    import re
+
+    from PySide6.QtWidgets import QAbstractSpinBox
+
+    # 半径要**从真正生效的样式表里读**，不能读令牌名：写死 `sized("radius", ...)` 的话，
+    # 有人把规则改回 `radius_lg` 这条用例照样通过（变异验证抓到了这一点）。
+    sheet = QApplication.instance().styleSheet()
+    match = re.search(r"QLineEdit[^{]*\{[^}]*border-radius:\s*([\d.]+)px", sheet)
+    assert match is not None, "样式表里找不到输入控件的圆角规则"
+    radius = float(match.group(1))
+    checked = 0
+    for kind in (QLineEdit, QSpinBox, QComboBox):
+        for widget in window.findChildren(kind):
+            if not widget.isVisible() or widget.height() < 8:
+                continue
+            # QComboBox/QSpinBox 内部各有一个 QLineEdit（它们自己的文本行，19~22px）：
+            # 真正决定形状的是外层控件，内部那个不画出自己的圆角，不该按它判。
+            if isinstance(widget.parent(), (QComboBox, QAbstractSpinBox)):
+                continue
+            checked += 1
+            assert radius <= widget.height() * 0.45, (
+                f"{widget.objectName() or kind.__name__} 高 {widget.height()}px、"
+                f"半径 {radius}px —— 余量不足，Qt 在 半径>=半高 时会画直角"
+            )
+    assert checked >= 4, f"没有检查到输入控件（用例失效了）：{checked}"
