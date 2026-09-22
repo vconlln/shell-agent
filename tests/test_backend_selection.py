@@ -572,3 +572,34 @@ def test_opencode_path_row_follows_the_selected_backend(qtbot):
     hint = page.components_hint.text()
     assert "后端 agent" in hint, "说明要告诉用户 agent 命令在哪里设"
     assert "shellcheck" in hint and "任何后端都需要" in hint, "说明要讲清执行侧两件套仍然必需"
+
+
+def test_chat_model_dropdown_offers_candidates_on_a_cli_backend(qtbot, tmp_path):
+    """选了命令行后端之后，**对话面板的模型下拉里要有候选**（用户实测"没法选择模型"）。
+
+    命令行后端没有"列出模型"的命令，旧实现只写了一句提示就返回 —— 下拉里空空如也，
+    用户只能猜模型名。候选由后端文件声明（claude 系是 sonnet/opus/haiku），
+    并且仍然可以直接手输完整模型名。
+    """
+    settings = AppSettings(
+        run_root=str(tmp_path / "runs"),
+        templates_dir=str(tmp_path / "templates"),
+        agent_backend="codeagent",
+    )
+    window = _window(qtbot, settings)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        settings=settings, run_root=str(tmp_path / "runs"),
+    )
+    chat = window.chat_panel
+
+    controller._on_models_requested()
+
+    items = [chat.model_combo.itemText(i) for i in range(chat.model_combo.count())]
+    assert "sonnet" in items, f"对话面板的模型下拉里没有候选：{items}"
+    assert chat.model_combo.isEditable(), "仍然要能手输完整模型名"
+    assert "候选" in chat.status.text()
+
+    # 选中一个候选 → 真的会用于这段对话
+    chat.model_combo.setCurrentIndex(chat.model_combo.findText("opus"))
+    assert controller._chat_model == "opus"

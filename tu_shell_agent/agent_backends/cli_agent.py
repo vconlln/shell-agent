@@ -34,7 +34,8 @@ from ..orchestrator.cli_contract import (
     with_output_instructions,
 )
 from ..shell_toolchain.execute import kill_tree
-from .invocation import invocation_argv, resolve_command
+from .invocation import invocation_argv
+from .invocation import resolve_command as invocation_resolve
 from ..types import DetectedTool, GeneratedScript
 
 # 版本探测的默认超时：`claude --version` 是纯本地操作，20s 已经很宽松。
@@ -87,24 +88,38 @@ class ProbeResult:
         return f"命令可用：{self.tool.path}（版本 {self.tool.version}）"
 
 
-def _looks_like_path(command: str) -> bool:
-    return any(separator in command for separator in (os.sep, "/", "\\"))
-
-
 def resolve_command(command: str) -> str | None:
     """把用户填的命令解析成可执行文件的绝对路径；找不到返回 None。
 
     为什么不直接交给 `subprocess` 去撞 FileNotFoundError：探测与运行两条路都需要"找不到"
     这个信息，而且要给用户"填完整路径"这种可操作的建议，所以在进子进程之前先解析一次。
+
+    实现委托给 `invocation.resolve_command`：Windows 上除了 PATH 还会去常见安装目录找一遍
+    （GUI 进程的 PATH 可能比终端少几条 —— 用户"明明装了却找不到"多半就是这个）。
     """
     text = (command or "").strip()
     if not text:
         return None
-    if _looks_like_path(text):
-        candidate = Path(text).expanduser()
-        return str(candidate) if candidate.is_file() else None
-    found = shutil.which(text)
-    return found or None
+    return invocation_resolve(text)
+
+
+# 探测版本时依次尝试的参数：不是所有 CLI 都认 `--version`（有的只认 `-v`，有的只打帮助），
+# 而"能不能用"与"能不能问出版本"是两件事 —— 问不出版本不该被判成"没装"。
+_PROBE_SEQUENCE: tuple[tuple[str, ...], ...] = (
+    ("--version",),
+    ("-v",),
+    ("version",),
+    ("--help",),
+)
+
+
+def _probe_args(version_args: Sequence[str]) -> list[tuple[str, ...]]:
+    """要依次尝试的参数组合：用户/后端声明的那个排在前面，其余作为兜底。"""
+    sequence: list[tuple[str, ...]] = [tuple(version_args)]
+    for candidate in _PROBE_SEQUENCE:
+        if candidate not in sequence:
+            sequence.append(candidate)
+    return sequence
 
 
 def probe_version(
@@ -113,39 +128,59 @@ def probe_version(
     *,
     timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
     install_hint: str = "",
+    runner: Callable[..., Any] | None = None,
 ) -> tuple[DetectedTool | None, str]:
     """跑一次版本命令，返回 (探测结果, 失败原因)。
 
     失败原因直接可给用户看：找不到命令时带上安装建议（`install_hint`），
     退出码非零时带上它最后一行输出 —— 只看"退出码 1"没人知道该做什么。
+
+    三条"别把能用的东西判成没装"的规则（用户实测踩到过"我装了 codeagent 却检测不到"）：
+
+    1. **不止试 `--version`**：`-v` / `version` / `--help` 依次兜底 —— 不是每个 CLI 都认
+       `--version`，而"能不能用"与"能不能问出版本"是两件事；
+    2. **能跑起来就算找到了**：命令退出码为 0、输出里没有版本号时，返回"版本未知"而不是失败
+       （版本未知不影响它能不能干活）；
+    3. **stdin 接空设备**：探测是无人值守的，若 CLI 想读输入（读 TTY、等确认）就会一直挂到超时 ——
+       在打包好的 GUI 里那是"点了检测没反应"。给它一个空的 stdin，需要读输入的命令会立刻拿到 EOF。
     """
     resolved = resolve_command(command)
     if resolved is None:
         return None, (f"找不到命令 {command or '（未填写）'}：{install_hint}".rstrip("："))
-    try:
-        completed = subprocess.run(
-            invocation_argv(command, version_args),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_s,
-            check=False,
-            env={**os.environ, "NO_COLOR": "1", "LC_ALL": "C", "LANG": "C"},
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"`{command} {' '.join(version_args)}` 超过 {timeout_s:.0f}s 没有返回"
-    except OSError as error:  # 权限不够、不是可执行文件等
-        return None, f"无法执行 {resolved}：{error}"
-
-    output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
-    if completed.returncode != 0:
-        tail = output.splitlines()[-1] if output else "无输出"
-        return None, f"`{command} {' '.join(version_args)}` 退出码 {completed.returncode}：{tail}"
-    match = _VERSION.search(output)
-    if match is None:
-        return None, f"无法识别 {command} 的版本（`{' '.join(version_args)}` 输出里没有版本号）"
-    return DetectedTool(path=resolved, version=match.group(0)), ""
+    run = runner if runner is not None else subprocess.run
+    failures: list[str] = []
+    for args in _probe_args(version_args):
+        label = f"`{command} {' '.join(args)}`"
+        try:
+            completed = run(
+                invocation_argv(command, args),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                env={**os.environ, "NO_COLOR": "1", "LC_ALL": "C", "LANG": "C"},
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(f"{label} 超过 {timeout_s:.0f}s 没有返回")
+            continue
+        except OSError as error:  # 权限不够、不是可执行文件等
+            return None, f"无法执行 {resolved}：{error}"
+        output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
+        if completed.returncode != 0:
+            tail = output.splitlines()[-1] if output else "无输出"
+            failures.append(f"{label} 退出码 {completed.returncode}：{tail}")
+            continue
+        match = _VERSION.search(output)
+        if match is not None:
+            return DetectedTool(path=resolved, version=match.group(0)), ""
+        # 能跑、也有输出，只是没版本号：算找到了（版本未知），不要再被判成"检测不到"
+        return DetectedTool(path=resolved, version="未识别"), ""
+    first = failures[0] if failures else "没有可用的探测参数"
+    extra = f"（已依次尝试 {'、'.join(' '.join(args) for args in _probe_args(version_args))}）"
+    return None, f"{first}{extra}"
 
 
 def explain_cli_error(text: str, command: str = "") -> str:

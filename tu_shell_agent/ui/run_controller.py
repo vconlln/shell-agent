@@ -539,9 +539,22 @@ class RunController(QObject):
 
         chat = self.window.chat_panel
         if self._backend_id() != "opencode":
-            # 模型列表只有 opencode 提供；命令行后端的模型名由用户自己填。照实说明，
-            # 不去跑一条明知会失败的命令（那会把"没装 opencode"报成"取模型列表失败"）。
-            chat.set_status("当前后端不提供模型列表：可直接在模型一栏输入完整模型名。")
+            # 模型列表只有 opencode 能列；命令行后端（claude / codeagent / 自定义）没有这条命令，
+            # 不去跑一条明知会失败的命令。**但要把候选铺进下拉** —— 用户实测"选了 codeagent
+            # 之后没法选模型"：旧实现只写了一句提示，下拉里空空如也，等于让他自己猜模型名。
+            # 候选来自后端自己的文件（`model_suggestions`），并且仍然可以直接手输。
+            from ..agent_backends import backend_descriptor
+
+            descriptor = backend_descriptor(self._backend_id())
+            candidates = [str(item) for item in descriptor.model_suggestions]
+            chat.set_models(candidates)
+            if candidates:
+                chat.set_status(
+                    f"{descriptor.display_name} 不提供模型列表：可用候选 "
+                    f"{'、'.join(candidates)}；也可直接输入完整模型名。"
+                )
+            else:
+                chat.set_status("当前后端不提供模型列表：可直接在模型一栏输入完整模型名。")
             return
         # 已经在取了就别再起一个：模型下拉现在是**点开就取**，用户连点几次下拉
         # 会同时跑起好几个 `opencode models` 子进程（也可能把上一条结果冲掉）。
