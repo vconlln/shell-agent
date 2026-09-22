@@ -744,6 +744,10 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
     _alphas = [
         TOKENS["border"][3] / 255,
         TOKENS["border_heavy"][3] / 255,
+        # 输入类控件 hover 时用的是 border_strong。**必须一起允许**：这条用例跑在别的用例
+        # 之后时，控件可能还带着 hover 状态 —— Qt 在没有收到 mouse leave 事件时不会清
+        # `WA_UnderMouse`（pytest 里没有真实鼠标移动），于是角上的描边是那一档更亮的白。
+        TOKENS["border_strong"][3] / 255,
     ]
 
     def _over_white(base, alpha):
@@ -912,3 +916,113 @@ def test_every_input_in_the_window_stays_rounded_at_the_default_scale(restore_ap
                 f"半径 {radius}px —— 余量不足，Qt 在 半径>=半高 时会画直角"
             )
     assert checked >= 4, f"没有检查到输入控件（用例失效了）：{checked}"
+
+
+def test_inputs_are_a_lighter_field_not_a_black_hole(restore_app, qtbot, tmp_path):
+    """输入框比卡片**亮**一档，并且描边看得见 —— 用户实测反馈："会话这里不是圆角的黑底"。
+
+    历史：输入框原本比面板更深（#121317），理由是"形状靠更深的底色表达"。但那个色接近纯黑，
+    在半透明壁纸上像一块黑洞、看不出是圆角框。改成反过来：底色比卡片亮一档 + 描边加亮到 16%，
+    形状靠"更亮 + 有边"表达。这条按像素钉住方向，免得以后又"顺手调深"。
+    """
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtWidgets import QComboBox, QLineEdit, QVBoxLayout, QWidget
+
+    from tu_shell_agent.ui.theme import apply_theme, qcolor
+
+    apply_theme(restore_app)
+    host = QWidget()
+    host.setObjectName("paneCard")          # 和真实场景一样，父容器是卡片
+    qtbot.addWidget(host)
+    host.resize(320, 200)
+    layout = QVBoxLayout(host)
+    line = QLineEdit()
+    combo = QComboBox()
+    combo.addItem("未发现可恢复的会话")
+    for widget in (line, combo):
+        # 去掉焦点：获得焦点的输入框描边是蓝色焦点环（#5b71b4），量不到"常态描边"
+        widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout.addWidget(widget)
+    host.show()
+    qtbot.waitExposed(host)
+    qtbot.wait(20)
+
+    def luminance(color) -> float:
+        return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+    card = qcolor("bg_elevated")
+    input_fill = qcolor("bg_input")
+    select_fill = qcolor("bg_select")
+    assert luminance(input_fill) > luminance(card), (
+        f"输入框底色 {TOKENS['bg_input']} 不比卡片 {TOKENS['bg_elevated']} 亮 —— 又回到黑底了"
+    )
+    assert luminance(select_fill) > luminance(input_fill), (
+        "选择框（下拉）应当比文本框更亮一档（用户要求：与旁边的按钮同类）"
+    )
+
+    grab = Grab(host)
+    for name, widget, expect in (("文本框", line, input_fill), ("下拉", combo, select_fill)):
+        point = widget.mapTo(host, QPoint(widget.width() - 6, widget.height() // 2))
+        got = grab.color(point.x(), point.y())
+        assert abs(luminance(got) - luminance(expect)) <= 6, (
+            f"{name} 的实际填充是 {got.name()}，与令牌 {expect.name()} 差太多"
+        )
+        # 描边必须**明显**看得出来：贴边那几个像素里最亮的那个要比填充亮一截。
+        # 为什么取一小段的最大值而不是单个像素：150% 缩放（devicePixelRatio 1.5）下 1 逻辑像素
+        # 的描边落在哪一列取决于取整，单点取样会取到圆角外的底色（实测亮度差 -4，假红）；
+        # 扫 0~3 列取最亮值就与缩放无关了。
+        # 阈值 25 是量出来的：白色 16% 描边叠在 #1b1c21 上亮度差 35，8%（旧值）只有 16 ——
+        # 取中间值，撤掉"加亮描边"这一改动就会转红。
+        # 描边只有 1 个**逻辑**像素（150% 缩放下 1.5 个物理像素），而"逻辑坐标 × ratio"
+        # 的取整差一像素就会整段落在填充里（实测亮度差 0 的假红）。所以这里直接在**物理像素**
+        # 上扫一小段取最亮值；往外扫到卡片底色也不会误判 —— 卡片比输入框暗，只有描边更亮。
+        edge = widget.mapTo(host, QPoint(0, widget.height() // 2))
+        first_physical = round(edge.x() * grab.ratio)
+        row_physical = round(edge.y() * grab.ratio)
+        band = [
+            luminance(grab.image.pixelColor(px, row_physical))
+            for px in range(first_physical - 2, first_physical + 7)
+        ]
+        contrast = max(band) - luminance(got)
+        assert contrast >= 25, (
+            f"{name} 的描边看不出来（边缘与填充亮度差只有 {contrast:.0f}）—— 圆角框没有边界感"
+        )
+
+
+def test_editable_combo_has_no_dark_box_inside(restore_app, qtbot):
+    """下拉内部不许出现文本框的底色 —— 浅底下套一个深框是最难看的观感问题。
+
+    `QComboBox` 可编辑时内部是一个 `QLineEdit`，它会被 `QLineEdit` 那条规则命中，
+    理论上会在浅色下拉里画出一块**深色方框**。**实测（当前 Qt 6.11 + Fusion）不会**：
+    去掉 `QComboBox QLineEdit { background: transparent; }` 那条规则之后，内部还是
+    下拉自己的底色（#232428），取不到文本框底色 —— 所以那条规则是**防御性**的。
+    这条用例因此守的是**结果**（下拉内部不许出现文本框底色），而不是某一条规则；
+    换 Qt 版本或换样式之后如果真出现深框，它会立刻转红。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QComboBox, QVBoxLayout, QWidget
+
+    from tu_shell_agent.ui.theme import apply_theme, qcolor
+
+    apply_theme(restore_app)
+    host = QWidget()
+    host.setObjectName("paneCard")
+    qtbot.addWidget(host)
+    host.resize(320, 120)
+    layout = QVBoxLayout(host)
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.addItems(["deepseek/deepseek-v4-pro"])
+    layout.addWidget(combo)
+    host.show()
+    qtbot.waitExposed(host)
+    qtbot.wait(20)
+
+    grab = Grab(host)
+    input_fill = qcolor("bg_input").name()
+    for x in range(2, combo.width() - 20):
+        point = combo.mapTo(host, QPoint(x, combo.height() // 2))
+        got = grab.name(point.x(), point.y())
+        assert got != input_fill, (
+            f"可编辑下拉内部 ({x}, 中间) 是文本框底色 {input_fill} —— 浅底里套了一层深框"
+        )

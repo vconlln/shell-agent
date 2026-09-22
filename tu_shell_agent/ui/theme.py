@@ -33,6 +33,8 @@ from PySide6.QtWidgets import QApplication
 # 配色取向（2026-09-19 用户要求"显得高级、尽量圆角"）：底色从 Codex 的 #181818 往**冷调
 # 更深**走（#101114），面板只比底色亮一档（#17181c）——"高级感"主要来自**低对比的分层**，
 # 而不是把面板刷得比背景亮很多；文字不用纯白（#ecedf0），因为纯白在高对比深底上偏"廉价"；
+# 输入类控件（文本框/下拉/数字框）比卡片**亮一档**，并且描边是 16% 白（2026-09-20 按用户
+# 实测反馈调的：原来比卡片更深、接近纯黑，在半透明壁纸上像一块黑洞、看不出是圆角框）；
 # 强调色从 #339cff 换成偏靛蓝的 #7c9cff，语义色全部降饱和（错误是玫瑰红而非正红），
 # 这样红色只用在"真的出问题了"的地方，而不是到处抢眼。
 # 圆角全面放大（控件 10px、面板 14px、页签胶囊），分割条给 6px 的可抓宽度但只在悬停时显色。
@@ -45,11 +47,16 @@ from PySide6.QtWidgets import QApplication
 TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     # 背景
     "bg": "#101114",              # 冷调更深的一层（比 Codex 的 #181818 再压一档）
-    "bg_elevated": "#17181c",     # 面板/输入：只比底色亮一档
+    "bg_elevated": "#17181c",     # 面板/卡片：只比底色亮一档（输入类见 bg_input，比它再亮一档）
     "bg_under": "#0b0c0e",        # 更深的一层（只读底、凹陷）
-    # 输入框比面板**更深**：和面板同色时，圆角处的像素与填充同色 —— 形状根本看不出来
-    # （用户报的"圆角边框 + 长方形底色"里有一部分就是这个：输入框和卡片都是 #17181c）。
-    "bg_input": "#121317",
+    # 输入框底色。历史：曾经比面板**更深**（#121317），理由是"和面板同色时圆角处的像素与填充
+    # 同色，形状看不出来"。但用户实测（截图 + 逐像素量）反馈：那个色**接近纯黑**，在浅色面板/
+    # 半透明壁纸上像一块黑洞，看不出是"圆角框" —— 于是**反过来做**：输入框比卡片亮一档
+    # （#1b1c21 vs 卡片 #17181c）+ 描边加亮到 16%，形状靠"更亮 + 有边"表达，而不是靠更深。
+    "bg_input": "#1b1c21",
+    # 「选择框」（QComboBox）用**按钮那种浅底**：它是"点开选一个"，与旁边按钮同类，
+    # 底色取按钮在卡片上的合成色（白 5% 叠在 #17181c 上 ≈ #232428），在 off 模式下与按钮一致。
+    "bg_select": "#232428",
     # 浮层（下拉列表 / 菜单 / 提示气泡）：**不跟着变透明**。它们是"临时盖在一切之上的
     # 一层"，读的就是里面的字；跟着透会把文字糊在壁纸上（实测字体下拉列表底色全透明，
     # 文字与背景对比度掉到 1.7:1，等于看不见）。
@@ -70,6 +77,7 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     "border_light": (255, 255, 255, 10),
     "border": (255, 255, 255, 20),
     "border_heavy": (255, 255, 255, 41),
+    "border_strong": (255, 255, 255, 61),    # 输入框 hover：比常态再亮一档
     "border_focus": (124, 156, 255, 170),
     # 语义色
     "accent": "#7c9cff",          # 偏靛蓝，比"互联网蓝"更收敛
@@ -467,7 +475,10 @@ def backdrop_colors(backdrop: str) -> dict[str, str | tuple[int, int, int, int]]
     # 输入类（输入框 / 下拉 / 数字框）比内容区**更不透明**：这些是读字与写字的地方，
     # 实测 51% 时下拉里的字体名与底色对比度只有 3.1:1（低于可读线 4.5:1），
     # 用户反馈的"看不见字"就是这一类。透明让给大块的只读内容区。
-    base["bg_input"] = (18, 19, 23, 205)
+    base["bg_input"] = (27, 28, 33, 205)
+    # 选择框同样保持输入级的 alpha（205）：它是读模型名/会话名的地方，
+    # 跟着按钮那样透（按钮是 5% 白）会把字糊在壁纸上（实测对比度掉到 3.1:1 的那一类问题）。
+    base["bg_select"] = (35, 36, 40, 205)
     # 浮层保持接近不透明（244/255 ≈ 96%）：透明只给"看内容"的表面，不给"读字"的浮层。
     base["bg_menu"] = (23, 24, 28, 244)
     return base
@@ -607,7 +618,7 @@ QPushButton#primaryButton:disabled {{
 QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QSpinBox, QComboBox {{
     background-color: {_color('bg_input', colors)};
     color: {_color('fg', colors)};
-    border: 1px solid {_color('border', colors)};
+    border: 1px solid {_color('border_heavy', colors)};
     /* 圆角用 `radius`（10px）而**不是** `radius_lg`（14px）：Qt 画圆角时，
        半径 >= 控件高度的一半就整个退回**直角**（页签那条注释里记过同一件事）。
        单行输入控件没有 min-height，高度由字体度量决定 —— 正好卡在这个边界上：
@@ -624,7 +635,16 @@ QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QSpinBox, QComboBox {{
    方案预览/脚本视图定制的 90/140px 下限冲掉，实测从 90 掉到 34）；而且用它来防"控件被压扁"
    是无效的 —— 容器比最小尺寸还小时 Qt 照样会挤压，真正管用的是把表单放进滚动区
    （见 widgets/scroll.py）加上窗口/栏目的最小尺寸。 */
-QLineEdit:hover, QSpinBox:hover, QComboBox:hover {{ border-color: {_color('border_heavy', colors)}; }}
+QLineEdit:hover, QSpinBox:hover, QComboBox:hover {{ border-color: {_color('border_strong', colors)}; }}
+/* 「选择框」用按钮那种浅底（用户要求：会话/模型这类选择框不要黑底，与旁边的按钮同类）。
+   必须放在上面那条组规则**之后**：两者都是单类型选择器，同优先级时后写的生效。 */
+QComboBox {{ background-color: {_color('bg_select', colors)}; }}
+/* 可编辑的 QComboBox 内部是一个 QLineEdit，会被上面 `QLineEdit` 那条规则命中 ——
+   理论上会在浅色下拉里画出一块深色方框。**实测（Qt 6.11 + Fusion）当前不会**：
+   去掉这条之后内部仍是下拉自己的底色，取不到文本框底色。留着它是**防御性**的
+   （换 Qt 版本或换样式时可能出现深框，那时用例 test_editable_combo_has_no_dark_box_inside
+   会转红）。 */
+QComboBox QLineEdit {{ background: transparent; border: none; padding: 0; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QTextBrowser:focus,
 QSpinBox:focus, QComboBox:focus {{ border-color: {_color('border_focus', colors)}; }}
 QLineEdit:read-only, QPlainTextEdit:read-only, QTextEdit:read-only, QTextBrowser:read-only {{
