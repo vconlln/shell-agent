@@ -158,6 +158,7 @@ class RunController(QObject):
         self._template: TemplateSpec | None = None
         self._plan_text = ""
         self._script_override: str | None = None
+        self._models_worker: Any = None      # 取"可用模型"的线程（同一时刻只跑一个）
         self._last_result: LoopResult | None = None
 
         window.history_page.run_selected.connect(self._on_replay)
@@ -540,11 +541,18 @@ class RunController(QObject):
         if self._backend_id() != "opencode":
             # 模型列表只有 opencode 提供；命令行后端的模型名由用户自己填。照实说明，
             # 不去跑一条明知会失败的命令（那会把"没装 opencode"报成"取模型列表失败"）。
-            chat.set_status("当前后端不提供模型列表，请在输入框旁直接填写模型名称。")
+            chat.set_status("当前后端不提供模型列表：可直接在模型一栏输入完整模型名。")
             return
+        # 已经在取了就别再起一个：模型下拉现在是**点开就取**，用户连点几次下拉
+        # 会同时跑起好几个 `opencode models` 子进程（也可能把上一条结果冲掉）。
+        if self._models_worker is not None and self._models_worker.isRunning():
+            return
+        chat.set_status("正在获取可用模型…")
         worker = ModelsWorker(str(getattr(self.settings, "opencode_path", "") or ""))
         worker.done.connect(lambda models: chat.set_models([str(item) for item in (models or [])]))
+        worker.done.connect(lambda _models: chat.set_status("已取到可用模型，可在模型一栏选择。"))
         worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
+        self._models_worker = worker
         track(worker)
 
     def _new_chat_run_dir(self) -> str:

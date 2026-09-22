@@ -5,7 +5,16 @@ from __future__ import annotations
 from tu_shell_agent.ui.chat import ChatPanel
 
 
-def _panel(qtbot) -> ChatPanel:
+def _panel(qtbot, app) -> ChatPanel:
+    """装好主题的面板。
+
+    必须装主题：按钮的宽度由 QSS 的 padding/min-height 决定 —— 不装主题时
+    `QPushButton.sizeHint()` 是 Qt 的默认值 80px，底栏那一行需要 388px 就会折行，
+    而生产环境里（主题在启动时装好）同样一行只需要 330px。用例要测的是用户看到的那一版。
+    """
+    from tu_shell_agent.ui.theme import apply_theme
+
+    apply_theme(app)
     panel = ChatPanel()
     qtbot.addWidget(panel)
     panel.resize(900, 520)
@@ -18,12 +27,15 @@ def _top_left(panel, widget) -> tuple[int, int]:
     return point.x(), point.y()
 
 
-def test_model_picker_sits_in_the_bottom_button_row(qtbot):
+def test_model_picker_sits_in_the_bottom_button_row(qtbot, restore_app):
     """模型选择放在**底部按钮行**的右端（用户要求：跟「发送」那些按钮同一行，不要堆在上面）。
 
-    用几何断言钉住：与发送按钮同一行、在它右侧、且在输入框下方。
+    用户第二次点名这条（"把这个模型移动到跟发送在同一行"），所以这里按**面板最小宽度下的
+    真实几何**断言"同一行"，而不是只看宽面板。
     """
-    panel = _panel(qtbot)
+    panel = _panel(qtbot, restore_app)
+    panel.resize(panel.minimumSizeHint().width(), 520)     # 右列在窄窗口里的实际宽度
+    qtbot.wait(20)
     send_x, send_y = _top_left(panel, panel.send_button)
     model_x, model_y = _top_left(panel, panel.model_combo)
     input_x, input_y = _top_left(panel, panel.input)
@@ -33,21 +45,24 @@ def test_model_picker_sits_in_the_bottom_button_row(qtbot):
     assert model_x > send_x, "模型下拉应当在按钮的右侧"
     assert model_y > input_y, "模型下拉应当在输入框下方，而不是顶部"
     assert session_y < model_y, "会话选择仍留在顶部那一行"
+    assert panel.controls_row.row_count() == 1, (
+        "面板最小宽度下底部控件被折成了两行 —— 用户要的是模型跟发送同一行"
+    )
 
 
-def test_session_row_keeps_only_the_session_controls(qtbot):
+def test_session_row_keeps_only_the_session_controls(qtbot, restore_app):
     """顶部那行只放会话相关控件：模型不再占一行（把纵向空间还给对话记录）。"""
-    panel = _panel(qtbot)
+    panel = _panel(qtbot, restore_app)
     _x, session_y = _top_left(panel, panel.session_combo)
     _x2, refresh_y = _top_left(panel, panel.refresh_button)
     _x3, new_y = _top_left(panel, panel.new_button)
     assert abs(session_y - refresh_y) <= 4 and abs(session_y - new_y) <= 4
 
-    _x4, model_button_y = _top_left(panel, panel.model_button)
-    assert model_button_y > session_y + 20, "「可用模型」按钮不该还在顶部那行"
+    _x4, model_y = _top_left(panel, panel.model_combo)
+    assert model_y > session_y + 20, "模型下拉不该还在顶部那行"
 
 
-def test_scrolling_repaints_the_whole_window(qtbot):
+def test_scrolling_repaints_the_whole_window(qtbot, restore_app):
     """滚动条一动就要整窗重绘。
 
     半透明窗口只重绘"滚动露出的那一条"时，旧像素会留在后备存储里 —— 屏幕上是重影
@@ -115,13 +130,12 @@ def _overlaps(panel, widgets) -> list[tuple[str, str]]:
 
 
 def _controls(panel):
-    return [panel.send_button, panel.cancel_button, panel.extract_button,
-            panel.model_label, panel.model_combo, panel.model_button]
+    return [panel.send_button, panel.cancel_button, panel.extract_button, panel.model_combo]
 
 
-def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot):
+def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot, restore_app):
     """栏够宽时仍然是一行：模型选择与发送按钮同一行、且在右端（用户明确要求过）。"""
-    panel = _panel(qtbot)
+    panel = _panel(qtbot, restore_app)
     panel.resize(560, 520)
     qtbot.wait(20)
 
@@ -133,13 +147,17 @@ def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot):
     assert not _overlaps(panel, _controls(panel))
 
 
-def test_controls_wrap_instead_of_overlapping_when_narrow(qtbot):
-    """栏被压窄时折行、**不许重叠**（实测修前：右列 386px 时模型下拉盖住「可用模型」）。
+def test_controls_wrap_instead_of_overlapping_when_narrow(qtbot, restore_app):
+    """栏被压到**比面板最小宽度还窄**时折行、不许重叠。
 
-    真实触发路径是"窗口缩到最小 / 分割条往右拖"，这里直接量面板宽度，等价且更快。
+    现在底栏那一行（发送/取消/存入中栏 + 模型下拉）只需要 330px，而面板最小宽度是 385 ——
+    正常窗口里永远不会折行（这正是用户要的"模型跟发送同一行"）。折行是**兜底**：
+    窗口被窗口管理器压到比最小尺寸还小时（高 DPI 小屏），Qt 只能违反最小尺寸，
+    那时候必须是折行而不是重叠（实测修前：右列 386px 时模型下拉盖住「可用模型」按钮）。
     """
-    panel = _panel(qtbot)
-    panel.resize(380, 520)
+    panel = _panel(qtbot, restore_app)
+    panel.setMinimumWidth(260)          # 模拟"布局被违反"：比任何正常窗口都窄
+    panel.resize(260, 520)
     qtbot.wait(20)
 
     assert panel.controls_row.row_count() >= 2, "窄栏里没有折行"
@@ -149,5 +167,109 @@ def test_controls_wrap_instead_of_overlapping_when_narrow(qtbot):
         assert geometry.right() <= panel.width(), f"{widget.objectName()} 越出面板右边缘"
         assert geometry.x() >= 0
 
-    # 整组折行：模型标签与它的下拉留在同一行（别把标签留在上一行末尾）
-    assert panel.controls_row.row_of(panel.model_label) == panel.controls_row.row_of(panel.model_combo)
+    # 整组折行：动作按钮与模型下拉各自成组（模型不会被拆到与动作按钮混排）
+    assert panel.controls_row.row_of(panel.send_button) == panel.controls_row.row_of(panel.extract_button)
+    assert panel.controls_row.row_of(panel.model_combo) != panel.controls_row.row_of(panel.send_button)
+
+
+# ── 可用模型列表：点开下拉就现取现列（用户要求"可用模型点开用列表呈现"）────
+
+
+def test_opening_the_model_dropdown_asks_for_the_model_list(qtbot, restore_app):
+    """点开模型下拉＝"我要挑模型"：这时候要一次可用模型列表（后端可能是起子进程取的）。"""
+    panel = _panel(qtbot, restore_app)
+    asked: list[str] = []
+    panel.models_requested.connect(lambda: asked.append("ask"))
+
+    panel.model_combo.showPopup()
+    qtbot.wait(20)
+
+    assert asked == ["ask"], "点开下拉没有去要可用模型列表"
+    panel.model_combo.hidePopup()
+
+
+def test_model_list_is_offered_in_the_dropdown_and_sets_the_model(qtbot, restore_app):
+    """列出来的模型可以直接选：选中即生效（发 model_changed），当前模型不会被刷新弄丢。"""
+    panel = _panel(qtbot, restore_app)
+    panel.set_model("gpt-5.3")
+    panel.set_models(["gpt-5.3", "glm-5.3", "opus"])
+
+    items = [panel.model_combo.itemText(i) for i in range(panel.model_combo.count())]
+    assert items[0] == "", "第一项是空（用会话模型），与占位文字一致"
+    assert "glm-5.3" in items and "opus" in items
+    assert items[-1] == "重新获取可用模型", f"末项应当是重新获取：{items}"
+    assert panel.selected_model() == "gpt-5.3", "刷新列表把已选模型弄丢了"
+
+    chosen: list[str] = []
+    panel.model_changed.connect(chosen.append)
+    panel.model_combo.setCurrentIndex(panel.model_combo.findText("opus"))
+    assert chosen == ["opus"]
+    assert panel.selected_model() == "opus"
+
+
+def test_refresh_item_asks_again_without_becoming_the_model(qtbot, restore_app):
+    """"重新获取可用模型"不是一个模型名：选中它只重新取列表，**不许**当成模型发出去。"""
+    panel = _panel(qtbot, restore_app)
+    panel.set_models(["gpt-5.3", "opus"])
+    panel.set_model("opus")
+
+    asked: list[str] = []
+    chosen: list[str] = []
+    panel.models_requested.connect(lambda: asked.append("ask"))
+    panel.model_changed.connect(chosen.append)
+
+    index = panel.model_combo.findText("重新获取可用模型")
+    panel.model_combo.setCurrentIndex(index)
+
+    assert asked == ["ask"], "选中「重新获取可用模型」没有去重新取列表"
+    assert chosen == [], f"把「重新获取可用模型」当成模型发出去了：{chosen}"
+    assert panel.selected_model() == "opus", "重新获取之后应当保持原来选的模型"
+
+
+def test_model_can_still_be_typed_by_hand(qtbot, restore_app):
+    """CLI 后端常要手输完整模型名：下拉可编辑这一条不能丢。"""
+    panel = _panel(qtbot, restore_app)
+    panel.set_models(["a", "b"])
+
+    chosen: list[str] = []
+    panel.model_changed.connect(chosen.append)
+    panel.model_combo.setEditText("deepseek/deepseek-v4-pro")
+
+    assert panel.selected_model() == "deepseek/deepseek-v4-pro"
+    assert chosen == ["deepseek/deepseek-v4-pro"]
+
+
+def test_opening_the_dropdown_twice_does_not_hammer_the_backend(qtbot, restore_app):
+    """连点两下下拉不该跑两次取列表（openccode 那边是起子进程），想强制刷新有末项。"""
+    panel = _panel(qtbot, restore_app)
+    asked: list[str] = []
+    panel.models_requested.connect(lambda: asked.append("ask"))
+
+    panel.model_combo.showPopup()
+    qtbot.wait(10)
+    panel.set_models(["gpt-5.3"])          # 模拟列表回来了
+    panel.model_combo.hidePopup()
+    panel.model_combo.showPopup()
+    qtbot.wait(10)
+    panel.model_combo.hidePopup()
+
+    assert asked == ["ask"], f"同一分钟内点开两次要了 {len(asked)} 次列表"
+
+
+def test_model_popup_is_wide_enough_to_read_full_names(qtbot, restore_app):
+    """弹层要放得下完整的模型名。
+
+    实测（修前）：弹层宽度跟下拉一样是 130px，`deepseek/deepseek-v4-flash` 在列表里被截成
+    `deepseek/deepse…` —— 而"选哪个模型"恰恰要看清全名。
+    """
+    from PySide6.QtGui import QFontMetrics
+
+    panel = _panel(qtbot, restore_app)
+    name = "deepseek/deepseek-v4-flash"
+    panel.set_models([name, "opus"])
+
+    view = panel.model_combo.view()
+    needed = QFontMetrics(view.font()).horizontalAdvance(name)
+    assert view.minimumWidth() >= needed, (
+        f"弹层最小宽度 {view.minimumWidth()}px 放不下模型名（需要 {needed}px）"
+    )

@@ -842,3 +842,79 @@ live 冒烟、以及本机测试屏装不下右列对话页的那条，后者跳
 断言就红了（实测取到 `#b7b8ba` / `#9e9ea2`，也就是文字的颜色）。改成
 `tests/conftest.py::Grab.dominant()`：取区域内**出现次数最多**的颜色（底色必然面积最大），
 这类断言从此与字体度量无关。
+
+
+## 修订二十（2026-09-20）：用户实测三条 —— 控制台点不开、模型没在同一行、可用模型要列表
+
+用户带着截图报的三条（原话）："点了控制台没反应，并且把这个模型，移动到跟发送在同一行，
+可用模型点开用梳状的列表呈现"。
+
+### 1. 点了控制台没反应（真 bug，我自己的接线错）
+
+```python
+self.console_button.clicked.connect(self.open_console)      # ← 错在这里
+```
+
+`clicked` **总是带一个 `checked=False`**，于是调用变成 `open_console(False)`；
+`open_console` 里写的是 `if page is not None:` —— `False is not None` 成立，于是
+`tool_tabs.indexOf(False)` 抛 TypeError，Qt 打印异常、**槽函数中断、弹窗永远不出现**。
+
+为什么之前的用例没抓到：那些用例都是**直接调** `open_console(...)`，没有一条走"真点击"。
+修法两层：
+- 接线改成 `lambda: self.open_console()`（显式吞掉 checked）；
+- `open_console` 内部把非控件实参一律当成"没指定页"（`isinstance(page, QWidget)`），
+  免得以后再有人直接连方法又踩一遍。
+
+新增 `tests/test_signal_wiring.py` 把这一类问题**通用化**：
+- `test_clicked_slots_do_not_take_positional_arguments`：AST 扫出所有
+  `<X>.clicked.connect(self.方法)`，用 `inspect.signature` 检查目标方法**不许有位置参数**
+  （带默认值的也算 —— `page=None` 照样中招）。这是"带默认值的参数看起来安全、其实不安全"
+  那条教训的机器化版本；
+- `test_console_button_click_opens_the_dialog`：**真点一下**按钮，断言弹窗出现、关闭生效；
+- `test_open_console_tolerates_the_checked_flag`：退一步，直接传 `False` 也不许崩。
+变异验证：接线改回 `connect(self.open_console)` → 转红；去掉 `isinstance` 守卫 → 转红。
+
+### 2. 模型与发送同一行（这是需求，不是 bug）
+
+底栏那一行原来需要 491px，而右列的最小宽度只有 385px —— 于是 WrapRow 折成两行，
+模型掉到第二行（用户截图里就是那样）。要"永远一行"就得把这一行的**固有宽度**压到 385 以内：
+
+| 项 | 修前 | 修后 | 理由 |
+| --- | --- | --- | --- |
+| 发送 / 取消 | 52 / 52 | 52 / 52 | 不动 |
+| 把最新脚本放进中栏 | 143 | **存入中栏** 78 | 完整含义进提示气泡；标签是这一行里最大的一块 |
+| 模型标签「模型」 | 26 | **去掉** | 下拉的占位文字"使用会话模型"与提示气泡已经说明它是什么 |
+| 模型下拉 | 110 | 130 | 反而**加宽**了：要看全模型名 |
+| 可用模型按钮 | 78 | **去掉**（并入下拉，见下条） | 底栏少一个按钮才塞得下 |
+| 合计 | 491 | **330** | 右列最小宽度 385，实得 365 → 稳定一行 |
+
+实测（模拟三种屏幕、窗口取最小尺寸）：右列 385 / 对话 383 / 控件行 365 / 需要 330 → **一行**。
+WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而不是重叠），
+用例改成"把面板强行压到 260px"来触发折行。
+
+### 3. 「可用模型」点开就是列表
+
+原来：点「可用模型」按钮把候选塞进下拉，再点下拉才看到列表（两步）。
+现在：**列表就在模型下拉里** —— 点开下拉＝"我要挑模型"，这时去要一次可用模型列表
+（末项固定「重新获取可用模型」，选中它只重新取列表、**不会**被当成模型名发出去）。
+三个细节都是踩过/量过才定的：
+- **TTL 300s**：取列表在 opencode 上是起子进程，连点几下下拉会同时跑好几个；
+  而且列表是异步回来的，正在打开的弹层被清空重填在平台上可能自己关掉。
+  想强制刷新有末项。用例：连点两次只问一次。
+- **弹层比下拉宽**：原来弹层宽度跟着 130px 的下拉走，`deepseek/deepseek-v4-flash` 被截成
+  `deepseek/deepse…` —— 而"选哪个"恰恰要看清全名。现在按最长模型名撑开（上限 520px 与屏幕九成）。
+- **手输仍然可用**：下拉保持可编辑（CLI 后端常要手输完整模型名），这一条有用例钉住。
+- 控制器侧去重：同一时刻只跑一个取列表的线程，并给出"正在获取可用模型… / 已取到…"的状态文字。
+
+用例：`test_opening_the_model_dropdown_asks_for_the_model_list`、
+`test_model_list_is_offered_in_the_dropdown_and_sets_the_model`、
+`test_refresh_item_asks_again_without_becoming_the_model`、
+`test_model_can_still_be_typed_by_hand`、
+`test_opening_the_dropdown_twice_does_not_hammer_the_backend`、
+`test_model_popup_is_wide_enough_to_read_full_names`；
+`test_model_picker_sits_in_the_bottom_button_row` 改成**在面板最小宽度下**断言"同一行"。
+
+### 测试
+
+整套 **475 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+应用 `--self-test` exit=0。

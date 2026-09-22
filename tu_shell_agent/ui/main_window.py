@@ -247,7 +247,11 @@ class MainWindow(QMainWindow):
         self.console_button = QPushButton("控制台")
         self.console_button.setObjectName("consoleButton")
         self.console_button.setToolTip("运行操作、历史运行、模板库、环境自检、设置")
-        self.console_button.clicked.connect(self.open_console)
+        # **必须用 lambda 吞掉 clicked 的 checked 参数**：`clicked` 总是带一个 bool，
+        # 直接 `connect(self.open_console)` 会把 `False` 当成 `page` 传进去 ——
+        # 于是 `indexOf(False)` 抛 TypeError、槽函数中断、弹窗永远不出现。
+        # 用户实测"点了控制台没反应"就是这个（用例当时是直接调 open_console，没走真点击）。
+        self.console_button.clicked.connect(lambda: self.open_console())
         bottom = QHBoxLayout()
         bottom.addWidget(self.console_button)
         self.status_label = QLabel("就绪")
@@ -328,10 +332,13 @@ class MainWindow(QMainWindow):
     def open_console(self, page: QWidget | None = None) -> None:
         """打开「控制台」弹窗；`page` 指定要选中的页（不指定就保持上次那页）。
 
+        `page` 不是控件时一律当成"没指定"：按钮的 `clicked` 会把 `checked=False` 传进来，
+        这种"看起来像参数、其实是布尔"的实参不该让整个槽函数崩掉（弹窗打不开是最难查的症状）。
+
         打开时检查一次尺寸：**装不下才收敛**，用户自己调过的尺寸不动（弹窗可能被拖到
         另一块分辨率不同的屏上 —— 那种情况下固定尺寸会让底部的「关闭」按钮出界）。
         """
-        if page is not None:
+        if isinstance(page, QWidget):
             index = self.tool_tabs.indexOf(page)
             if index >= 0:
                 self.tool_tabs.setCurrentIndex(index)

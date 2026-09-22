@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -30,6 +31,29 @@ from .widgets.wrap_row import WrapRow
 
 # 从回复里抠出代码块（```bash / ```sh / ``` 后面到下一个围栏）
 _FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\n(.*?)```", re.S)
+
+# "重新获取可用模型"那一项的哨兵值：放在 itemData 里，不会被当成模型名发出去
+REFRESH_MODELS = object()
+
+# 点开下拉时，多久算"列表还新鲜"（秒）。在这之内不再去要，避免连点几下就起好几个子进程；
+# 想强制刷新有末项「重新获取可用模型」。
+_MODEL_LIST_TTL_S = 300.0
+
+
+class ModelCombo(QComboBox):
+    """模型下拉：**点开时先要一次"可用模型"，再往上弹列表**。
+
+    为什么要子类：`showPopup()` 是虚函数，只有子类才拦得到"用户点开这个下拉"这个动作 ——
+    点开是"我现在要挑一个模型"的明确信号，这时候去取列表最合适（取列表在部分后端上是起子进程，
+    不能每次刷新界面都跑一遍）。列表现取现用，比"先点「可用模型」按钮、再点下拉"少一步。
+    """
+
+    popup_about_to_open = Signal()
+
+    def showPopup(self) -> None:  # noqa: N802 - Qt 命名
+        self.popup_about_to_open.emit()
+        super().showPopup()
+
 
 # 引用片段的上限：选中整份脚本（几百行）一次发给模型既贵又慢，模型注意力也会散。
 # 超了就截断，并在交给模型的消息里**写明被截断**，不悄悄少发一段。
@@ -112,20 +136,25 @@ class ChatPanel(QWidget):
 
         # 模型：只影响**这段对话**（opencode 的 message 接口支持逐条指定模型，
         # 所以换模型不必重建会话、也不动 agent 文件）。
-        self.model_combo = QComboBox()
+        # 可用模型列表就在这个下拉里 —— 点开时现取现列，
+        # 末项固定是「重新获取可用模型」，所以不再单独占一个按钮的位置：
+        # 底栏那一行要塞下发送/取消/存入中栏 + 模型，多一个按钮就会挤到第二行
+        # （用户实测："把这个模型移动到跟发送在同一行"）。
+        self.model_combo = ModelCombo()
         self.model_combo.setObjectName("chatModelCombo")
-        self.model_combo.setEditable(True)
+        self.model_combo.setEditable(True)      # 完整模型名仍可直接输入（CLI 后端常用）
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model_combo.setMinimumWidth(110)   # 同上：给右列留出可缩的余地
+        self.model_combo.setMinimumWidth(130)
         self.model_combo.addItem("", "")
         self.model_combo.lineEdit().setPlaceholderText("使用会话模型")
         self.model_combo.setToolTip(
-            "只影响这段对话（按条指定给 opencode）；生成脚本用的是「设置 → 模型」里的那个。"
+            "对话用的模型：点开可选择可用模型（末项「重新获取可用模型」会重新向后台要一次列表），"
+            "也可以直接输入完整模型名；留空则用会话默认。\n"
+            "只影响这段对话；生成脚本用的是「设置 → 模型」里的那个。"
         )
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        self.model_button = QPushButton("可用模型")
-        self.model_button.setObjectName("chatModelRefreshButton")
-        self.model_button.clicked.connect(lambda: self.models_requested.emit())
+        self.model_combo.popup_about_to_open.connect(self._on_model_popup_opened)
+        self._models_loaded_at: float | None = None
 
         session_row = QWidget()
         session_row.setObjectName("chatSessionRow")
@@ -165,21 +194,24 @@ class ChatPanel(QWidget):
         self.send_button.setObjectName("chatSendButton")
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setObjectName("chatCancelButton")
-        self.extract_button = QPushButton("把最新脚本放进中栏")
+        # 标签缩短是为了**一行放得下**：整行要塞在右列最小宽度（约 385px）里，
+        # 「把最新脚本放进中栏」比「存入中栏」宽 67px，会把它挤到第二行。
+        # 完整含义放进提示气泡，不长篇占据按钮宽度。
+        self.extract_button = QPushButton("存入中栏")
+        self.extract_button.setToolTip("把回复里最新的一段脚本放进中栏（之后可「改后重跑」）")
         self.extract_button.setObjectName("chatExtractButton")
         self.status = QLabel("尚未建立对话会话；点「发送」会自动建立一个。")
         self.status.setObjectName("chatStatus")
         self.status.setProperty("role", "muted")
         self.status.setWordWrap(True)
 
-        # 底部这行：左边是动作（发送/取消/把最新脚本放进中栏），右边是模型选择。
-        # 用 WrapRow 而不是 QHBoxLayout：右列被压窄时它**折行**而不是让控件重叠
-        # （实测窗口 960 宽时右列 386px，模型下拉会盖住「可用模型」按钮）。
-        self.model_label = QLabel("模型")
+        # 底部这行：左边是动作（发送/取消/存入中栏），右边是模型选择（同一行，用户点名要求）。
+        # 用 WrapRow 而不是 QHBoxLayout：兜底 —— 窗口被压到比最小尺寸还小时**折行**而不是
+        # 让控件重叠（实测早期版本在右列 386px 时模型下拉盖住旁边的按钮）。
+        # 正常窗口下这一行只需要 330px，而右列最小 385px，永远是**一行**（有用例钉住）。
         self.controls_row = WrapRow(
-            [self.send_button, self.cancel_button, self.extract_button,
-             self.model_label, self.model_combo, self.model_button],
-            gap=3,
+            [self.send_button, self.cancel_button, self.extract_button, self.model_combo],
+            gap=3,      # 左组＝动作按钮，右组＝模型（宽的时候贴右端）
         )
 
         # ── 模型提议栏：像 Cursor 那样给出"接受 / 拒绝" ──────────────────
@@ -231,6 +263,8 @@ class ChatPanel(QWidget):
         self._quote_text = ""
         self._quote_source = ""
         self._quote_truncated = False
+        # 上一次**真正**选中的模型文本：选中「重新获取可用模型」时用它还原选择
+        self._model_text = ""
 
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
@@ -332,22 +366,72 @@ class ChatPanel(QWidget):
         note = "（引用已截断，只发送了开头部分）" if self._quote_truncated else ""
         return f"{head}{note}\n\n~~~\n{text}\n~~~\n\n{question}"
 
+    # ── 模型（可用模型列表就在这个下拉里）────────────────────────────────
     def set_models(self, models) -> None:
-        """铺可用模型列表；**保留当前选择**（刷新不该把已选的模型弄丢）。"""
+        """铺可用模型列表；**保留当前选择**（刷新不该把已选的模型弄丢）。
+
+        末项固定是「重新获取可用模型」（数据是哨兵 `REFRESH_MODELS`，不会被当成模型名）。
+        """
         current = self.model_combo.currentText().strip()
         self.model_combo.blockSignals(True)
         try:
             self.model_combo.clear()
-            self.model_combo.addItem("", "")
+            self.model_combo.addItem("", "")                    # 空 = 用会话模型
+            known = False
             for model in models:
-                self.model_combo.addItem(str(model), str(model))
-            index = self.model_combo.findText(current)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
+                name = str(model)
+                self.model_combo.addItem(name, name)
+                known = known or name == current
+            self.model_combo.addItem("重新获取可用模型", REFRESH_MODELS)
+            if known:
+                self.model_combo.setCurrentIndex(self.model_combo.findText(current))
             else:
                 self.model_combo.setEditText(current)
         finally:
             self.model_combo.blockSignals(False)
+        # 弹层要比下拉本身宽：`deepseek/deepseek-v4-flash` 这种名字在 130px 的下拉里会被截断，
+        # 而"选哪个模型"恰恰要看清全名。Qt 的弹层宽度默认跟控件一样，得自己撑开。
+        self.model_combo.view().setMinimumWidth(self._model_list_width())
+        self._model_text = current
+        # 记下"列表是什么时候取到的"：点开下拉时用 TTL 判断还要不要再取一次
+        self._models_loaded_at = time.monotonic()
+
+    def _model_list_width(self) -> int:
+        """弹层宽度：放得下最长的那个模型名（不超过屏幕的九成、也不超过 520px）。"""
+        from PySide6.QtGui import QFontMetrics
+
+        metrics = QFontMetrics(self.model_combo.view().font())
+        widest = max(
+            (metrics.horizontalAdvance(self.model_combo.itemText(index))
+             for index in range(self.model_combo.count())),
+            default=0,
+        )
+        want = widest + 48                      # 左右内边距 + 可能的滚动条
+        screen = self.screen()
+        limit = int(screen.availableGeometry().width() * 0.9) if screen is not None else 520
+        return max(self.model_combo.minimumWidth(), min(want, 520, limit))
+
+    def _on_model_popup_opened(self) -> None:
+        """点开下拉＝"我要挑模型"：列表还没取过（或放了太久）就去要一次。
+
+        为什么要 TTL 而不是每次都取：取列表在部分后端上是起子进程（`opencode models`），
+        用户连点几下下拉就会同时跑好几个 —— 而且列表内容是异步回来的，正在打开的弹层被
+        清空重填在平台上还可能自己关掉。想强制刷新有末项「重新获取可用模型」。
+        """
+        now = time.monotonic()
+        if self._models_loaded_at is not None and now - self._models_loaded_at < _MODEL_LIST_TTL_S:
+            return
+        self.models_requested.emit()
+
+    def _refresh_models_because_item_chosen(self) -> None:
+        """选中了「重新获取可用模型」：它不是模型名，重新取列表并把选择还原。"""
+        previous = self._model_text
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.setEditText(previous)
+        finally:
+            self.model_combo.blockSignals(False)
+        self.models_requested.emit()
 
     def set_model(self, model: str) -> None:
         """外部（恢复会话/新建会话）设定当前模型，不触发 model_changed。"""
@@ -361,12 +445,19 @@ class ChatPanel(QWidget):
                 self.model_combo.setEditText(text)
         finally:
             self.model_combo.blockSignals(False)
+        # 记住它：这是"当前真正选中的模型"，选中「重新获取可用模型」时要还原回这个值
+        self._model_text = text
 
     def selected_model(self) -> str:
         return self.model_combo.currentText().strip()
 
     def _on_model_changed(self, text: str) -> None:
-        self.model_changed.emit(text.strip())
+        if self.model_combo.currentData() is REFRESH_MODELS:
+            # 「重新获取可用模型」被选中：它不是一个模型名，绝不能当成模型发出去
+            self._refresh_models_because_item_chosen()
+            return
+        self._model_text = text.strip()
+        self.model_changed.emit(self._model_text)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         """第一次显示时才去问可用模型：跑一次 `opencode models` 是子进程，
