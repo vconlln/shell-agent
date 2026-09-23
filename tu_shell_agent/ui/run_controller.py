@@ -588,12 +588,26 @@ class RunController(QObject):
         base = str(getattr(settings, "api_base", "") or "").strip()
         if not base:
             base = str(os.environ.get("TU_API_BASE", "") or "").strip()
+        # 技能目录：设置里填了就用它，否则用"仓库自带/默认"那一个（与模板库同一套规矩）
+        skills_dir = str(getattr(settings, "skills_dir", "") or "").strip()
+        if not skills_dir:
+            from ..agent_backends.skills import ensure_builtin_skills
+            from .settings import default_skills_dir
+
+            candidate = default_skills_dir()
+            if not candidate.is_dir():
+                # 打包产物里没有 `skills/` 目录（PyInstaller 只收代码）：按需把随应用交付的
+                # 技能写出来 —— 与内置模板同一套做法，两个平台行为一致。
+                ensure_builtin_skills(candidate)
+            skills_dir = str(candidate) if candidate.is_dir() else ""
         return {
             "backend_id": self._backend_id(),
             "base_url": base,
             "api_key": key,
             "style": str(getattr(settings, "api_style", "openai") or "openai"),
             "model": self._config_from_ui().model,
+            "skills_dir": skills_dir,
+            "enabled_skills": str(getattr(settings, "enabled_skills", "") or "").strip(),
         }
 
     def _start_api_model_list(self, chat: Any) -> None:

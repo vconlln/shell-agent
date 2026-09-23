@@ -39,11 +39,20 @@ from ..orchestrator.cli_contract import (
 )
 from ..types import GeneratedScript
 from .api_client import ApiError, ModelApiClient, delta_stream
+from .skills import compose_system_prompt, discover_skills, select_skills
 
 DEFAULT_SYSTEM_RULES = CLI_SYSTEM_RULES
 
 # 生成脚本时给模型的系统提示：与 CLI 后端同一份硬规则（"引擎是唯一执行者"那一套）。
 GENERATE_SYSTEM_PROMPT = CLI_SYSTEM_RULES
+
+# 历史预算（字符）。300k 字符 ≈ 100k tokens 量级，留足余量给提示词与回复；
+# 超了就丢最旧的轮次（见 `_trim_messages`）—— 没有这一步，长对话必然撞上下文上限，
+# 报出来的错还是模型服务商自己那句难懂的话。
+MAX_HISTORY_CHARS = 300_000
+
+# 历史被裁剪时插进对话的一句说明（让模型知道"更早的内容我看不到了"）
+TRIM_NOTE = "（更早的对话因上下文长度限制已省略）"
 
 
 class BuiltinAdapter:
@@ -58,12 +67,21 @@ class BuiltinAdapter:
         model: str = "",
         note: Callable[[str], None] | None = None,
         client_factory: Callable[..., ModelApiClient] | None = None,
+        skills_dir: str = "",
+        enabled_skills: str = "",
+        max_history_chars: int = MAX_HISTORY_CHARS,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
         self._style = style
         self._default_model = model
         self._note = note or (lambda _message: None)
+        # 技能：纯文本资产，拼进系统提示（见 skills.py）。留空目录 = 不用技能。
+        self._skills_dir = skills_dir
+        self._enabled_skills = enabled_skills
+        # 上下文预算：把历史裁到这么多字符以内（roughly tokens×3）。超了从最旧的开始丢，
+        # 并留一句"更早的已省略" —— opencode 那边由 serve 自己管窗口，这一路得自己管。
+        self._max_history_chars = int(max_history_chars)
         self._client_factory = client_factory or ModelApiClient
         self._client: ModelApiClient | None = None
         self._lock = threading.Lock()
@@ -195,16 +213,19 @@ class BuiltinAdapter:
                 "没有指定模型：请在「设置 → 内置 agent」里填写模型名"
                 "（或点「检测可用模型」从列表里选一个）。"
             )
-        messages = [*self._messages, {"role": "user", "content": prompt}]
+        messages = self._trim_messages([*self._messages, {"role": "user", "content": prompt}])
         client = self._ensure_client()
         handler = delta_stream(None, on_delta)
         try:
             completion = client.stream_chat(
                 model=model,
                 messages=messages,
-                system=system,
+                system=self._system_prompt(system),
                 cancel=self._cancel_or_external,
                 on_event=handler,
+                # 每次调用的超时由引擎给（生成超时 / 对话超时）—— 与命令行后端一致，
+                # 不再固定用客户端那个 300 秒默认值。
+                timeout_s=max(timeout_ms, 1_000) / 1000.0,
             )
         except ApiError as error:
             raise RuntimeError(str(error)) from error
@@ -219,6 +240,37 @@ class BuiltinAdapter:
         if external is None:
             return self._cancel
         return _Either(self._cancel, external)
+
+    def _system_prompt(self, base: str) -> str:
+        """系统提示 = 基础规则 + 启用的技能正文（技能只是文本，见 skills.py）。"""
+        if not self._skills_dir:
+            return base
+        skills, problems = discover_skills(self._skills_dir)
+        selected = select_skills(skills, self._enabled_skills)
+        for problem in problems:
+            self._note(f"技能未加载：{problem}")
+        return compose_system_prompt(base, selected)
+
+    def _trim_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """把历史裁到预算之内：**从最旧的开始丢**，最后一条（本轮提问）永远保留。
+
+        丢的时候在最前面留一句说明 —— 静默截断会让模型以为"用户只说了这一句"。
+        """
+        budget = self._max_history_chars
+        if budget <= 0 or len(messages) <= 1:
+            return list(messages)
+        kept: list[dict[str, str]] = []
+        total = 0
+        for message in reversed(messages):
+            size = len(str(message.get("content") or ""))
+            if kept and total + size > budget:
+                break
+            kept.append(message)
+            total += size
+        kept.reverse()
+        if len(kept) < len(messages):
+            kept.insert(0, {"role": "user", "content": TRIM_NOTE})
+        return kept
 
     def _ensure_client(self) -> ModelApiClient:
         with self._lock:
@@ -279,8 +331,16 @@ def make_adapter(
     style: str = "openai",
     model: str = "",
     note: Callable[[str], None] | None = None,
+    skills_dir: str = "",
+    enabled_skills: str = "",
 ) -> BuiltinAdapter:
     """工厂：注册表用它造适配器（与其它后端同一个签名风格）。"""
     return BuiltinAdapter(
-        base_url=base_url, api_key=api_key, style=style, model=model, note=note
+        base_url=base_url,
+        api_key=api_key,
+        style=style,
+        model=model,
+        note=note,
+        skills_dir=skills_dir,
+        enabled_skills=enabled_skills,
     )

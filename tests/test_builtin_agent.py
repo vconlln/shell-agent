@@ -617,3 +617,236 @@ def test_settings_page_warns_when_the_style_does_not_match_the_address(qtbot):
     page.api_style_combo.setCurrentIndex(page.api_style_combo.findData("anthropic"))
     page._refresh_api_style_hint()
     assert "⚠" not in page.api_style_hint.text(), "改成匹配之后不该再报警"
+
+
+# ── 与 opencode 对齐的三件事：超时、重试、上下文预算 ────────────────────
+
+
+def test_each_call_honors_the_timeout_from_the_engine():
+    """生成/对话的超时由引擎给（与命令行后端一致），不能固定用客户端默认值。
+
+    （opencode 那边每次调用也带超时；这一路之前忽略 `timeout_ms`，长请求只能等 300 秒。）
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="好")),
+        )
+
+    adapter = _adapter(handler)
+    session = adapter.start("/tmp/run", "agent", "m")
+    adapter.chat(session, "在吗", 7_000)
+
+    assert seen["timeout"] is not None, "请求上没有带超时"
+    assert seen["timeout"]["read"] == 7.0, f"超时不是引擎给的那个：{seen['timeout']}"
+
+
+def test_transient_failures_are_retried_but_config_errors_are_not():
+    """瞬时故障（503/429/连不上）要退避重试；401 这种配置错误立刻报出来。"""
+    attempts: list[int] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(503, json={"error": {"message": "busy"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="终于好了")),
+        )
+
+    client = _client(flaky)
+    completion = client.stream_chat(model="m", messages=[{"role": "user", "content": "x"}])
+    assert completion.content == "终于好了" and len(attempts) == 2
+
+    attempts.clear()
+
+    def unauthorized(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    with pytest.raises(ApiError):
+        _client(unauthorized).stream_chat(model="m", messages=[{"role": "user", "content": "x"}])
+    assert len(attempts) == 1, "401 不该重试（重试只是让用户多等十几秒）"
+
+
+def test_long_history_is_trimmed_to_the_budget():
+    """长对话要按预算裁历史（opencode 由 serve 管窗口，这一路得自己管）。"""
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="好")),
+        )
+
+    adapter = BuiltinAdapter(
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        model="m",
+        max_history_chars=200,
+        client_factory=lambda **kwargs: ModelApiClient(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+    session = adapter.start("/tmp/run", "agent", "m")
+    for index in range(10):
+        adapter.chat(session, f"第 {index} 问" + "内容" * 30, 30_000)
+
+    messages = payloads[-1]["messages"]
+    total = sum(len(str(item["content"])) for item in messages)
+    assert total <= 200 + 200, f"历史没被裁（共 {total} 字符）"
+    assert messages[0]["role"] == "user" and "已省略" in messages[0]["content"], (
+        "裁剪后要在最前面留一句说明（静默截断会让模型以为用户只说了这一句）"
+    )
+    assert messages[-1]["content"].startswith("第 9 问"), "本轮提问必须保留"
+
+
+# ── 技能 ──────────────────────────────────────────────────────────────
+
+
+def test_skills_are_discovered_and_injected_into_the_system_prompt(tmp_path):
+    """技能是纯文本资产：发现 → 注入系统提示（生成与对话都生效）。"""
+    from tu_shell_agent.agent_backends.skills import discover_skills
+
+    root = tmp_path / "skills"
+    (root / "quotes").mkdir(parents=True)
+    (root / "quotes" / "SKILL.md").write_text(
+        "---\nname: quotes\ndescription: 变量一定要加引号\n---\n所有变量展开都要加双引号。\n",
+        encoding="utf-8",
+    )
+    (root / "extra.md").write_text("没有 front matter 也算一个技能。\n", encoding="utf-8")
+    (root / "README.md").write_text("这是说明文件，不是技能。\n", encoding="utf-8")
+    (root / "empty").mkdir()
+    (root / "empty" / "SKILL.md").write_text("   \n", encoding="utf-8")
+
+    skills, problems = discover_skills(root)
+    assert [skill.name for skill in skills] == ["extra", "quotes"]
+    assert any("empty" in item for item in problems), f"空技能要报出来：{problems}"
+
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content=CONTRACT_REPLY)),
+        )
+
+    adapter = _adapter(handler, skills_dir=str(root))
+    session = adapter.start("/tmp/run", "agent", "m")
+    adapter.generate(session, "写个脚本", {}, 30_000)
+
+    system = payloads[-1]["messages"][0]
+    assert system["role"] == "system"
+    assert "quotes" in system["content"] and "双引号" in system["content"]
+    assert "extra" in system["content"]
+    assert "README" not in system["content"], "说明文件不该被当成技能"
+
+
+def test_only_enabled_skills_are_injected(tmp_path):
+    """`enabled_skills` 留空 = 全部；填了名字就只注入那几个。"""
+    from tu_shell_agent.agent_backends.skills import compose_system_prompt, select_skills
+
+    root = tmp_path / "skills"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "SKILL.md").write_text("甲技能正文\n", encoding="utf-8")
+    (root / "b").mkdir()
+    (root / "b" / "SKILL.md").write_text("乙技能正文\n", encoding="utf-8")
+
+    from tu_shell_agent.agent_backends.skills import discover_skills
+
+    skills, _ = discover_skills(root)
+    assert select_skills(skills, "") == skills
+    assert [skill.name for skill in select_skills(skills, "b")] == ["b"]
+    assert [skill.name for skill in select_skills(skills, "a，b")] == ["a", "b"], "中文逗号也要认"
+
+    text = compose_system_prompt("基础", select_skills(skills, "b"))
+    assert "乙技能正文" in text and "甲技能正文" not in text
+    assert compose_system_prompt("基础", []) == "基础", "没有技能时原样返回"
+
+
+def test_repo_ships_a_shell_skill():
+    """仓库自带的 `skills/shell-strict` 要被解析出来（这是"技能"功能的活样例）。"""
+    from tu_shell_agent.agent_backends.skills import discover_skills
+    from tu_shell_agent.ui.settings import default_skills_dir
+
+    directory = default_skills_dir()
+    assert directory.is_dir(), f"仓库里没有技能目录：{directory}"
+    skills, problems = discover_skills(directory)
+    names = [skill.name for skill in skills]
+    assert "shell-strict" in names, f"自带技能没被解析出来：{names}（问题：{problems}）"
+    body = next(skill.body for skill in skills if skill.name == "shell-strict")
+    assert "set -euo pipefail" in body
+
+
+def test_builtin_skill_is_written_when_the_directory_is_missing(tmp_path):
+    """打包产物里没有 `skills/` 目录：内置技能要**按需落盘**（与内置模板同一套做法）。
+
+    否则 Windows 的 exe 里"技能"这个功能等于不存在 —— 用户装了它却看不到任何技能。
+    """
+    from tu_shell_agent.agent_backends.skills import (
+        BUILTIN_SKILLS,
+        discover_skills,
+        ensure_builtin_skills,
+    )
+
+    target = tmp_path / "userdata" / "skills"
+    created = ensure_builtin_skills(target)
+
+    assert created == [skill.name for skill in BUILTIN_SKILLS]
+    skills, problems = discover_skills(target)
+    assert [skill.name for skill in skills] == created and not problems
+
+    # 再跑一次不该重复写、也不该覆盖用户改过的内容
+    first = (target / BUILTIN_SKILLS[0].name / "SKILL.md").read_text(encoding="utf-8")
+    (target / BUILTIN_SKILLS[0].name / "SKILL.md").write_text("用户改过的\n", encoding="utf-8")
+    assert ensure_builtin_skills(target) == []
+    assert (target / BUILTIN_SKILLS[0].name / "SKILL.md").read_text(encoding="utf-8") == "用户改过的\n"
+    assert first.strip(), "内置技能正文不该是空的"
+
+
+def test_repo_skill_file_matches_the_builtin_constant():
+    """仓库里那份 `skills/shell-strict/SKILL.md` 与代码里的常量必须一致。
+
+    两份要是漂了，检出台与打包产物会用不同的技能 —— 这种"只在用户机器上才不同"的差异最难查。
+    """
+    from tu_shell_agent.agent_backends.skills import BUILTIN_SKILLS, parse_skill
+    from tu_shell_agent.ui.settings import repo_skills_dir
+
+    root = repo_skills_dir()
+    assert root is not None
+    text = (root / "shell-strict" / "SKILL.md").read_text(encoding="utf-8")
+    parsed = parse_skill(text, fallback_name="shell-strict")
+    builtin = next(skill for skill in BUILTIN_SKILLS if skill.name == "shell-strict")
+
+    assert parsed.description == builtin.description
+    assert parsed.body.strip() == builtin.body.strip(), "仓库里的技能文件与内置常量漂了"
+
+
+def test_controller_seeds_skills_into_the_default_dir_when_it_is_missing(qtbot, tmp_path, monkeypatch):
+    """控制器解析内置 agent 配置时，默认技能目录不存在就要把内置技能写出来（打包产物的情形）。"""
+    from tu_shell_agent.ui import settings as settings_module
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.run_controller import RunController
+    from tu_shell_agent.ui.settings import AppSettings
+
+    target = tmp_path / "userdata" / "skills"
+    monkeypatch.setattr(settings_module, "default_skills_dir", lambda: target)
+
+    settings = AppSettings(agent_backend="builtin")       # skills_dir 留空 = 用默认目录
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    controller = RunController(window=window, settings=settings, run_root=str(settings.run_root))
+
+    config = controller._api_config()
+
+    assert config["skills_dir"] == str(target)
+    assert (target / "shell-strict" / "SKILL.md").is_file(), "内置技能没有被写出来"

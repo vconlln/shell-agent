@@ -80,13 +80,15 @@ def _client(config: dict[str, Any], **kwargs: Any) -> ModelApiClient:
 
 
 def make_adapter(config: dict[str, Any]) -> BuiltinAdapter:
-    """造适配器：把设置里的 base/key/风格/模型交给它（没有"命令"这回事）。"""
+    """造适配器：把设置里的 base/key/风格/模型/技能交给它（没有"命令"这回事）。"""
     return BuiltinAdapter(
         base_url=str(config.get("base_url") or ""),
         api_key=str(config.get("api_key") or ""),
         style=str(config.get("style") or STYLE_OPENAI),
         model=str(config.get("model") or ""),
         note=config.get("note"),
+        skills_dir=str(config.get("skills_dir") or ""),
+        enabled_skills=str(config.get("enabled_skills") or ""),
     )
 
 

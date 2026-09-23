@@ -65,6 +65,11 @@ class AppSettings:
     api_key: str = ""
     # 接口风格：openai（默认，覆盖 DeepSeek / OpenAI / 本地 vLLM、Ollama、LM Studio）或 anthropic。
     api_style: str = "openai"
+    # 技能目录（每个子目录一个 SKILL.md，见 agent_backends/skills.py）。
+    # 留空 = 用仓库自带的 `skills/`（与模板库同一套"随代码版本化"的思路）。
+    skills_dir: str = ""
+    # 启用哪些技能（逗号分隔的名字）；留空 = 该目录里的全部。
+    enabled_skills: str = ""
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：
     # 与其它设置同一个文件，用户能直接看、能删、能抄给同事。
     layout: str = ""
@@ -179,6 +184,23 @@ def default_templates_dir() -> Path:
     """
     shipped = repo_templates_dir()
     return shipped if shipped is not None else default_settings_path().parent / "templates"
+
+
+def repo_skills_dir() -> Path | None:
+    """源码检出里随仓库交付的技能目录（`<仓库根>/skills`）；不是检出就返回 None。"""
+    root = Path(__file__).resolve().parents[2]
+    if (root / "pyproject.toml").is_file() and (root / "skills").is_dir():
+        return root / "skills"
+    return None
+
+
+def default_skills_dir() -> Path:
+    """技能的默认目录：检出里用仓库自带的 `skills/`，打包产物退回用户数据目录。
+
+    与模板库同一套规矩（见 `default_templates_dir`）：随代码版本化，打包产物不依赖 CWD。
+    """
+    shipped = repo_skills_dir()
+    return shipped if shipped is not None else default_settings_path().parent / "skills"
 
 
 def default_settings_path() -> Path:

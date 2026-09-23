@@ -328,12 +328,47 @@ class ModelApiClient:
         cancel: Any = None,
         on_event: Callable[[StreamEvent], None] | None = None,
         max_tokens: int = 4096,
+        timeout_s: float | None = None,
+        retries: int = 2,
     ) -> Completion:
         """一次流式对话；`on_event` 逐段回调（思考与正文分开），返回汇总结果。
 
+        - `timeout_s` 由调用方给（引擎传的是本轮生成/对话的超时），不传就用客户端默认值；
+        - `retries`：**还没吐字**时遇到瞬时故障（连不上、读超时、429/5xx）会重试，
+          指数退避。已经收到内容的流**不重试** —— 那样会把同一段答案重复写进对话记录。
         `cancel` 可以是 threading.Event（`.is_set()`）/ 可调用对象 / None —— 与引擎那边
         的取消原语保持一致（见 shell_toolchain.execute 的用法）。
         """
+        attempt = 0
+        while True:
+            try:
+                return self._stream_once(
+                    model=model,
+                    messages=messages,
+                    system=system,
+                    cancel=cancel,
+                    on_event=on_event,
+                    max_tokens=max_tokens,
+                    timeout_s=timeout_s,
+                )
+            except ApiError as error:
+                if not _retryable(error) or attempt >= max(retries, 0) or _cancelled(cancel):
+                    raise
+                attempt += 1
+                self._sleep(0.5 * (2 ** (attempt - 1)), cancel)
+
+    def _stream_once(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        system: str,
+        cancel: Any,
+        on_event: Callable[[StreamEvent], None] | None,
+        max_tokens: int,
+        timeout_s: float | None,
+    ) -> Completion:
+        """真正发一次请求（重试逻辑在 `stream_chat` 里）。"""
         url = chat_completions_url(self.base_url, self.style)
         if self.style == "anthropic":
             payload: dict[str, Any] = {
@@ -352,13 +387,22 @@ class ModelApiClient:
                 "stream": True,
             }
         result = Completion(model=model)
+        request_timeout = (
+            httpx.Timeout(timeout_s, connect=15.0) if timeout_s else None
+        )
         try:
             with self._client.stream(
-                "POST", url, headers=_headers(self.style, self.api_key), json=payload
+                "POST",
+                url,
+                headers=_headers(self.style, self.api_key),
+                json=payload,
+                timeout=request_timeout,
             ) as response:
                 if response.status_code >= 400:
                     response.read()
-                    raise ApiError(_error_message(response, self.base_url))
+                    error = ApiError(_error_message(response, self.base_url))
+                    error.status = response.status_code        # 供重试判断用
+                    raise error
                 for event_name, data in _iter_sse_lines(response):
                     if _cancelled(cancel):
                         result.finish_reason = result.finish_reason or "cancelled"
@@ -397,8 +441,31 @@ class ModelApiClient:
             raise ApiError(f"连不上模型 API（{self.base_url}）：{error}") from error
         return result
 
+    def _sleep(self, seconds: float, cancel: Any) -> None:
+        """退避等待；被取消就别等完（< 1 秒的等待也要能被打断）。"""
+        import time
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if _cancelled(cancel):
+                return
+            time.sleep(0.05)
+
     def close(self) -> None:
         self._client.close()
+
+
+# 哪些错误值得重试：连接问题、限流与服务端错误。**401/403/404 不重试** ——
+# 那是"配置不对"，重试只是把同样的失败重复几遍、还让用户多等十几秒。
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _retryable(error: ApiError) -> bool:
+    status = getattr(error, "status", None)
+    if isinstance(status, int):
+        return status in _RETRYABLE_STATUS
+    text = str(error)
+    return "连不上模型 API" in text or "没有响应" in text
 
 
 def _cancelled(cancel: Any) -> bool:

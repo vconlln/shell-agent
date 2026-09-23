@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..settings import AppSettings, default_settings_path
+from ..settings import AppSettings, default_settings_path, default_skills_dir
 from ...agent_backends import (
     BackendError,
     available_backends,
@@ -153,9 +153,33 @@ class SettingsPage(QWidget):
         backends_form = QFormLayout(backends)
         backends_form.addRow("后端", self.backend_combo)
         backends_form.addRow("命令", backend_row)
+        self.skills_dir_edit = QLineEdit()
+        self.skills_dir_edit.setObjectName("skillsDirEdit")
+        self.skills_dir_edit.setPlaceholderText("留空则用仓库自带的 skills/ 目录")
+        self.skills_pick_button = QPushButton("选择目录")
+        self.skills_pick_button.setObjectName("skillsPickButton")
+        self.skills_pick_button.clicked.connect(self._pick_skills_dir)
+        skills_row = QWidget()
+        skills_layout = QHBoxLayout(skills_row)
+        skills_layout.setContentsMargins(0, 0, 0, 0)
+        skills_layout.addWidget(self.skills_dir_edit, 1)
+        skills_layout.addWidget(self.skills_pick_button)
+        self.enabled_skills_edit = QLineEdit()
+        self.enabled_skills_edit.setObjectName("enabledSkillsEdit")
+        self.enabled_skills_edit.setPlaceholderText("留空 = 该目录里的全部技能")
+        self.enabled_skills_edit.textChanged.connect(lambda _text: self._refresh_skills_hint())
+        self.skills_dir_edit.textChanged.connect(lambda _text: self._refresh_skills_hint())
+        self.skills_hint = QLabel()
+        self.skills_hint.setObjectName("skillsHint")
+        self.skills_hint.setProperty("role", "muted")
+        self.skills_hint.setWordWrap(True)
+
         backends_form.addRow("API 地址", self.api_base_edit)
         backends_form.addRow("API key", self.api_key_edit)
         backends_form.addRow("接口风格", self.api_style_combo)
+        backends_form.addRow("技能目录", skills_row)
+        backends_form.addRow("启用技能", self.enabled_skills_edit)
+        backends_form.addRow("", self.skills_hint)
         backends_form.addRow("", self.api_style_hint)
         backends_form.addRow("", self.backend_hint)
 
@@ -356,7 +380,10 @@ class SettingsPage(QWidget):
         """把绑定对象的值铺回控件（丢弃控件上未保存的编辑）。"""
         settings = self._settings
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
+        self.skills_dir_edit.setText(str(getattr(settings, "skills_dir", "") or ""))
+        self.enabled_skills_edit.setText(str(getattr(settings, "enabled_skills", "") or ""))
         self._refresh_api_style_hint()
+        self._refresh_skills_hint()
         self.api_key_edit.setText(str(getattr(settings, "api_key", "") or ""))
         index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
         self.api_style_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -548,6 +575,42 @@ class SettingsPage(QWidget):
             return
         self.api_style_hint.setText(STYLE_HINT)
 
+    def _pick_skills_dir(self) -> None:
+        """选技能目录（与方案文档用同一个文件对话框习惯）。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        chosen = QFileDialog.getExistingDirectory(self, "选择技能目录", self.skills_dir_edit.text())
+        if chosen:
+            self.skills_dir_edit.setText(chosen)
+
+    def _skills_dir_path(self) -> str:
+        """实际要扫描的技能目录：填了就用填的，否则用**仓库自带/默认**那一个。"""
+        typed = self.skills_dir_edit.text().strip()
+        if typed:
+            return typed
+        default = default_skills_dir()
+        return str(default) if default.is_dir() else ""
+
+    def _refresh_skills_hint(self) -> None:
+        """把"发现了哪些技能、这次会注入哪几个"如实写出来。
+
+        技能是纯文本资产，用户看不到"到底生效没"就只能猜 —— 这一行就是答案。
+        """
+        from ...agent_backends.skills import discover_skills, select_skills
+
+        directory = self._skills_dir_path()
+        if not directory:
+            self.skills_hint.setText("技能目录不存在或还没建：留空时会用仓库自带的 skills/。")
+            return
+        skills, problems = discover_skills(directory)
+        chosen = select_skills(skills, self.enabled_skills_edit.text())
+        names = "、".join(skill.name for skill in skills) or "（没有发现技能）"
+        active = "、".join(skill.name for skill in chosen) or "（没有启用任何技能）"
+        text = f"目录：{directory}\n发现：{names}\n本次注入：{active}"
+        if problems:
+            text += "\n未加载：" + "；".join(problems)
+        self.skills_hint.setText(text)
+
     def _api_config(self) -> dict:
         """内置 agent 的配置（与控制器那份同源：设置字段 + 环境变量兜底）。"""
         import os
@@ -571,6 +634,8 @@ class SettingsPage(QWidget):
             "api_key": key,
             "style": str(self.api_style_combo.currentData() or "openai"),
             "model": self.model_combo.currentText().strip(),
+            "skills_dir": self._skills_dir_path(),
+            "enabled_skills": self.enabled_skills_edit.text().strip(),
         }
 
     def _fill_models(self, models: list[str]) -> None:
@@ -702,6 +767,10 @@ class SettingsPage(QWidget):
             descriptor.api_key_hint or "留空则读环境变量"
         )
         self.agent_command_edit.setEnabled(not is_api)
+        for widget in (
+            self.skills_dir_edit, self.skills_pick_button, self.enabled_skills_edit,
+        ):
+            widget.setEnabled(is_api)
         self.backend_detect_button.setEnabled(not is_api or True)   # 两条路都能"检测"
         command = self.effective_command()
         lines = [f"当前后端：{descriptor.display_name}。{descriptor.summary}"]
@@ -800,6 +869,8 @@ class SettingsPage(QWidget):
         settings.api_base = self.api_base_edit.text().strip()
         settings.api_key = self.api_key_edit.text().strip()
         settings.api_style = str(self.api_style_combo.currentData() or "openai")
+        settings.skills_dir = self.skills_dir_edit.text().strip()
+        settings.enabled_skills = self.enabled_skills_edit.text().strip()
         settings.opencode_path = self.opencode_path_edit.text().strip()
         settings.bash_path = self.bash_path_edit.text().strip()
         settings.shellcheck_path = self.shellcheck_path_edit.text().strip()
