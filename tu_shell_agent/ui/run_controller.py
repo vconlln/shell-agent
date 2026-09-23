@@ -573,6 +573,16 @@ class RunController(QObject):
         from .workers import track
 
         chat = self.window.chat_panel
+        # 设置页里选了别的后端但**没保存**时，先如实说明 —— 否则用户会以为"切过去就该能取到模型"，
+        # 实际上取模型的仍然是已保存的那个后端（用户实测报的就是这个）。
+        selected = self.window.settings_page.selected_backend_id()
+        if selected and selected != self._backend_id():
+            chat.set_status(
+                f"「设置」里选了 {selected} 但还没保存：取模型仍按当前生效的"
+                f"「{self._backend_label()}」进行。保存后重试。"
+            )
+            if selected != "opencode":
+                return
         if self._backend_id() != "opencode":
             # 模型列表只有 opencode 能列；命令行后端（claude / codeagent / 自定义）没有这条命令，
             # 不去跑一条明知会失败的命令。**但要把候选铺进下拉** —— 用户实测"选了 codeagent
@@ -598,7 +608,19 @@ class RunController(QObject):
         chat.set_status("正在获取可用模型…")
         worker = ModelsWorker(str(getattr(self.settings, "opencode_path", "") or ""))
         worker.done.connect(lambda models: chat.set_models([str(item) for item in (models or [])]))
-        worker.done.connect(lambda _models: chat.set_status("已取到可用模型，可在模型一栏选择。"))
+
+        def on_models_done(models: object) -> None:
+            """取到 0 个也要说清楚 —— 卡在"正在获取…"或留一句含糊的话，用户没法判断下一步。"""
+            count = len([item for item in (models or []) if str(item).strip()])
+            if count:
+                chat.set_status(f"已取到 {count} 个可用模型，可在模型一栏选择。")
+            else:
+                chat.set_status(
+                    "没有取到任何模型：该后端没有返回模型列表。"
+                    "（若还未登录，先跑一次登录命令；也可以直接在模型一栏手输模型名）"
+                )
+
+        worker.done.connect(on_models_done)
         worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
         self._models_worker = worker
         track(worker)

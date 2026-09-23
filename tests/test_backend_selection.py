@@ -603,3 +603,55 @@ def test_chat_model_dropdown_offers_candidates_on_a_cli_backend(qtbot, tmp_path)
     # 选中一个候选 → 真的会用于这段对话
     chat.model_combo.setCurrentIndex(chat.model_combo.findText("opus"))
     assert controller._chat_model == "opus"
+
+
+def test_unsaved_backend_selection_is_spelled_out(qtbot, tmp_path):
+    """设置页里选了别的后端但没保存时，取模型要**如实说明**按哪个后端进行。
+
+    用户实测报的"选了 codeagent，还是检测不了模型"就是这个：他改了设置页的下拉、没按保存，
+    而运行与取模型都按**已保存**的后端走 —— 界面看着像已经切过去了，于是怎么点都取不到。
+    """
+    settings = AppSettings(
+        run_root=str(tmp_path / "runs"),
+        templates_dir=str(tmp_path / "templates"),
+        agent_backend="opencode",
+    )
+    window = _window(qtbot, settings)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        settings=settings, run_root=str(tmp_path / "runs"),
+    )
+    page = window.settings_page
+
+    # 在设置页把下拉切到 codeagent，但**不保存**
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("codeagent"))
+    page._refresh_backend_hint()
+    assert "尚未保存" in page.backend_hint.text(), "设置页没有提示改完要保存"
+
+    controller._on_models_requested()
+
+    status = window.chat_panel.status.text()
+    assert "还没保存" in status or "尚未保存" in status, f"没有说明未保存：{status}"
+    # 而且不能去跑 opencode 的取模型（那会报"找不到 opencode"这种误导性的错）
+    assert controller._models_worker is None or not controller._models_worker.isRunning()
+
+
+def test_empty_model_list_is_reported_clearly(qtbot, tmp_path):
+    """取到 0 个模型也要给一句能行动的话，不能卡在"正在获取…"。"""
+    settings = AppSettings(
+        run_root=str(tmp_path / "runs"),
+        templates_dir=str(tmp_path / "templates"),
+        agent_backend="opencode",
+    )
+    window = _window(qtbot, settings)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        settings=settings, run_root=str(tmp_path / "runs"),
+    )
+    controller._on_models_requested()
+    controller._models_worker.done.emit([])          # 模拟后端返回空列表
+    qtbot.wait(20)
+
+    status = window.chat_panel.status.text()
+    assert "没有取到任何模型" in status, f"空列表没有明确说明：{status}"
+    assert "手输" in status or "登录" in status, "要给出下一步（登录 / 手输）"

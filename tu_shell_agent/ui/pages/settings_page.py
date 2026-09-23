@@ -598,6 +598,20 @@ class SettingsPage(QWidget):
             lines.append(result.detail())
         else:
             lines.append("按「检测」运行它的版本命令，确认该命令在这台机器上可用。")
+
+        # **未保存**必须说出来：用户实测"选了 codeagent，对话里还是检测不了模型"——
+        # 因为他只改了这个下拉、没按保存，而运行与取模型都按**已保存**的后端走
+        # （下一行会显示"当前实际使用"）。不说清楚的话，界面看着像已经切过去了。
+        saved = str(getattr(self._settings, "agent_backend", "") or "")
+        if saved and saved != descriptor.id:
+            try:
+                saved_name = backend_descriptor(saved).display_name
+            except BackendError:
+                saved_name = saved
+            lines.append(
+                f"⚠ 尚未保存：下面这些改动还不生效，当前实际使用的是「{saved_name}」。"
+                "点「保存」之后才会切换。"
+            )
         self.backend_hint.setText("\n".join(lines))
 
     def _detect_backend(self) -> None:
