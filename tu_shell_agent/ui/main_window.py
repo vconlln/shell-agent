@@ -191,11 +191,12 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage()
         self.settings_page.set_settings(self.settings)
 
-        # 工具区：低频面板都收进这一行的页签（用户裁定的排布）。
+        # 工具区：低频面板收进「控制台」弹窗的页签（用户裁定的排布）。
         # 主区三栏因此各自只干一件事：方案与参数 / 脚本与轮次 / 校验与输出。
-        # 低频面板与运行操作一起收进「控制台」弹窗（用户要求："开始、取消、继续修复这里
-        # 作成一个按钮，点开工具区就出现弹窗可以设置"）。主窗口因此只剩三栏 + 一条底栏，
-        # 高度全给脚本与对话。
+        #
+        # **运行操作留在主窗口底栏**（用户第二次裁定）：把它们放进弹窗之后，底栏只剩一个
+        # 「控制台」按钮，而弹窗里那一页大半是空的 —— 用户明确指出"把控制台里面运行部分的按钮
+        # 放到主界面和控制台同一行"。所以五个动作按钮回到主窗口底栏，控制台只放低频面板。
         self.tool_tabs = QTabWidget()
         self.tool_tabs.setObjectName("toolTabs")
 
@@ -206,25 +207,18 @@ class MainWindow(QMainWindow):
         self.continue_button = QPushButton("继续修复")
         self.verify_button = QPushButton("改后重跑")
         self.open_dir_button = QPushButton("打开运行目录")
+        # 这一行说明原来在弹窗的「运行」页里；按钮搬出来之后，说明改成按钮的提示气泡 ——
+        # 底栏是常驻的一条，文字放不下（会被状态行挤掉），而悬停时看得到就够了。
         self.run_hint = QLabel(
             "开始前请在左栏选择方案文档。运行期间可取消；失败后可继续修复，"
             "改了脚本用「改后重跑」只跑校验与执行。"
         )
         self.run_hint.setObjectName("runHint")
         self.run_hint.setWordWrap(True)
-        self.run_page = run_page = QWidget()   # 留个名字：测试与"接受提议后重跑"都要用它
-        run_layout = QVBoxLayout(run_page)
-        run_layout.setContentsMargins(0, 0, 0, 0)
-        run_layout.addWidget(self.run_hint)
-        run_row = QHBoxLayout()
         for button in (self.start_button, self.cancel_button, self.continue_button,
                        self.verify_button, self.open_dir_button):
-            run_row.addWidget(button)
-        run_row.addStretch(1)
-        run_layout.addLayout(run_row)
-        run_layout.addStretch(1)
+            button.setToolTip(self.run_hint.text())
 
-        self.tool_tabs.addTab(run_page, "运行")
         self.tool_tabs.addTab(self.history_page, "历史运行")
         self.tool_tabs.addTab(self.templates_pane, "模板库")
         self.tool_tabs.addTab(self.selfcheck_page, "环境自检")
@@ -232,7 +226,7 @@ class MainWindow(QMainWindow):
 
         self.console_dialog = QDialog(self)
         self.console_dialog.setObjectName("consoleDialog")
-        self.console_dialog.setWindowTitle("控制台 — 运行 / 历史 / 模板 / 自检 / 设置")
+        self.console_dialog.setWindowTitle("控制台 — 历史运行 / 模板库 / 环境自检 / 设置")
         # 舒适尺寸；每次打开都会按**当前屏幕**重算（小屏上固定尺寸会让底部按钮出界）——见 open_console
         self.console_dialog.resize(860, 560)
         console_layout = QVBoxLayout(self.console_dialog)
@@ -246,17 +240,23 @@ class MainWindow(QMainWindow):
 
         self.console_button = QPushButton("控制台")
         self.console_button.setObjectName("consoleButton")
-        self.console_button.setToolTip("运行操作、历史运行、模板库、环境自检、设置")
+        self.console_button.setToolTip("历史运行、模板库、环境自检、设置")
         # **必须用 lambda 吞掉 clicked 的 checked 参数**：`clicked` 总是带一个 bool，
         # 直接 `connect(self.open_console)` 会把 `False` 当成 `page` 传进去 ——
         # 于是 `indexOf(False)` 抛 TypeError、槽函数中断、弹窗永远不出现。
         # 用户实测"点了控制台没反应"就是这个（用例当时是直接调 open_console，没走真点击）。
         self.console_button.clicked.connect(lambda: self.open_console())
+        # 底栏一行：左边是运行操作（开始/取消/继续修复/改后重跑/打开运行目录），
+        # 中间是状态文字（占满剩余宽度、长了就省略），最右是「控制台」——
+        # 用户要求"控制台按钮往右边挪一挪"，于是它靠右端，不再挤在左边与动作按钮抢位置。
         bottom = QHBoxLayout()
-        bottom.addWidget(self.console_button)
+        for button in (self.start_button, self.cancel_button, self.continue_button,
+                       self.verify_button, self.open_dir_button):
+            bottom.addWidget(button)
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("statusLabel")
         bottom.addWidget(self.status_label, 1)
+        bottom.addWidget(self.console_button)
 
 
         # 主区直接占满窗口，底栏只放一个「控制台」按钮与状态文字。

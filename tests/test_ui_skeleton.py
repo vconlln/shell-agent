@@ -21,11 +21,12 @@ def test_main_window_has_three_panes_and_tool_tabs(qtbot):
     assert splitter is not None, "三区必须是 QSplitter"
     assert splitter.count() == 3, "左/中/右三栏"
 
-    # 低频面板与运行操作收进「控制台」弹窗（主窗口只留三栏 + 一条底栏）
+    # 低频面板收进「控制台」弹窗；**运行操作留在主窗口底栏**（用户第二次裁定：
+    # "把控制台里面运行部分的按钮放到主界面和控制台同一行"）
     tabs = window.findChild(QTabWidget, "toolTabs")
     assert tabs is not None, "控制台里的页签不见了"
     assert [tabs.tabText(i) for i in range(tabs.count())] == [
-        "运行", "历史运行", "模板库", "环境自检", "设置",
+        "历史运行", "模板库", "环境自检", "设置",
     ]
     assert window.findChild(QDialog, "consoleDialog") is not None, "没有控制台弹窗"
     assert window.console_button.text() == "控制台"

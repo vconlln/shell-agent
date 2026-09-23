@@ -103,8 +103,8 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
     assert rendered(window) == "#101114"                              # 主背景
     assert rendered(window.center_pane.script_view) == "#0b0c0e"      # 只读底（更深一档）
 
-    # 「执行输出」在右栏第二个页签里（未选中时不渲染），主按钮在控制台弹窗里 —— 都不能从
-    # 整窗帧按坐标取色，改成取**控件自己的帧**（弹窗要先显示，否则布局没算过、帧是空的）。
+    # 「执行输出」在右栏第二个页签里（未选中时不渲染），所以取**控件自己的帧**取色。
+    # （主按钮「开始」现在就在主窗口底栏上，不需要开弹窗。）
     def own_fill(widget) -> str:
         # 取"面积最大的那个颜色"而不是中心那个像素：按钮中心就是文字，字体一变采样点
         # 就可能落在字形上（实测被别的用例改过全局字体之后取到了 #b7b8ba）。
@@ -112,7 +112,6 @@ def test_window_actually_renders_with_codex_dark_colors(themed_app, qtbot):
         return frame.dominant(2, 2, widget.width() - 4, widget.height() - 4)
 
     window.right_tabs.setCurrentWidget(window.right_pane)
-    window.open_console(window.run_page)      # 主操作（开始）在里面
     qtbot.wait(50)
     assert own_fill(window.right_pane.output_view) == "#0b0c0e"
     assert own_fill(window.start_button) == "#ecedf0"                 # 浅底深字

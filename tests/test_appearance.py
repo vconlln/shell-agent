@@ -104,9 +104,6 @@ def test_scaled_controls_really_grow(restore_app, qtbot, tmp_path):
     qtbot.addWidget(normal)
     normal.show()
     normal.apply_appearance()
-    # 「开始」在控制台弹窗里（工具区搬进弹窗之后）：不显示弹窗，按钮就没被布局算过，
-    # 两个缩放档量到的都是默认高度 34 —— 用例会以"没变高"这种假红失败（实测）。
-    normal.open_console(normal.run_page)
     qtbot.wait(30)
     base_height = normal.start_button.height()
 
@@ -114,7 +111,6 @@ def test_scaled_controls_really_grow(restore_app, qtbot, tmp_path):
     qtbot.addWidget(big)
     big.show()
     big.apply_appearance()
-    big.open_console(big.run_page)
     qtbot.wait(30)
 
     assert big.start_button.height() > base_height, (
@@ -503,7 +499,7 @@ def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
     window.apply_appearance()
 
     # 控制台弹窗的页签条（工具区搬进弹窗之后，页签都在这里）
-    window.open_console(window.run_page)
+    window.open_console(window.history_page)
     bar = window.tool_tabs.tabBar()
     grab = Grab(window.console_dialog)      # 弹窗是顶层窗口，只它的帧里能取到色
 

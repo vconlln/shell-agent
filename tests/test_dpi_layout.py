@@ -152,12 +152,16 @@ def test_right_pane_sections_stay_usable_when_the_window_is_short(qtbot):
 # ── 工具区：搬进「控制台」弹窗，主窗口高度全给脚本与对话 ──────────────
 
 
-def test_tool_area_leaves_the_main_window_to_the_console_dialog(qtbot):
-    """主窗口里不再有常驻工具区：工具页签收进「控制台」弹窗，脚本正文拿到整栏高度。
+def test_run_buttons_live_in_the_bottom_bar_next_to_the_console(qtbot):
+    """运行操作在主窗口底栏那一行，最右是「控制台」；控制台弹窗只放低频面板。
 
-    用户反馈："工具区有点太占用空间了，软件的主要作用是写 shell 脚本" +
-    "工具区可以放到底部，'开始、取消、继续修复'这里作成一个按钮，点开工具区就出现弹窗"。
+    两次裁定的合并结果：工具区页签搬进「控制台」弹窗（把高度还给脚本），
+    但**运行部分的按钮必须在主界面**（用户："把控制台里面运行部分的按钮放到主界面和
+    控制台同一行，控制台按钮往右边挪一挪"）—— 弹窗里那一页大半是空的，操作按钮藏进去
+    等于每次开跑都要多点一次。
     """
+    from PySide6.QtCore import QPoint
+
     window = _window(qtbot, ui_scale=0.8)
     window.resize(1440, 900)
     window.show()
@@ -167,29 +171,63 @@ def test_tool_area_leaves_the_main_window_to_the_console_dialog(qtbot):
 
     assert not window.console_dialog.isVisible(), "控制台默认不该自己弹出来"
     assert not hasattr(window, "tool_section"), "主窗口里不该再有常驻工具区"
-    # 中栏整高只分给"脚本正文 / 轮次时间线"两块，工具区不再从里面切走一条；
-    # 脚本正文占大头就是"把高度还给脚本"的量化说法。
+
+    # 五个运行按钮**不开弹窗就能看见**
+    run_buttons = (window.start_button, window.cancel_button, window.continue_button,
+                   window.verify_button, window.open_dir_button)
+    for button in run_buttons:
+        assert button.isVisible(), f"「{button.text()}」应当常驻在主窗口底栏"
+
+    # 与「控制台」同一行（y 相同），且控制台在它们右边、贴着窗口右端
+    def pos(widget) -> QPoint:
+        return widget.mapTo(window, widget.rect().topLeft())
+
+    row_y = pos(window.start_button).y()
+    for widget in (*run_buttons, window.console_button, window.status_label):
+        assert abs(pos(widget).y() - row_y) <= 4, f"{widget.objectName() or widget.text()} 不在同一行"
+    assert pos(window.console_button).x() > pos(window.open_dir_button).x(), "控制台应当在动作按钮右侧"
+    assert pos(window.console_button).x() > pos(window.status_label).x(), "控制台应当在状态文字右侧"
+    right_gap = window.width() - (pos(window.console_button).x() + window.console_button.width())
+    assert right_gap <= 24, f"控制台没有贴到右端（右边还空着 {right_gap}px）"
+
+    # 中栏整高只分给"脚本正文 / 轮次时间线"，工具区不再从里面切走一条
     pane_height = window.center_pane.height()
     script_height = window.center_pane.script_view.height()
     assert script_height >= pane_height * 0.6, (
         f"脚本正文只拿到 {script_height}px / 中栏 {pane_height}px"
     )
-    script_height_without_console = script_height
 
-    window.open_console(window.run_page)      # 底栏那个按钮 → 弹窗出现且停在「运行」页
+    # 弹窗里只剩低频面板（没有空的「运行」页）
+    window.open_console(window.history_page)
     for _ in range(3):
         qtbot.wait(10)
     assert window.console_dialog.isVisible(), "点了控制台按钮弹窗没出来"
-    assert window.tool_tabs.currentWidget() is window.run_page, "弹窗没停在请求的那一页"
-    # 运行操作都在弹窗里，不再占主窗口
-    assert window.start_button.isVisible()
-    assert window.center_pane.script_view.height() == script_height_without_console, (
+    assert window.tool_tabs.currentWidget() is window.history_page, "弹窗没停在请求的那一页"
+    tabs = [window.tool_tabs.tabText(index) for index in range(window.tool_tabs.count())]
+    assert "运行" not in tabs, f"控制台里不该再留一个空的运行页：{tabs}"
+    assert window.center_pane.script_view.height() == script_height, (
         "弹窗不该改变主窗口里脚本正文的高度"
     )
     window.console_close_button.click()
     for _ in range(3):
         qtbot.wait(10)
     assert not window.console_dialog.isVisible(), "关闭按钮没关掉弹窗"
+
+    # 窗口缩到允许的最小尺寸时，底栏那一行仍要不重叠、不越界
+    # （再加第六个按钮就会在这里红：底栏已经用掉 951/960px）
+    window.resize(window.minimumSize())
+    for _ in range(3):
+        qtbot.wait(10)
+    boxes = []
+    for widget in (*run_buttons, window.status_label, window.console_button):
+        origin = pos(widget)
+        boxes.append((widget.text(), origin.x(), widget.width()))
+    for index, (name, x, width) in enumerate(boxes):
+        assert x + width <= window.width(), f"最小宽度下「{name}」越出窗口右边缘"
+        for other_name, other_x, other_width in boxes[index + 1:]:
+            assert x + width <= other_x or other_x + other_width <= x, (
+                f"最小宽度下「{name}」与「{other_name}」重叠"
+            )
     window.close()
 
 
