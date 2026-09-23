@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..procflags import no_window_kwargs
 from ..types import DetectedTool, DetectionReport
 
 ToolName = str  # "opencode" | "bash" | "shellcheck"
@@ -190,7 +191,12 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
         env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
         try:
             completed = subprocess.run(
-                [path, "--version"], capture_output=True, text=True, timeout=20, env=env
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+                **no_window_kwargs(),
             )
             return f"{completed.stdout}\n{completed.stderr}"
         except (OSError, subprocess.SubprocessError):
@@ -200,7 +206,12 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
         env = {**os.environ, "LC_ALL": "C", "LANG": "C", "NO_COLOR": "1"}
         try:
             completed = subprocess.run(
-                [path, "auth", "list"], capture_output=True, text=True, timeout=20, env=env
+                [path, "auth", "list"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+                **no_window_kwargs(),
             )
             return f"{completed.stdout}\n{completed.stderr}"
         except (OSError, subprocess.SubprocessError):

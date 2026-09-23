@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from ..procflags import no_window_kwargs
+
 # `opencode models` 正常很快（本地读配置 + 内置清单），给 30s 已经很宽松。
 DEFAULT_TIMEOUT_S = 30.0
 
@@ -45,6 +47,7 @@ def list_models(opencode_path: str = "opencode", *, timeout_s: float = DEFAULT_T
             timeout=timeout_s,
             check=False,
             env={**os.environ, "NO_COLOR": "1"},
+            **no_window_kwargs(),
         )
     except FileNotFoundError as error:
         raise RuntimeError(f"找不到 opencode：{opencode_path}") from error

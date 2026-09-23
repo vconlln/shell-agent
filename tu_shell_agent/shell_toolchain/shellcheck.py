@@ -7,6 +7,7 @@ import os
 import subprocess
 from typing import Mapping
 
+from ..procflags import no_window_kwargs
 from ..types import ShellcheckFinding
 
 LEVELS = ("error", "warning", "info", "style")
@@ -64,6 +65,7 @@ def run_shellcheck(
         capture_output=True,
         text=True,
         env=build_env(os.environ),
+        **no_window_kwargs(),
     )
     exit_code = completed.returncode
 

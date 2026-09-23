@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **490 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **501 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1125,3 +1125,37 @@ Windows 专有格式）：这样它在 Linux 上也能被用例钉住，不必�
 用例：`test_run_buttons_live_in_the_bottom_bar_next_to_the_console`（五个按钮不开弹窗就可见、
 与「控制台」同一行、控制台在状态文字右侧且贴右端、弹窗里没有空「运行」页、
 最小宽度下底栏不重叠），`test_main_window_has_three_panes_and_tool_tabs` 的页签契约同步更新。
+
+
+## 修订二十六（2026-09-20）：Windows 上别再闪终端了
+
+用户报："与模型会话，为什么在 windows 上会闪终端，而且应用打开的时候也会闪终端，不要闪终端"。
+
+### 根因
+
+打包产物是**窗口程序**（`packaging/tu-shell-agent.spec` 里 `console=False`），而
+`CreateProcess` 在"父进程没有控制台"时会**给子进程新建一个控制台窗口** —— 于是窗口程序每起一个
+子进程就闪一下黑框。我们起子进程的地方正好都在用户看得见的时机：
+
+| 时机 | 起的是什么 |
+| --- | --- |
+| 打开应用 | 环境自检的三个版本探测：`opencode --version` / `bash --version` / `shellcheck --version`（还有 `opencode auth list`） |
+| 与模型对话 / 生成脚本 | 后端 agent 的 CLI 进程（claude / codeagent / …） |
+| 生成或对话期间 | 长驻的 `opencode serve` —— 不带标志时它会**一直挂着一个黑框**，不只是闪 |
+| 执行脚本 | Git Bash、`taskkill`（杀进程树）、shellcheck |
+
+### 修法：一个模块 + 一条源码级契约
+
+新增 `tu_shell_agent/procflags.py`：`no_window_kwargs()` 在 Windows 上给出
+`creationflags=CREATE_NO_WINDOW`（按整棵树杀的进程再按位或上 `CREATE_NEW_PROCESS_GROUP`）
+外加一份 `STARTUPINFO` 的 `SW_HIDE` 兜底；非 Windows 返回空 dict（那些 flags 在别的平台是非法值）。
+
+六处调用点全部改用它：`shell_toolchain/execute.py`（bash + taskkill）、`shellcheck.py`、
+`detect.py`（两处探测）、`opencode_adapter/server.py`（serve）、`opencode_adapter/models.py`、
+`agent_backends/cli_agent.py`（探测 + 跑任务）。
+
+**为什么写成契约用例**：漏掉一处的表现是"偶发闪一下终端"，人工 review 查不出来。
+`tests/test_no_console_flash.py` 用 AST 扫遍整个包，要求每一处 `subprocess.run/Popen`
+要么直接 `**no_window_kwargs()`，要么在同文件里对 `**` 展开的那个字典做过
+`.update(no_window_kwargs(...))`；再点名为六条已知路径各写一条断言。
+变异验证：把五处里任意一处去掉 → 契约用例立刻转红。

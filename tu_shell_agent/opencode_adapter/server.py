@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from ..procflags import no_window_kwargs
+
 
 def build_serve_args(port: int) -> list[str]:
     return ["serve", "--hostname", "127.0.0.1", "--port", str(port)]
@@ -102,7 +104,9 @@ def start_serve(opencode_path: str, run_dir: str, timeout_s: float = 20.0) -> Se
     # 进程组 —— 少了这一行，os.getpgid(serve_pid) 返回的就是**我们自己的**进程组，
     # 于是 dispose()/失败路径的 killpg 会把 CLI/应用连同它一起 SIGKILL（应用自杀）。
     if os.name == "nt":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # 新进程组（好按整棵树杀）+ **不弹控制台窗口**：serve 是长驻进程，
+        # 不带这个标志时窗口程序会一直挂着一个黑框（用户实测"闪终端"）
+        popen_kwargs.update(no_window_kwargs(new_process_group=True))
     else:
         popen_kwargs["start_new_session"] = True
 

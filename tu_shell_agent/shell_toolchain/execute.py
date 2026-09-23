@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from ..procflags import no_window_kwargs
 from ..types import ExecuteResult
 
 
@@ -19,6 +20,8 @@ def kill_tree(pid: int) -> None:
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
             check=False,
+            # 窗口程序里起子进程会弹控制台窗口（用户实测"闪终端"）——见 procflags
+            **no_window_kwargs(),
         )
         return
     try:
@@ -50,7 +53,8 @@ def run_script(
         "env": dict(os.environ),
     }
     if os.name == "nt":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # 新进程组（好按整棵树杀）+ **不弹控制台窗口**（用户实测"闪终端"）
+        popen_kwargs.update(no_window_kwargs(new_process_group=True))
     else:
         # start_new_session 是必需的：少了它，os.getpgid(bash) 返回的就是调用方自己的进程组，
         # 超时/取消触发的 killpg 会把 CLI/应用自己一起 SIGKILL（实测变异验证：pytest 自身被 137 杀掉）。

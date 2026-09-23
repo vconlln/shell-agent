@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from ..procflags import no_window_kwargs
 from ..orchestrator.cli_contract import (
     CLI_SYSTEM_RULES,
     CliContractError,
@@ -162,6 +163,7 @@ def probe_version(
                 check=False,
                 stdin=subprocess.DEVNULL,
                 env={**os.environ, "NO_COLOR": "1", "LC_ALL": "C", "LANG": "C"},
+                **no_window_kwargs(),
             )
         except subprocess.TimeoutExpired:
             failures.append(f"{label} 超过 {timeout_s:.0f}s 没有返回")
@@ -574,7 +576,8 @@ class CliAgentAdapter:
         # kill_tree 在 POSIX 走 os.killpg(os.getpgid(pid), SIGKILL)，而 Popen 默认让子进程继承
         # 调用方的进程组 —— 少了这一行，取消/超时会把我们自己（CLI 或界面进程）一起杀掉。
         if os.name == "nt":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            # 新进程组 + **不弹控制台窗口**（用户实测"与模型对话时闪终端"）
+            popen_kwargs.update(no_window_kwargs(new_process_group=True))
         else:
             popen_kwargs["start_new_session"] = True
 
