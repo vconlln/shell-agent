@@ -37,6 +37,8 @@ from ...agent_backends import (
     backend_descriptor,
     resolve_command,
 )
+# 接口风格那两行的说明语由内置后端自己的文件提供（加新风格时不用改这个文件）
+from ...agent_backends.backends.builtin import STYLE_HINT, suggested_style
 
 # 阻断级别的条目顺序与左栏（任务 5）逐字一致：同一件事在两个地方不能出现不同顺序
 BLOCKING_LEVELS = ("error", "warning", "info", "style")
@@ -139,7 +141,13 @@ class SettingsPage(QWidget):
         self.api_style_combo.setObjectName("apiStyleCombo")
         self.api_style_combo.addItem("OpenAI 兼容（DeepSeek / OpenAI / 本地服务）", "openai")
         self.api_style_combo.addItem("Anthropic 兼容", "anthropic")
+        self.api_style_combo.setToolTip(STYLE_HINT)
         self.api_style_combo.currentIndexChanged.connect(lambda _index: self._refresh_backend_hint())
+        self.api_base_edit.textChanged.connect(lambda _text: self._refresh_api_style_hint())
+        self.api_style_hint = QLabel()
+        self.api_style_hint.setObjectName("apiStyleHint")
+        self.api_style_hint.setProperty("role", "muted")
+        self.api_style_hint.setWordWrap(True)
 
         backends = QGroupBox("后端 agent")
         backends_form = QFormLayout(backends)
@@ -148,6 +156,7 @@ class SettingsPage(QWidget):
         backends_form.addRow("API 地址", self.api_base_edit)
         backends_form.addRow("API key", self.api_key_edit)
         backends_form.addRow("接口风格", self.api_style_combo)
+        backends_form.addRow("", self.api_style_hint)
         backends_form.addRow("", self.backend_hint)
 
         # 上一次「检测」的结论：(后端 id, 命令, 结果)。只在"与当前选择一致"时才显示 ——
@@ -347,6 +356,7 @@ class SettingsPage(QWidget):
         """把绑定对象的值铺回控件（丢弃控件上未保存的编辑）。"""
         settings = self._settings
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
+        self._refresh_api_style_hint()
         self.api_key_edit.setText(str(getattr(settings, "api_key", "") or ""))
         index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
         self.api_style_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -516,6 +526,27 @@ class SettingsPage(QWidget):
         worker.done.connect(on_done)
         worker.failed.connect(on_failed)
         track(worker)      # 托管：引用被覆盖 / 退出时还在跑都会让 Qt abort（见 ui/workers.py）
+
+    def _refresh_api_style_hint(self) -> None:
+        """地址与接口风格不匹配时**明确指出来**。
+
+        用户实测踩到：地址填 `https://api.deepseek.com/anthropic`（Anthropic 兼容端点）
+        而风格留在默认的「OpenAI 兼容」—— 于是请求打到 `/anthropic/chat/completions` 这种
+        不存在的路径上，"检测可用模型"一直转圈。地址本身已经说明该选哪一个，界面就该说出来。
+        """
+        base = self.api_base_edit.text().strip()
+        current = str(self.api_style_combo.currentData() or "openai")
+        suggestion = suggested_style(base, current)
+        if not base:
+            self.api_style_hint.setText(STYLE_HINT)
+            return
+        if suggestion and suggestion != current:
+            label = "Anthropic 兼容" if suggestion == "anthropic" else "OpenAI 兼容"
+            self.api_style_hint.setText(
+                f"⚠ 这个地址看着是「{label}」端点：接口风格请改成「{label}」。{STYLE_HINT}"
+            )
+            return
+        self.api_style_hint.setText(STYLE_HINT)
 
     def _api_config(self) -> dict:
         """内置 agent 的配置（与控制器那份同源：设置字段 + 环境变量兜底）。"""

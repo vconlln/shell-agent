@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **531 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **538 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1287,3 +1287,42 @@ opencode 或者 codeagent，不像现在这样我输入问题有思考过程什�
 **外加一条端到端**：`test_our_own_agent_drives_the_whole_loop` —— 假模型 API（两轮 SSE：先给会被
 shellcheck 拦下的脚本、再给修好的）+ **真实** `run_loop`、真实 shellcheck、真实 bash、真实运行目录：
 两轮各发一次 HTTP（不起进程）、第一轮被 SC2045 拦下、第二轮执行成功、第二轮提示里带着 shellcheck 反馈。
+
+
+## 修订三十（2026-09-20）：用户填 DeepSeek 的 Anthropic 兼容端点，卡在"正在获取模型"
+
+用户报："我的 API 地址是 https://api.deepseek.com/anthropic，选择什么接口风格，
+为什么他一直显示：正在向模型 API 获取可用模型"。
+
+### 答案与两个真 bug
+
+**该选「Anthropic 兼容」**（地址里的 `/anthropic` 就是 DeepSeek 的 Anthropic 兼容入口，
+对话地址是 `{base}/v1/messages`）。但用户卡住的原因不止"选错了风格"，还有两个我的实现缺陷：
+
+1. **列模型的超时用了对话那一档（300 秒）**。`ModelApiClient` 只有 `DEFAULT_TIMEOUT_S = 300`，
+   而"列模型/检测"只是问一句"能不能用" —— 地址不通时界面就一直停在"正在获取…"上五分钟
+   （用户看到的就是这个）。现在单列一档 `LIST_TIMEOUT_S = 20`，并断言请求上真的带了它
+   （`httpx` 把超时放进 `request.extensions`）。
+2. **Anthropic 兼容端点没有 `/v1/models`**。DeepSeek 的 `/anthropic` 只实现对话那条路。
+   现在 `models_url_candidates()` 会依次试：风格自己的地址 → **同一站点的 OpenAI 兼容根**
+   （`https://api.deepseek.com/models`、`/v1/models`），404/405 就换下一个；
+   401/403 这种"配置不对"立刻报出来（换地址没用）；全失败时把**试过哪些地址**一起报给用户。
+
+顺带修掉一个会在国内机器上普遍发生的坑：**环境里配了 SOCKS 代理**（`ALL_PROXY=socks5://…`）
+而 `httpx` 缺 `socksio` 时，建客户端就 `ImportError`，用户看到的是
+`Using SOCKS proxy, but the 'socksio' package is not installed`。现在：
+把依赖声明改成 `httpx[socks]>=0.27`（并已安装），构造失败时也翻译成一句可行动的话
+（"装 `httpx[socks]`，或临时清掉 ALL_PROXY / HTTPS_PROXY"）。
+
+### 界面上主动指路（不指望用户记住规则）
+
+`builtin.suggested_style(base)` 按地址猜风格（含 `/anthropic` → Anthropic；含 `/v1`、`openai`、
+本地端口 → OpenAI），设置页在**地址与风格不匹配时报出来**：
+`⚠ 这个地址看着是「Anthropic 兼容」端点：接口风格请改成「Anthropic 兼容」。…`
+
+### 用例（`tests/test_builtin_agent.py` 增到 24 条）
+
+DeepSeek 那个地址 → 建议 Anthropic 风格、对话地址拼成 `…/anthropic/v1/messages`、
+列模型按候选地址回退（第一次 404、第二次 200，断言真的问了两个地址）、
+全失败时报出试过的地址、列模型带短超时、SOCKS 缺 socksio 的可行动提示、
+设置页在地址与风格不匹配时给 ⚠。变异验证四条全红。

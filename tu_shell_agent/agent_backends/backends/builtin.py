@@ -27,8 +27,29 @@ from ..api_client import ApiError, ModelApiClient
 STYLE_OPENAI = "openai"
 STYLE_ANTHROPIC = "anthropic"
 
-BASE_HINT = "例如 https://api.deepseek.com/v1（OpenAI 兼容）或 https://api.anthropic.com"
+BASE_HINT = "例如 https://api.deepseek.com/v1（OpenAI 兼容）或 https://api.deepseek.com/anthropic（Anthropic 兼容）"
 KEY_HINT = "留空则读环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY"
+
+STYLE_HINT = (
+    "怎么选：地址以 /anthropic 结尾（如 https://api.deepseek.com/anthropic）选「Anthropic 兼容」；"
+    "以 /v1 结尾或指向 OpenAI / 本地服务（Ollama、vLLM、LM Studio）选「OpenAI 兼容」。"
+)
+
+
+def suggested_style(base_url: str, current: str = "") -> str:
+    """按地址猜接口风格；猜不出来返回空串（**不改**用户已经选好的值）。
+
+    判据很朴素但够用：路径里出现 `/anthropic` 就是 Anthropic 兼容端点
+    （DeepSeek、智谱等都提供这种"Anthropic 兼容"入口，方便直接用 Claude 的 SDK）。
+    """
+    text = (base_url or "").strip().lower().rstrip("/")
+    if not text:
+        return ""
+    if "/anthropic" in text:
+        return STYLE_ANTHROPIC
+    if text.endswith("/v1") or "/v1/" in text or "openai" in text:
+        return STYLE_OPENAI
+    return ""
 
 # 常见服务商给一组候选（只为让用户知道该填什么形状；真实列表用「检测可用模型」现取）。
 MODEL_SUGGESTIONS: tuple[str, ...] = (
@@ -45,7 +66,11 @@ MODEL_HINT = (
 
 
 def _client(config: dict[str, Any], **kwargs: Any) -> ModelApiClient:
-    """按配置造客户端（base/key/风格/超时都从设置来）。"""
+    """按配置造客户端（base/key/风格都从设置来）。
+
+    `ApiError` 直接往上抛（调用方 probe/list_models 会把它变成给用户看的一句话）——
+    它也可能是"环境里配了 SOCKS 代理但缺 socksio"这类**构造期**错误，不能漏掉。
+    """
     return ModelApiClient(
         base_url=str(config.get("base_url") or ""),
         api_key=str(config.get("api_key") or ""),
@@ -90,7 +115,10 @@ def probe(config: dict[str, Any]) -> ProbeResult:
 
 
 def list_models(config: dict[str, Any]) -> list[str]:
-    """列出可用模型（真实列表，不是候选常量）。"""
+    """列出可用模型（真实列表，不是候选常量）。
+
+    超时短（20s）：这只是问一句"能不能用"，不该让界面停在"正在获取"上很久。
+    """
     client = _client(config)
     try:
         return client.list_models()
@@ -121,6 +149,8 @@ DESCRIPTOR = BackendDescriptor(
 
 __all__ = [
     "BASE_HINT",
+    "STYLE_HINT",
+    "suggested_style",
     "DESCRIPTOR",
     "KEY_HINT",
     "MODEL_HINT",

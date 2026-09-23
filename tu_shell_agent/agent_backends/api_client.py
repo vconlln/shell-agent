@@ -35,6 +35,10 @@ import httpx
 # 但 httpx 只支持整请求超时，所以给一个宽松的值（用户可在设置里改生成超时）。
 DEFAULT_TIMEOUT_S = 300.0
 
+# 「列模型 / 检测」这类请求必须**短**：它只是问一句"能不能用"，不该让界面停在
+# "正在向模型 API 获取可用模型…"上五分钟（用户实测就是这样：一直显示正在获取）。
+LIST_TIMEOUT_S = 20.0
+
 # 思考过程与正文的分界标记：界面上要把"模型在想什么"和"模型给出的答案"分开显示，
 # 而 on_delta 只传文本（协议如此），所以用两行标题把它们分开。
 THINKING_HEADER = "—— 思考过程 ——"
@@ -107,6 +111,45 @@ def models_url(base_url: str, style: str) -> str:
     if style == "anthropic":
         return f"{base}/v1/models"
     return f"{base}/models"
+
+
+def models_url_candidates(base_url: str, style: str) -> list[str]:
+    """列模型时依次尝试的地址（去重、保持顺序）。
+
+    为什么要多个：兼容端点常常只实现"对话"那一条。用户实测的
+    `https://api.deepseek.com/anthropic` 就是 Anthropic 兼容的**对话**端点，
+    它没有 `/v1/models`；而同一站点的 OpenAI 兼容根地址 `https://api.deepseek.com/models`
+    是有的 —— 所以这里按"风格自己的地址 → 站点根上的两种常见写法"依次试。
+    """
+    candidates = [models_url(base_url, style)]
+    base = (base_url or "").strip().rstrip("/")
+    if base:
+        root = base
+        for suffix in ("/anthropic", "/v1", "/openai"):
+            if root.endswith(suffix):
+                root = root[: -len(suffix)]
+                break
+        for extra in (f"{root}/models", f"{root}/v1/models"):
+            if extra not in candidates:
+                candidates.append(extra)
+    return candidates
+
+
+def _model_names(payload: Any) -> list[str]:
+    """从模型列表响应里取名字（OpenAI 是 `data[].id`，Anthropic 也是 `data[].id`）。"""
+    items = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get("id") or item.get("name")
+        else:
+            name = item
+        text = str(name or "").strip()
+        if text and text not in names:
+            names.append(text)
+    return names
 
 
 def _error_message(response: httpx.Response, base_url: str) -> str:
@@ -212,40 +255,69 @@ class ModelApiClient:
         self.api_key = api_key or ""
         self.style = "anthropic" if style == "anthropic" else "openai"
         self.timeout_s = timeout_s
-        self._client = httpx.Client(
-            timeout=httpx.Timeout(timeout_s, connect=15.0),
-            # 代理：这里**不**继承系统代理设置里的 loopback 例外表 —— 直连的是公网 API，
-            # 用户配了代理就该走代理（与本机 opencode serve 那条"必须绕过代理"的规则相反）。
-            transport=transport,
-        )
+        try:
+            self._client = httpx.Client(
+                timeout=httpx.Timeout(timeout_s, connect=15.0),
+                # 代理：这里**不**继承系统代理设置里的 loopback 例外表 —— 直连的是公网 API，
+                # 用户配了代理就该走代理（与本机 opencode serve 那条"必须绕过代理"的规则相反）。
+                transport=transport,
+            )
+        except ImportError as error:
+            # 国内机器上很常见：环境里配了 SOCKS 代理（ALL_PROXY=socks5://…），
+            # 而 httpx 需要 socksio 才能用。报清楚"要么装、要么别走 SOCKS"，
+            # 否则用户看到的是 `Using SOCKS proxy, but the 'socksio' package is not installed`
+            # 这种只在 Python 圈里说得通的话。
+            raise ApiError(
+                "检测到系统代理是 SOCKS，但缺少 socksio 依赖："
+                "请安装 `httpx[socks]`（本应用已声明该依赖，重装即可），"
+                "或临时清掉 ALL_PROXY / HTTPS_PROXY 环境变量。"
+                f"（原始错误：{error}）"
+            ) from error
+        except httpx.HTTPError as error:  # 代理地址写错等
+            raise ApiError(f"创建 HTTP 客户端失败：{error}") from error
 
     # ── 对外 ──────────────────────────────────────────────────────────
-    def list_models(self) -> list[str]:
-        """列出可用模型（「检测可用模型」与对话面板共用）。失败抛 `ApiError`。"""
-        url = models_url(self.base_url, self.style)
-        try:
-            response = self._client.get(url, headers=_headers(self.style, self.api_key, {"Accept": "application/json"}))
-        except httpx.HTTPError as error:
-            raise ApiError(f"连不上模型 API（{self.base_url}）：{error}") from error
-        if response.status_code >= 400:
-            raise ApiError(_error_message(response, self.base_url))
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise ApiError(f"模型列表不是 JSON：{error}") from error
-        items = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(items, list):
-            return []
-        names: list[str] = []
-        for item in items:
-            if isinstance(item, dict):
-                name = item.get("id") or item.get("name")
-            else:
-                name = item
-            text = str(name or "").strip()
-            if text and text not in names:
-                names.append(text)
-        return names
+    def list_models(self, *, timeout_s: float = LIST_TIMEOUT_S) -> list[str]:
+        """列出可用模型（「检测可用模型」与对话面板共用）。失败抛 `ApiError`。
+
+        会按候选地址**依次试**（见 `models_url_candidates`）：很多服务商只有一个兼容端点
+        （例如 DeepSeek 的 `https://api.deepseek.com/anthropic` 是 Anthropic 兼容的对话端点，
+        它**没有** `/v1/models`），这时候退回同一站点的 OpenAI 兼容 `/models` 就能列到；
+        全试完还失败，就把试过哪些地址一起报出来（用户能自己判断该填什么）。
+        """
+        candidates = models_url_candidates(self.base_url, self.style)
+        errors: list[str] = []
+        for url in candidates:
+            try:
+                response = self._client.get(
+                    url,
+                    headers=_headers(
+                        self.style, self.api_key, {"Accept": "application/json"}
+                    ),
+                    timeout=timeout_s,
+                )
+            except httpx.TimeoutException:
+                errors.append(
+                    f"{url} 超过 {timeout_s:.0f} 秒没有响应（检查网络、代理或地址）"
+                )
+                continue
+            except httpx.HTTPError as error:
+                errors.append(f"{url} 连不上：{error}")
+                continue
+            if response.status_code in (404, 405):
+                errors.append(f"{url} 返回 HTTP {response.status_code}（该地址没有模型列表）")
+                continue
+            if response.status_code >= 400:
+                # 401/403 这类是"配置不对"，换地址也没用 —— 直接把它报出来
+                raise ApiError(_error_message(response, url))
+            try:
+                payload = response.json()
+            except ValueError as error:
+                errors.append(f"{url} 返回的不是 JSON：{error}")
+                continue
+            return _model_names(payload)
+        raise ApiError("没有取到模型列表，已尝试：" + "；".join(errors))
+        return _model_names(payload)
 
     def stream_chat(
         self,

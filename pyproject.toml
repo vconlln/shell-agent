@@ -3,7 +3,9 @@ name = "tu-shell-agent"
 version = "0.1.0"
 description = "把方案文档变成可执行 shell 脚本，并用 Git Bash 执行、shellcheck 校验"
 requires-python = ">=3.10"
-dependencies = ["httpx>=0.27"]
+# httpx[socks]：环境里配了 SOCKS 代理（ALL_PROXY=socks5://…，国内机器很常见）时
+# httpx 需要 socksio 才能走通；不带 extras 的话一建客户端就 ImportError。
+dependencies = ["httpx[socks]>=0.27"]
 
 [project.optional-dependencies]
 ui = ["PySide6>=6.11"]

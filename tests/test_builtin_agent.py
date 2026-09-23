@@ -479,3 +479,141 @@ def test_our_own_agent_drives_the_whole_loop(tmp_path, shellcheck_path, bash_pat
     assert "script.sh" in stdout and "done" in stdout
     # 第二轮的提示里必须带上 shellcheck 的反馈（回灌自修的证据）
     assert "SC2045" in seen_prompts[-1]
+
+
+# ── 用户的真实场景：DeepSeek 的 Anthropic 兼容端点 ─────────────────────
+
+
+def test_deepseek_anthropic_base_picks_the_anthropic_style():
+    """地址 `https://api.deepseek.com/anthropic` 是 **Anthropic 兼容**端点。
+
+    用户实测就填的它，而风格留在默认的「OpenAI 兼容」—— 请求于是打到
+    `/anthropic/chat/completions` 这种不存在的路径上，"检测可用模型"一直转圈。
+    地址本身已经说明该选哪一个，所以既要有建议函数、也要在界面上说出来。
+    """
+    from tu_shell_agent.agent_backends.backends.builtin import (
+        STYLE_ANTHROPIC,
+        STYLE_OPENAI,
+        suggested_style,
+    )
+
+    assert suggested_style("https://api.deepseek.com/anthropic") == STYLE_ANTHROPIC
+    assert suggested_style("https://api.deepseek.com/anthropic/") == STYLE_ANTHROPIC
+    assert suggested_style("https://api.deepseek.com/v1") == STYLE_OPENAI
+    assert suggested_style("http://127.0.0.1:11434/v1") == STYLE_OPENAI
+    assert suggested_style("") == "", "猜不出来就给空串（不要瞎猜）"
+
+
+def test_chat_url_for_the_deepseek_anthropic_base_is_correct():
+    assert chat_completions_url("https://api.deepseek.com/anthropic", "anthropic") == (
+        "https://api.deepseek.com/anthropic/v1/messages"
+    )
+
+
+def test_model_list_falls_back_to_the_openai_compatible_root():
+    """Anthropic 兼容端点**没有** `/v1/models`：要退到同一站点的 OpenAI 兼容 `/models`。
+
+    （DeepSeek 的 `/anthropic/v1/models` 不存在，而 `/models` 是存在的 —— 这样用户即使填的是
+    Anthropic 端点，也能取到真实模型列表，而不是一句"取不到"。）
+    """
+    from tu_shell_agent.agent_backends.api_client import models_url_candidates
+
+    candidates = models_url_candidates("https://api.deepseek.com/anthropic", "anthropic")
+    assert candidates[0] == "https://api.deepseek.com/anthropic/v1/models"
+    assert "https://api.deepseek.com/models" in candidates
+
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        if request.url.path.endswith("/anthropic/v1/models"):
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json={"data": [{"id": "deepseek-chat"}, {"id": "deepseek-reasoner"}]})
+
+    client = ModelApiClient(
+        base_url="https://api.deepseek.com/anthropic",
+        api_key="sk-test",
+        style="anthropic",
+        transport=httpx.MockTransport(handler),
+    )
+    models = client.list_models()
+    assert models == ["deepseek-chat", "deepseek-reasoner"]
+    assert len(asked) == 2, f"没有按候选地址回退：{asked}"
+
+
+def test_all_model_urls_failing_reports_what_was_tried():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "nope"}})
+
+    client = ModelApiClient(
+        base_url="https://api.deepseek.com/anthropic",
+        api_key="sk-test",
+        style="anthropic",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ApiError) as error:
+        client.list_models()
+    message = str(error.value)
+    assert "已尝试" in message and "404" in message
+
+
+def test_model_list_uses_a_short_timeout():
+    """列模型/检测必须**短超时**：不能让界面停在"正在获取"上五分钟（用户实测）。
+
+    老实现用的是对话那档超时（300s），地址不通时界面就一直转圈。这里断言"请求上带的
+    超时就是短的那一档"（`httpx` 把超时放进 `request.extensions`），
+    再钉住那个常量本身别被调回 300。
+    """
+    from tu_shell_agent.agent_backends.api_client import LIST_TIMEOUT_S
+
+    assert LIST_TIMEOUT_S <= 30, f"列模型的超时又被调大了：{LIST_TIMEOUT_S}s"
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"data": []})
+
+    _client(handler).list_models(timeout_s=LIST_TIMEOUT_S)
+
+    assert seen["timeout"] is not None, "请求上没有带超时"
+    assert seen["timeout"]["read"] == LIST_TIMEOUT_S
+
+
+def test_socks_proxy_without_socksio_gives_an_actionable_error(monkeypatch):
+    """环境里配了 SOCKS 代理而 httpx 缺 socksio 时，要给一句人话。
+
+    （国内机器上很常见：`ALL_PROXY=socks5://…`。原始报错是
+    `Using SOCKS proxy, but the 'socksio' package is not installed`，
+    用户看不懂也不知道该怎么办。）
+    """
+    import httpx as httpx_module
+
+    from tu_shell_agent.agent_backends.api_client import ModelApiClient
+
+    def boom(*_args, **_kwargs):
+        raise ImportError("Using SOCKS proxy, but the 'socksio' package is not installed.")
+
+    monkeypatch.setattr(httpx_module, "Client", boom)
+    with pytest.raises(ApiError) as error:
+        ModelApiClient(base_url="https://api.deepseek.com/v1", api_key="k")
+    message = str(error.value)
+    assert "SOCKS" in message and ("socksio" in message or "httpx[socks]" in message)
+    assert "ALL_PROXY" in message or "环境变量" in message
+
+
+def test_settings_page_warns_when_the_style_does_not_match_the_address(qtbot):
+    """地址与接口风格不匹配时，设置页要**明确指出来**（用户就是这么卡住的）。"""
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+
+    page.api_base_edit.setText("https://api.deepseek.com/anthropic")
+    assert "Anthropic" in page.api_style_hint.text()
+    assert "⚠" in page.api_style_hint.text(), "不匹配时必须显眼地提示"
+
+    page.api_style_combo.setCurrentIndex(page.api_style_combo.findData("anthropic"))
+    page._refresh_api_style_hint()
+    assert "⚠" not in page.api_style_hint.text(), "改成匹配之后不该再报警"

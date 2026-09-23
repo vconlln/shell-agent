@@ -180,7 +180,7 @@
 并把"界面层不许出现平台分支"的豁免名单从两个文件收紧到一个（只剩 Windows 壁纸探测），
 变体验证：往别处塞一个 `sys.platform` 分支立刻转红。
 
-**现在的状态**：整套用例在 100% 与 150% 两种缩放下都是 **531 passed / 2 skipped**；
+**现在的状态**：整套用例在 100% 与 150% 两种缩放下都是 **538 passed / 2 skipped**；
 应用 `--self-test` exit=0；Linux 产物重建后自检 exit=0；代码已推送到 GitHub
 （`c9d8ef5` → `8969733` → `1b59eb3` → `d26cc43`，`main` 最新）。
 
@@ -400,6 +400,33 @@ codeagent 了，实际仍按 opencode 取模型（这台机器上没用 opencode
 **验证**：新增 17 条用例（流式、思考分段、契约、历史、取消、真实模型列表、错误提示、注册表接线），
 外加一条端到端 —— 假模型 API + **真实** run_loop / shellcheck / bash：两轮各只发一次 HTTP（不起进程）、
 第一轮被 SC2045 拦下、第二轮执行成功。
+
+### 你的 API 地址该选哪个风格 + 为什么一直转圈（已修，2026-09-20）
+
+**选「Anthropic 兼容」。** `https://api.deepseek.com/anthropic` 是 DeepSeek 的 Anthropic 兼容入口，
+对话地址会拼成 `https://api.deepseek.com/anthropic/v1/messages`（正确）。选 OpenAI 兼容的话会打到
+`/anthropic/chat/completions` 这种不存在的路径上。
+
+但"一直显示正在获取可用模型"还有两个我的实现缺陷，都修了：
+
+1. **列模型的超时用了对话那一档（300 秒）** —— 地址不通时界面就停在"正在获取…"上五分钟。
+   现在列模型/检测单独一档 **20 秒**，超时会明确告诉你"超过 20 秒没有响应"。
+2. **Anthropic 兼容端点没有 `/v1/models`**（DeepSeek 的 `/anthropic` 只实现对话那条路）。
+   现在会**自动回退**到同一站点的 OpenAI 兼容根地址（`https://api.deepseek.com/models`）去列模型 ——
+   所以你用 Anthropic 端点也能取到真实模型列表。
+
+顺带修掉一个国内机器上很常见的坑：环境里配了 **SOCKS 代理**（`ALL_PROXY=socks5://…`）时，
+httpx 缺 `socksio` 会在建客户端时就报错（原文是 `Using SOCKS proxy, but the 'socksio' package
+is not installed`）。依赖已改成 `httpx[socks]`，报错也会翻译成"装 httpx[socks] 或临时清掉
+ALL_PROXY / HTTPS_PROXY"。
+
+另外**界面会主动指路**：地址与接口风格不匹配时，设置页直接写
+`⚠ 这个地址看着是「Anthropic 兼容」端点：接口风格请改成「Anthropic 兼容」`。
+
+> 早上重建后：设置 → 后端 agent → 内置 agent → API 地址填你那个、
+> **接口风格选「Anthropic 兼容」**、模型填 `deepseek-chat` 或 `deepseek-reasoner`（也可以点
+> 「检测可用模型」让它现取）→ 保存。若仍然取不到列表，提示里现在会列出**试过哪些地址**，
+> 把那行发我即可。
 
 ### 需要你在 Windows 上确认的（我这边看不到）
 
