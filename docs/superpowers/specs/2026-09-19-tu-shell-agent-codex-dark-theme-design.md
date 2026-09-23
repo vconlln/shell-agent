@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **514 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **531 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1229,3 +1229,61 @@ opencode），模型下拉一直空着、状态行停在"正在获取可用模�
 用例：`test_unsaved_backend_selection_is_spelled_out`、`test_empty_model_list_is_reported_clearly`
 （`tests/test_backend_selection.py`）。变异验证三条全红：对话面板不提示未保存 / 设置页不提示尚未保存 /
 空列表照旧含糊。
+
+
+## 修订二十九（2026-09-20）：自己做 agent —— 内置后端直连模型 API
+
+用户要求（原话）："与模型对话这里，我输入问题，需要停顿很久才能有回复，好像不是直接调用后端
+opencode 或者 codeagent，不像现在这样我输入问题有思考过程什么的，我要做的是自己的 agent，
+你也可以自己做 agent 不用调用别的后端，当然这是最好。"
+
+### 慢在哪、看不到什么
+
+| | 首字延迟的来源 | 思考过程 |
+| --- | --- | --- |
+| opencode | 首次要起 `opencode serve` 再建会话（几秒） | 由 CLI 决定，界面拿不到 |
+| claude / codeagent | **每轮对话都要起一个 node 进程**（冷启动几秒）+ `--resume` | CLI 自己的 stream-json 里才有，界面上没有 |
+
+### 新增后端：`builtin`（内置 agent，直连模型 API）
+
+它不是别人的 CLI，而是**一个 HTTP 请求**：
+
+- `agent_backends/api_client.py`：最小客户端，OpenAI 兼容（DeepSeek / OpenAI / 本地 vLLM、Ollama、
+  LM Studio）与 Anthropic 兼容两家；SSE 逐行解析，脏行（空行、`:` 注释、`event:`、`[DONE]`）
+  一律跳过 —— "解析器不能比上游更脆"这条规矩在 CLI 那边已经立过一次。
+- `agent_backends/builtin_agent.py`：实现**与 opencode / CLI 完全相同的端口**
+  （`start/resume/generate/chat/abort/dispose`），所以编排层、界面、权限模型一行都没改。
+  - 生成走**同一套文本契约**（`===TU-SCRIPT===` …），引擎那侧的解析与回灌自修原样复用；
+  - 历史存在运行目录（`chat.jsonl`，与界面回填同一份），`resume()` 读回来 ——
+    "重启应用接着上次聊"不依赖任何外部服务；
+  - `abort()` / `dispose()` 置位取消事件，正在读的流在下一个数据块处停下。
+- **安全模型更窄了**：它没有任何工具（不执行命令、不读写文件、不联网，除了调用模型 API），
+  产物只有文本；脚本仍由引擎解析、写盘、shellcheck、人工确认后才执行。
+- **思考过程看得见**：`reasoning_content`（DeepSeek-R1 类）与 `thinking_delta`（Anthropic）
+  都逐字回调，对话记录里自动分成两段：
+
+```
+—— 思考过程 ——
+（模型的推理，逐字出现）
+—— 回复 ——
+（最终答案）
+```
+
+- **模型列表是真的**：命令行后端只能给候选常量（`sonnet/opus/haiku`），内置后端可以
+  `GET {base}/models` 现取（「检测可用模型」与对话面板的下拉共用）——用户抱怨的"检测不了模型"
+  在这一路上不再存在。
+- **「检测」也是真的**：不是检查"字段填没填"，而是真发一次列模型请求；key 错了就报
+  "HTTP 401 …检查「设置 → 内置 agent」里的 API key"。
+
+设置页新增三行：API 地址 / API key（按密码显示）/ 接口风格（OpenAI 兼容、Anthropic 兼容），
+只在后端选到内置时可编辑，其余后端置灰；命令框在内置后端下也置灰（它没有命令）。
+
+### 用例（`tests/test_builtin_agent.py`，17 条）
+
+地址拼接容错、流式把思考与正文分开、切段时插标题、Anthropic 风格、401/连接错误的中文可行动提示、
+取消让流停下、真实模型列表、生成过契约、契约缺失时给可重试的错误、对话流式 + 历史带进下一轮、
+没填模型时的提示、`resume` 读回历史、`abort` 中断在飞的一轮、注册表接线（造适配器 / 检测 / 列模型）、
+字段没填不发请求。
+**外加一条端到端**：`test_our_own_agent_drives_the_whole_loop` —— 假模型 API（两轮 SSE：先给会被
+shellcheck 拦下的脚本、再给修好的）+ **真实** `run_loop`、真实 shellcheck、真实 bash、真实运行目录：
+两轮各发一次 HTTP（不起进程）、第一轮被 SC2045 拦下、第二轮执行成功、第二轮提示里带着 shellcheck 反馈。

@@ -127,10 +127,27 @@ class SettingsPage(QWidget):
         self.backend_hint.setProperty("role", "muted")
         self.backend_hint.setWordWrap(True)
 
+        # 内置 agent（直连模型 API）的配置。**没有"命令"这一栏**：它不装任何东西。
+        # 只在后端选到内置时才可编辑（其余后端下置灰，避免"填了却没人读"的困惑）。
+        self.api_base_edit = QLineEdit()
+        self.api_base_edit.setObjectName("apiBaseEdit")
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setObjectName("apiKeyEdit")
+        # key 在界面上按密码显示：截图或旁人瞥一眼不该泄露它（也不写进日志）。
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_style_combo = QComboBox()
+        self.api_style_combo.setObjectName("apiStyleCombo")
+        self.api_style_combo.addItem("OpenAI 兼容（DeepSeek / OpenAI / 本地服务）", "openai")
+        self.api_style_combo.addItem("Anthropic 兼容", "anthropic")
+        self.api_style_combo.currentIndexChanged.connect(lambda _index: self._refresh_backend_hint())
+
         backends = QGroupBox("后端 agent")
         backends_form = QFormLayout(backends)
         backends_form.addRow("后端", self.backend_combo)
         backends_form.addRow("命令", backend_row)
+        backends_form.addRow("API 地址", self.api_base_edit)
+        backends_form.addRow("API key", self.api_key_edit)
+        backends_form.addRow("接口风格", self.api_style_combo)
         backends_form.addRow("", self.backend_hint)
 
         # 上一次「检测」的结论：(后端 id, 命令, 结果)。只在"与当前选择一致"时才显示 ——
@@ -329,6 +346,10 @@ class SettingsPage(QWidget):
     def reload(self) -> None:
         """把绑定对象的值铺回控件（丢弃控件上未保存的编辑）。"""
         settings = self._settings
+        self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
+        self.api_key_edit.setText(str(getattr(settings, "api_key", "") or ""))
+        index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
+        self.api_style_combo.setCurrentIndex(index if index >= 0 else 0)
         self.opencode_path_edit.setText(settings.opencode_path)
         self.bash_path_edit.setText(settings.bash_path)
         self.shellcheck_path_edit.setText(settings.shellcheck_path)
@@ -436,6 +457,34 @@ class SettingsPage(QWidget):
         """点「检测可用模型」：起线程跑 `opencode models`，回来后填进下拉（保留当前选择）。"""
         from ..engine_worker import ModelsWorker
 
+        descriptor_now = backend_descriptor(self.selected_backend_id())
+        if descriptor_now.is_api:
+            # 内置 agent 可以**真的列一次**模型（一次 GET 请求，不起进程、不装东西）
+            from ..engine_worker import ApiModelsWorker
+
+            self.model_refresh_button.setEnabled(False)
+            self.model_hint.setText("正在向模型 API 获取可用模型…")
+            worker = ApiModelsWorker(self._api_config())
+
+            def on_api_done(models: object) -> None:
+                names = [str(item) for item in (models or [])]
+                self._fill_models(names)
+                self.model_refresh_button.setEnabled(True)
+                self.model_hint.setText(
+                    f"已取到 {len(names)} 个模型，请选择一个。"
+                    if names
+                    else "模型 API 返回了空列表：确认该 key 下有可用模型，或直接手输模型名。"
+                )
+
+            def on_api_failed(message: str) -> None:
+                self.model_refresh_button.setEnabled(True)
+                self.model_hint.setText(f"取模型列表失败：{message}")
+
+            worker.done.connect(on_api_done)
+            worker.failed.connect(on_api_failed)
+            track(worker)
+            return
+
         if self.selected_backend_id() != "opencode":
             # 命令行后端没有"列出模型"的命令（`claude` / `codeagent` 都没有）。用户点这个按钮是
             # 想知道"我能填什么"，所以给出该后端声明的候选，并说清"值会原样传下去、也能手输" ——
@@ -467,6 +516,31 @@ class SettingsPage(QWidget):
         worker.done.connect(on_done)
         worker.failed.connect(on_failed)
         track(worker)      # 托管：引用被覆盖 / 退出时还在跑都会让 Qt abort（见 ui/workers.py）
+
+    def _api_config(self) -> dict:
+        """内置 agent 的配置（与控制器那份同源：设置字段 + 环境变量兜底）。"""
+        import os
+
+        key = self.api_key_edit.text().strip()
+        if not key:
+            for name in (
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "TU_API_KEY",
+            ):
+                value = os.environ.get(name, "").strip()
+                if value:
+                    key = value
+                    break
+        base = self.api_base_edit.text().strip() or os.environ.get("TU_API_BASE", "").strip()
+        return {
+            "backend_id": self.selected_backend_id(),
+            "base_url": base,
+            "api_key": key,
+            "style": str(self.api_style_combo.currentData() or "openai"),
+            "model": self.model_combo.currentText().strip(),
+        }
 
     def _fill_models(self, models: list[str]) -> None:
         """把模型列表铺进下拉，**保留用户当前输入**（列表刷新不该把已选的模型弄丢）。"""
@@ -585,11 +659,28 @@ class SettingsPage(QWidget):
         except BackendError as error:
             self.backend_hint.setText(str(error))
             return
+        # 内置 agent 没有"命令"，它读 API 地址 / key / 风格；其余后端下这三行置灰。
+        is_api = descriptor.is_api
+        self.api_base_edit.setEnabled(is_api)
+        self.api_key_edit.setEnabled(is_api)
+        self.api_style_combo.setEnabled(is_api)
+        self.api_base_edit.setPlaceholderText(
+            descriptor.api_base_hint or "留空则不使用直连模型 API"
+        )
+        self.api_key_edit.setPlaceholderText(
+            descriptor.api_key_hint or "留空则读环境变量"
+        )
+        self.agent_command_edit.setEnabled(not is_api)
+        self.backend_detect_button.setEnabled(not is_api or True)   # 两条路都能"检测"
         command = self.effective_command()
-        lines = [
-            f"当前后端：{descriptor.display_name}。{descriptor.summary}",
-            f"命令：{command}。" if command else "命令尚未填写，运行时会无法启动该后端。",
-        ]
+        lines = [f"当前后端：{descriptor.display_name}。{descriptor.summary}"]
+        if descriptor.is_api:
+            base = self.api_base_edit.text().strip() or "（未填写）"
+            key_state = "已填写" if self.api_key_edit.text().strip() else "未填写（将读环境变量）"
+            lines.append(f"API 地址：{base}；API key：{key_state}。")
+            lines.append("这一路不安装任何命令行 agent；点「检测」会真的问一次模型接口是否可用。")
+        else:
+            lines.append(f"命令：{command}。" if command else "命令尚未填写，运行时会无法启动该后端。")
         if descriptor.needs_serve and not self.agent_command_edit.text().strip():
             lines.append("命令留空时使用「组件路径」中的 opencode 路径。")
         probe = self._backend_probe
@@ -623,7 +714,7 @@ class SettingsPage(QWidget):
         command = self.agent_command_edit.text().strip()
         self.backend_detect_button.setEnabled(False)
         self.backend_hint.setText(f"正在检测 {backend_id}…")
-        worker = BackendProbeWorker(backend_id, command)
+        worker = BackendProbeWorker(backend_id, command, api=self._api_config())
 
         def on_done(result: object) -> None:
             self._backend_probe = (backend_id, self.effective_command(), result)
@@ -675,6 +766,9 @@ class SettingsPage(QWidget):
     def collect(self) -> AppSettings:
         """控件 → `AppSettings`（**不落盘**）。直接写回绑定对象，免得丢掉 load() 记住的路径。"""
         settings = self._settings
+        settings.api_base = self.api_base_edit.text().strip()
+        settings.api_key = self.api_key_edit.text().strip()
+        settings.api_style = str(self.api_style_combo.currentData() or "openai")
         settings.opencode_path = self.opencode_path_edit.text().strip()
         settings.bash_path = self.bash_path_edit.text().strip()
         settings.shellcheck_path = self.shellcheck_path_edit.text().strip()

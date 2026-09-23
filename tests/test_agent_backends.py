@@ -125,7 +125,8 @@ def new_adapter(run_dir: Path, command: str = str(FIXTURE)) -> CliAgentAdapter:
 
 
 def test_registry_lists_every_backend_in_a_stable_order():
-    assert backend_ids() == ("opencode", "claude", "codeagent", "custom")
+    # 顺序是契约：默认后端在最前，内置 agent（直连模型 API）紧随其后，自定义最后
+    assert backend_ids() == ("opencode", "builtin", "claude", "codeagent", "custom")
     assert [item.display_name for item in available_backends()][0] == "opencode"
 
 

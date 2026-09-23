@@ -214,6 +214,7 @@ class RunController(QObject):
             self._path_overrides(),
             backend_id=self._backend_id(),
             command=self._backend_command_quietly(),
+            api=self._api_config(),
         )
         worker.done.connect(self._on_detected)
         worker.failed.connect(lambda message: self._status(f"环境探测失败：{message}"))
@@ -563,8 +564,63 @@ class RunController(QObject):
             else "这段对话沿用会话自己的模型。"
         )
 
+    def _api_config(self) -> dict[str, Any]:
+        """内置 agent 的配置（base / key / 风格 / 模型 / 后端 id）。
+
+        key 的兜底顺序写在一处：设置里填了就用它，否则依次读常见环境变量 ——
+        用户把 key 放在环境变量里（CI 与命令行工具的惯例）时不必再抄进设置文件。
+        """
+        settings = self.settings
+        key = str(getattr(settings, "api_key", "") or "").strip()
+        if not key:
+            import os
+
+            for name in (
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "TU_API_KEY",
+            ):
+                value = os.environ.get(name, "").strip()
+                if value:
+                    key = value
+                    break
+        base = str(getattr(settings, "api_base", "") or "").strip()
+        if not base:
+            base = str(os.environ.get("TU_API_BASE", "") or "").strip()
+        return {
+            "backend_id": self._backend_id(),
+            "base_url": base,
+            "api_key": key,
+            "style": str(getattr(settings, "api_style", "openai") or "openai"),
+            "model": self._config_from_ui().model,
+        }
+
+    def _start_api_model_list(self, chat: Any) -> None:
+        """内置 agent 的模型列表：一次 GET 请求（不起子进程），放线程里发。"""
+        from .engine_worker import ApiModelsWorker
+        from .workers import track
+
+        if self._models_worker is not None and self._models_worker.isRunning():
+            return
+        chat.set_status("正在向模型 API 获取可用模型…")
+        worker = ApiModelsWorker(self._api_config())
+        worker.done.connect(lambda models: chat.set_models([str(item) for item in (models or [])]))
+
+        def on_done(models: object) -> None:
+            count = len([item for item in (models or []) if str(item).strip()])
+            if count:
+                chat.set_status(f"已取到 {count} 个可用模型，可在模型一栏选择。")
+            else:
+                chat.set_status("模型 API 返回了空列表：确认该 key 有可用的模型，或直接手输模型名。")
+
+        worker.done.connect(on_done)
+        worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
+        self._models_worker = worker
+        track(worker)
+
     def _on_models_requested(self) -> None:
-        """拉可用模型列表填进对话面板的下拉（子进程调用放线程里）。
+        """拉可用模型列表填进对话面板的下拉（子进程/网络调用都放线程里）。
 
         **必须走 workers.track 托管**：直接挂在一个字段上，第二次请求就会把还在跑的
         那个覆盖掉，QThread 被 GC 时 Qt 直接 abort（用户报的"选模型直接闪退"）。
@@ -583,14 +639,18 @@ class RunController(QObject):
             )
             if selected != "opencode":
                 return
+        from ..agent_backends import backend_descriptor
+
+        descriptor = backend_descriptor(self._backend_id())
+        if descriptor.is_api:
+            # 内置 agent 直连模型 API：可以**真的列一次**可用模型（一次 GET 请求，不起进程）。
+            self._start_api_model_list(chat)
+            return
         if self._backend_id() != "opencode":
             # 模型列表只有 opencode 能列；命令行后端（claude / codeagent / 自定义）没有这条命令，
             # 不去跑一条明知会失败的命令。**但要把候选铺进下拉** —— 用户实测"选了 codeagent
             # 之后没法选模型"：旧实现只写了一句提示，下拉里空空如也，等于让他自己猜模型名。
             # 候选来自后端自己的文件（`model_suggestions`），并且仍然可以直接手输。
-            from ..agent_backends import backend_descriptor
-
-            descriptor = backend_descriptor(self._backend_id())
             candidates = [str(item) for item in descriptor.model_suggestions]
             chat.set_models(candidates)
             if candidates:
@@ -849,11 +909,12 @@ class RunController(QObject):
         from ..shell_toolchain.facade import ShellToolchain
 
         overrides = self._path_overrides()
+        api = self._api_config()
         try:
             backend_id = self._backend_id()
             descriptor = backend_descriptor(backend_id)
-            command = self._backend_command(descriptor)
-            report = detect_environment(backend_id, command, overrides=overrides)
+            command = "" if descriptor.is_api else self._backend_command(descriptor)
+            report = detect_environment(backend_id, command, overrides=overrides, api=api)
         except BackendError as error:
             raise _DependencyMissing(str(error)) from error
         if report.problems:
@@ -864,7 +925,7 @@ class RunController(QObject):
         # 命令行后端则按用户填的命令启动（探测已经确认过解析得到）。
         resolved = report.opencode.path if descriptor.needs_serve and report.opencode else command
         try:
-            self._adapter = build_adapter(backend_id, resolved, note=self._status)
+            self._adapter = build_adapter(backend_id, resolved, note=self._status, api=api)
         except BackendError as error:
             raise _DependencyMissing(str(error)) from error
         self._opencode = self._adapter
@@ -878,7 +939,9 @@ class RunController(QObject):
             report.bash.path,
             report.shellcheck.path,
             overrides,
-            detect=lambda: detect_environment(backend_id, command, overrides=overrides),
+            detect=lambda: detect_environment(
+                backend_id, command, overrides=overrides, api=api
+            ),
         )
         return self._opencode, self._toolchain
 

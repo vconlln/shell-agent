@@ -16,6 +16,16 @@ from .cli_agent import CliSpec
 # 命令由注册表解析出默认值之后传进来，所以工厂自己不必再判"留空时用什么"。
 AdapterFactory = Callable[[str, Callable[[str], None] | None], Any]
 
+# 直连模型 API 的后端（内置 agent）用的是另一套配置：没有"命令"，只有 base/key/风格/模型。
+# 单独一个工厂签名而不是硬塞进上面那个：命令行后端与 API 后端的输入本来就不同，
+# 混在一起就要在每个工厂里判"这次传的到底是命令还是配置"。
+ApiConfig = dict[str, Any]
+ApiFactory = Callable[[ApiConfig], Any]
+# 探测（「检测」按钮）：拿配置去真的问一次模型 API 是否可用。
+ApiProbe = Callable[[ApiConfig], Any]
+# 列出可用模型（「检测可用模型」与对话面板共用）。
+ApiModelList = Callable[[ApiConfig], list]
+
 
 @dataclass(frozen=True, slots=True)
 class BackendDescriptor:
@@ -45,8 +55,22 @@ class BackendDescriptor:
     model_hint: str = ""
     # 命令行后端的旗标约定；走 HTTP 的后端（opencode）为 None。
     cli: CliSpec | None = None
+    # 直连模型 API 的后端（内置 agent）：给一份配置就能造适配器 / 探测 / 列模型。
+    # 三个分开，是因为它们的调用点不同（造适配器 / 设置页的「检测」/ 模型列表），
+    # 合成一个函数再加参数枚举反而更绕。
+    api_factory: ApiFactory | None = None
+    api_probe: ApiProbe | None = None
+    api_model_list: ApiModelList | None = None
+    # API 后端的配置字段说明（设置页用它填占位文字与提示，不写死"openai"这类字眼）。
+    api_base_hint: str = ""
+    api_key_hint: str = ""
 
     @property
     def is_cli(self) -> bool:
         """这个后端是不是"命令行 agent"那一路（决定环境探测与依赖检查走哪条）。"""
         return self.cli is not None
+
+    @property
+    def is_api(self) -> bool:
+        """这个后端是不是"直连模型 API"那一路（内置 agent）。"""
+        return self.api_factory is not None

@@ -106,6 +106,7 @@ def test_settings_page_lists_every_registered_backend(qtbot, tmp_path):
         for index in range(page.backend_combo.count())
     }
     assert listed == {
+        "builtin": "内置 agent（直连模型 API）",
         "opencode": "opencode",
         "claude": "Claude Code",
         "codeagent": "codeagent",
@@ -172,10 +173,11 @@ class _StubProbeWorker(QThread):
     calls: list[tuple[str, str]] = []
     result = ProbeResult(DetectedTool(path="/usr/bin/claude", version="2.1.112"), "")
 
-    def __init__(self, backend_id: str, command: str = "", parent=None) -> None:
+    def __init__(self, backend_id: str, command: str = "", parent=None, *, api=None) -> None:
         super().__init__(parent)
         self._backend_id = backend_id
         self._command = command
+        self._api = dict(api or {})
         _StubProbeWorker.calls.append((backend_id, command))
 
     def run(self) -> None:  # noqa: D102 - 替身

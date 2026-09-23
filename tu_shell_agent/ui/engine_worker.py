@@ -160,11 +160,13 @@ class DetectWorker(QThread):
         *,
         backend_id: str = "opencode",
         command: str = "",
+        api: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self._overrides = dict(overrides or {})
         self._backend_id = str(backend_id or "opencode")
         self._command = str(command or "")
+        self._api = dict(api or {})
 
     def run(self) -> None:  # noqa: D102 - QThread
         try:
@@ -173,7 +175,7 @@ class DetectWorker(QThread):
             from ..agent_backends import detect_environment
 
             report = detect_environment(
-                self._backend_id, self._command, overrides=self._overrides
+                self._backend_id, self._command, overrides=self._overrides, api=self._api
             )
         except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
             self.failed.emit(str(error))
@@ -192,16 +194,53 @@ class BackendProbeWorker(QThread):
     done = Signal(object)   # ProbeResult
     failed = Signal(str)
 
-    def __init__(self, backend_id: str, command: str = "", parent: Any = None) -> None:
+    def __init__(
+        self,
+        backend_id: str,
+        command: str = "",
+        parent: Any = None,
+        *,
+        api: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._backend_id = str(backend_id or "")
         self._command = str(command or "")
+        # 直连模型 API 的后端（内置 agent）没有"命令"，检测要靠这份配置去真的问一次 API
+        self._api = dict(api or {})
 
     def run(self) -> None:  # noqa: D102 - QThread
         try:
             from ..agent_backends import probe_backend
 
-            self.done.emit(probe_backend(self._backend_id, self._command))
+            self.done.emit(probe_backend(self._backend_id, self._command, api=self._api))
+        except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
+            self.failed.emit(str(error))
+
+
+class ApiModelsWorker(QThread):
+    """内置 agent 的「检测可用模型」：向模型 API 要一次真实列表。
+
+    与 `ModelsWorker`（跑 `opencode models` 子进程）分开，因为那条路完全不需要进程 ——
+    一次 GET 请求就够了，而且**必须**在 UI 线程之外发（网络可能几秒才回）。
+    """
+
+    done = Signal(object)   # list[str]
+    failed = Signal(str)
+
+    def __init__(self, api: dict[str, Any], parent: Any = None) -> None:
+        super().__init__(parent)
+        self._api = dict(api or {})
+
+    def run(self) -> None:  # noqa: D102 - QThread
+        try:
+            from ..agent_backends import backend_descriptor
+
+            descriptor = backend_descriptor(str(self._api.get("backend_id") or "builtin"))
+            lister = descriptor.api_model_list
+            if lister is None:
+                self.failed.emit("当前后端不提供模型列表")
+                return
+            self.done.emit([str(item) for item in lister(self._api)])
         except BaseException as error:  # noqa: BLE001 - 线程里绝不能让异常逃逸
             self.failed.emit(str(error))
 

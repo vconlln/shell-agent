@@ -58,6 +58,13 @@ class AppSettings:
     # 留空 = 用 opencode 自己的默认模型 —— 注意 opencode 未配置默认模型时会落到它的
     # 免费档（`opencode/*-free`），而免费档只允许官方客户端调用，经 serve 的 API 调用会被拒绝。
     opencode_model: str = ""
+    # ── 内置 agent（直连模型 API）────────────────────────────────────────
+    # 该后端不装任何东西：它直接 POST 模型 API。base 要含 /v1（OpenAI 兼容）或写厂商根地址
+    # （Anthropic 风格会自动补 /v1/messages）；key 留空时读环境变量（见 backends/builtin.py）。
+    api_base: str = ""
+    api_key: str = ""
+    # 接口风格：openai（默认，覆盖 DeepSeek / OpenAI / 本地 vLLM、Ollama、LM Studio）或 anthropic。
+    api_style: str = "openai"
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：
     # 与其它设置同一个文件，用户能直接看、能删、能抄给同事。
     layout: str = ""
@@ -94,6 +101,8 @@ class AppSettings:
             self.backdrop = "acrylic"
         if self.agent_backend not in backend_ids():
             self.agent_backend = DEFAULT_BACKEND_ID
+        if self.api_style not in ("openai", "anthropic"):
+            self.api_style = "openai"
 
     @classmethod
     def defaults_for(cls, path: Path) -> AppSettings:

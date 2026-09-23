@@ -13,13 +13,15 @@ from typing import Any, Callable
 
 from ..shell_toolchain.detect import detect_all, detect_shell_deps, system_deps
 from ..types import DetectionReport
-from .backends import claude, codeagent, custom, opencode
+from .backends import builtin, claude, codeagent, custom, opencode
 from .cli_agent import ProbeResult, probe_version
 from .descriptor import BackendDescriptor
 
-# 界面下拉的顺序：默认后端在最前（用户不动它就是今天的行为），自定义放最后。
+# 界面下拉的顺序：默认后端在最前（用户不动它就是今天的行为），
+# 内置 agent（直连模型 API，不需要装任何东西）紧随其后，自定义放最后。
 BACKENDS: tuple[BackendDescriptor, ...] = (
     opencode.DESCRIPTOR,
+    builtin.DESCRIPTOR,
     claude.DESCRIPTOR,
     codeagent.DESCRIPTOR,
     custom.DESCRIPTOR,
@@ -82,15 +84,34 @@ def resolve_command(backend_id: str, command: str = "", *, fallback: str = "") -
 
 
 def build_adapter(
-    backend_id: str, command: str = "", *, note: Callable[[str], None] | None = None
+    backend_id: str,
+    command: str = "",
+    *,
+    note: Callable[[str], None] | None = None,
+    api: dict[str, Any] | None = None,
 ) -> Any:
-    """按 id 造适配器（同一套 `OpencodePort` 方法签名）。未知 id 报错，绝不回退。"""
+    """按 id 造适配器（同一套 `OpencodePort` 方法签名）。未知 id 报错，绝不回退。
+
+    两条路：命令行后端用"命令"造；直连模型 API 的后端（内置 agent）用 `api` 配置造 ——
+    它们需要的输入本来就不同，所以在这里分流，而不是让每个工厂都去猜。"""
     descriptor = backend_descriptor(backend_id)
+    if descriptor.is_api:
+        if descriptor.api_factory is None:  # pragma: no cover - is_api 就是它的定义
+            raise BackendError(f"{descriptor.display_name} 后端缺少适配器工厂")
+        config = dict(api or {})
+        config.setdefault("note", note)
+        return descriptor.api_factory(config)
     return descriptor.factory(resolve_command(backend_id, command), note)
 
 
-def probe_backend(backend_id: str, command: str = "", *, timeout_s: float = 20.0) -> ProbeResult:
-    """跑一次该后端的版本命令，返回 (探测结果, 失败原因) 装成的 `ProbeResult`。
+def probe_backend(
+    backend_id: str,
+    command: str = "",
+    *,
+    timeout_s: float = 20.0,
+    api: dict[str, Any] | None = None,
+) -> ProbeResult:
+    """检测该后端能不能用：命令行后端跑一次版本命令；API 后端真的问一次模型 API。
 
     刻意**不抛异常**：它的两个调用点（设置页的「检测」按钮、控制器开跑前的依赖检查）
     都要把失败原因显示给用户，异常只适合"调用方写错了"这类情形。
@@ -99,6 +120,10 @@ def probe_backend(backend_id: str, command: str = "", *, timeout_s: float = 20.0
         descriptor = backend_descriptor(backend_id)
     except BackendError as error:
         return ProbeResult(None, str(error))
+    if descriptor.is_api:
+        if descriptor.api_probe is None:  # pragma: no cover
+            return ProbeResult(None, f"{descriptor.display_name} 后端缺少检测实现")
+        return descriptor.api_probe(dict(api or {}))
     try:
         resolved = resolve_command(backend_id, command)
     except BackendError as error:
@@ -113,7 +138,11 @@ def probe_backend(backend_id: str, command: str = "", *, timeout_s: float = 20.0
 
 
 def detect_environment(
-    backend_id: str, command: str = "", *, overrides: dict[str, str] | None = None
+    backend_id: str,
+    command: str = "",
+    *,
+    overrides: dict[str, str] | None = None,
+    api: dict[str, Any] | None = None,
 ) -> DetectionReport:
     """按当前后端探测环境（自检页与开跑前的依赖检查共用这一个入口）。
 
@@ -131,10 +160,21 @@ def detect_environment(
     """
     descriptor = backend_descriptor(backend_id)
     deps = system_deps(overrides)
+    if descriptor.is_api:
+        # 直连模型 API 的后端：只需要 bash 与 shellcheck（引擎执行脚本用），
+        # opencode 与"后端命令"都不是依赖 —— 它根本不装任何东西。
+        bash, shellcheck, problems = detect_shell_deps(deps)
+        result = probe_backend(backend_id, api=api)
+        return DetectionReport(
+            opencode=result.tool,
+            bash=bash,
+            shellcheck=shellcheck,
+            problems=((() if result.ok else (result.message,)) + problems),
+        )
     if not descriptor.is_cli:
         return detect_all(deps)
 
-    result = probe_backend(backend_id, command)
+    result = probe_backend(backend_id, command, api=api)
     bash, shellcheck, problems = detect_shell_deps(deps)
     backend_problems = () if result.ok else (result.message,)
     return DetectionReport(
