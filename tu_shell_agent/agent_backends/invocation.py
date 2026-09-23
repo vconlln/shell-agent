@@ -47,6 +47,8 @@ import shutil
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from ..envpath import find_executable
+
 # Windows 的 cmd 解释器：优先用环境变量里的 %COMSPEC%，拿不到再退回 cmd.exe。
 _WINDOWS_SHELL_EXTS = (".cmd", ".bat")
 _WINDOWS_PS_EXTS = (".ps1",)
@@ -134,7 +136,12 @@ def resolve_command(
     if os.sep in text or "/" in text or "\\" in text:
         exists = is_file or os.path.isfile
         return text if exists(text) else None
-    found = which(text)
+    # 默认走 envpath 的实现（合并注册表 PATH + 补扩展名）；调用方显式传了 which 就用它的，
+    # 这样用例仍能在 Linux 上钉住分支。
+    if which is shutil.which:
+        found = find_executable(text, environ=environ, is_file=is_file, platform=platform)
+    else:
+        found = which(text)
     if found:
         return found
     if (platform or os.name) != "nt":

@@ -191,6 +191,8 @@ class RunController(QObject):
         chat.session_selected.connect(self._on_session_selected)
         chat.model_changed.connect(self._on_chat_model_changed)
         chat.models_requested.connect(self._on_models_requested)
+        # 「设置 → 组件路径 → 自动检测」：把当前环境里找到的真实路径填进空栏
+        window.settings_page.components_detect_requested.connect(self.detect_component_paths)
         chat.sessions_refresh_requested.connect(self.refresh_sessions)
         chat.new_session_requested.connect(self._on_new_session)
         window.set_running(False)
@@ -219,8 +221,41 @@ class RunController(QObject):
         self._status("正在检测环境…")
         worker.start()
 
+    def detect_component_paths(self) -> None:
+        """「自动检测」：在当前环境里找 opencode / Git Bash / shellcheck，把路径填进空栏。
+
+        为什么要这个按钮（用户实测："windows 有环境变量，但是仍然无法自动获取"）：
+        占位文字写着"留空则从 PATH 中查找"，但**查到了什么用户看不到** —— 于是他没法判断
+        "是没装"还是"没找到"。这里把探测结果直接写进输入框（只填空栏，不覆盖手填的值），
+        并且在提示行里说明。
+        """
+        from ..shell_toolchain.detect import resolve_tool, system_deps
+
+        deps = system_deps(self._path_overrides())
+        opencode = resolve_tool("opencode", deps)
+        bash = resolve_tool("bash", deps)
+        shellcheck = resolve_tool("shellcheck", deps)
+        filled = self.window.settings_page.apply_detected_paths(
+            opencode=opencode.path if opencode else "",
+            bash=bash.path if bash else "",
+            shellcheck=shellcheck.path if shellcheck else "",
+        )
+        if filled:
+            self._status("已自动检测到：" + "；".join(filled) + "（可手改，保存后生效）")
+        else:
+            self._status(
+                "没有新的可自动填入的路径：三栏要么已经有值，要么在当前环境里没找到"
+                "（见「环境自检」页的提示）"
+            )
+
     def _on_detected(self, report: DetectionReport) -> None:
         self.window.selfcheck_page.render(report, backend_label=self._backend_label())
+        # 探测顺带把空着的组件路径填上：用户打开设置页时就能看到"自动获取到了什么"
+        self.window.settings_page.apply_detected_paths(
+            opencode=report.opencode.path if report.opencode else "",
+            bash=report.bash.path if report.bash else "",
+            shellcheck=report.shellcheck.path if report.shellcheck else "",
+        )
         if report.problems:
             self._status(f"环境自检有 {len(report.problems)} 个问题（见「环境自检」页）")
         elif report.warnings:

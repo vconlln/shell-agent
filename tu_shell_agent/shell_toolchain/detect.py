@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..envpath import find_executable
 from ..procflags import no_window_kwargs
 from ..types import DetectedTool, DetectionReport
 
@@ -109,7 +110,8 @@ def is_at_least(version: str, minimum: str) -> bool:
     return True
 
 
-def _resolve(tool: str, deps: DetectDeps) -> DetectedTool | None:
+def resolve_tool(tool: str, deps: DetectDeps) -> DetectedTool | None:
+    """探测单个组件：override → Windows 固定候选 → PATH（合并注册表 PATH，见 envpath）。"""
     candidates: list[str] = []
     override = deps.overrides.get(tool)
     if override:
@@ -136,8 +138,8 @@ def detect_shell_deps(
     换 agent 不换执行者）。拆一份共用实现，比在两个调用点各写一遍"缺了就报什么"稳。
     问题列表的顺序与 `detect_all` 里完全一致（bash 在前、shellcheck 在后）。
     """
-    bash = _resolve("bash", deps)
-    shellcheck = _resolve("shellcheck", deps)
+    bash = resolve_tool("bash", deps)
+    shellcheck = resolve_tool("shellcheck", deps)
     problems: list[str] = []
     if bash is None:
         problems.append(_INSTALL_HINTS["bash"])
@@ -147,7 +149,7 @@ def detect_shell_deps(
 
 
 def detect_all(deps: DetectDeps) -> DetectionReport:
-    opencode = _resolve("opencode", deps)
+    opencode = resolve_tool("opencode", deps)
     bash, shellcheck, shell_problems = detect_shell_deps(deps)
 
     problems: list[str] = []
@@ -182,8 +184,11 @@ def detect_all(deps: DetectDeps) -> DetectionReport:
     )
 
 
-def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
-    """生产环境的依赖实现：走 PATH 与真实进程。"""
+def system_deps(overrides: dict[str, str] | None = None, *, platform: str | None = None) -> DetectDeps:
+    """生产环境的依赖实现：走 PATH 与真实进程。
+
+    `platform` 可注入（用例在 Linux 上钉 Windows 分支时用）；不传就按 `os.name` 判。
+    """
 
     def run_version(path: str) -> str:
         # 版本探测必须与本地化无关：中文 locale 下 `bash --version` 会输出
@@ -217,10 +222,14 @@ def system_deps(overrides: dict[str, str] | None = None) -> DetectDeps:
         except (OSError, subprocess.SubprocessError):
             return ""
 
+    resolved_platform = platform or ("win32" if os.name == "nt" else "linux")
     return DetectDeps(
-        platform="win32" if os.name == "nt" else "linux",
+        platform=resolved_platform,
         exists=lambda path: os.path.isfile(path),
-        which=lambda name: shutil.which(name),
+        # 用 envpath 的实现而不是 `shutil.which`：Windows 上进程 PATH 可能是旧的
+        # （改完 PATH 没重启 explorer），而且 `which` 依赖 PATHEXT 才认 `.cmd` ——
+        # 用户实测"环境变量里明明有，就是获取不到"就是这两条。
+        which=lambda name: find_executable(name, platform=resolved_platform),
         run_version=run_version,
         overrides=dict(overrides or {}),
         run_auth=run_auth,

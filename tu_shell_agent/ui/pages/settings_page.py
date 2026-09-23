@@ -68,6 +68,8 @@ class SettingsPage(QWidget):
 
     saved = Signal(str)          # 保存成功后的文件路径（状态栏/控制器可用）
     appearance_changed = Signal()  # 外观控件改动（缩放/字体/背景）—— 立即预览，不必等保存
+    # 点「自动检测」：去 PATH（含注册表 PATH）里找三个组件的真实路径
+    components_detect_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -80,6 +82,14 @@ class SettingsPage(QWidget):
         self.shellcheck_path_edit = QLineEdit()
         self.shellcheck_path_edit.setPlaceholderText("留空则从 PATH 中查找 shellcheck")
 
+        # 「自动检测」按钮：把三个组件在 PATH（含注册表 PATH）里找到的**真实路径**填进来。
+        # 用户实测："windows 有环境变量，但是仍然无法自动获取" —— 光有占位文字"留空则从 PATH
+        # 查找"看不出到底找到了什么，所以这里既给按钮、也在检测完成后把空栏自动填上。
+        self.components_detect_button = QPushButton("自动检测")
+        self.components_detect_button.setObjectName("componentsDetectButton")
+        self.components_detect_button.clicked.connect(
+            lambda: self.components_detect_requested.emit()
+        )
         self.opencode_path_label = QLabel("opencode")
         self.components_hint = QLabel()
         self.components_hint.setObjectName("componentsHint")
@@ -91,6 +101,7 @@ class SettingsPage(QWidget):
         components_form.addRow(self.opencode_path_label, self.opencode_path_edit)
         components_form.addRow("Git Bash", self.bash_path_edit)
         components_form.addRow("shellcheck", self.shellcheck_path_edit)
+        components_form.addRow("", self.components_detect_button)
         components_form.addRow("", self.components_hint)
 
         # ── 后端 agent ───────────────────────────────────────────────
@@ -290,6 +301,30 @@ class SettingsPage(QWidget):
         """绑定要编辑的设置对象并回填控件（控制器从磁盘读出来后调用）。"""
         self._settings = settings
         self.reload()
+
+    def apply_detected_paths(self, *, opencode: str = "", bash: str = "",
+                             shellcheck: str = "") -> list[str]:
+        """把探测到的组件路径填进**空着**的输入框，返回实际填了哪几项（供状态行说明）。
+
+        两条规矩：
+        - **只填空栏**：用户手填过的路径不动（那是他的选择，可能是有意指向另一个版本）；
+        - 填进去的是"探测到的那一个"，也就是引擎接下来真正会用的那一个 ——
+          用户能在界面上看到"自动获取"到底获取到了什么（这正是他抱怨看不到的东西）。
+        """
+        filled: list[str] = []
+        for label, edit, path in (
+            ("opencode", self.opencode_path_edit, opencode),
+            ("Git Bash", self.bash_path_edit, bash),
+            ("shellcheck", self.shellcheck_path_edit, shellcheck),
+        ):
+            found = (path or "").strip()
+            if not found or edit.text().strip() or not edit.isEnabled():
+                continue
+            edit.setText(found)
+            filled.append(f"{label} → {found}")
+        if filled:
+            self.components_hint.setText("已自动填入：" + "；".join(filled))
+        return filled
 
     def reload(self) -> None:
         """把绑定对象的值铺回控件（丢弃控件上未保存的编辑）。"""

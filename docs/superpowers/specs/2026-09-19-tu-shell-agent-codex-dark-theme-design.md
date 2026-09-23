@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **501 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **512 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1159,3 +1159,45 @@ Windows 专有格式）：这样它在 Linux 上也能被用例钉住，不必�
 要么直接 `**no_window_kwargs()`，要么在同文件里对 `**` 展开的那个字典做过
 `.update(no_window_kwargs(...))`；再点名为六条已知路径各写一条断言。
 变异验证：把五处里任意一处去掉 → 契约用例立刻转红。
+
+
+## 修订二十七（2026-09-20）：Windows 上"环境变量里有、就是自动获取不到"
+
+用户报："你这个在 windows 上自动获取环境变量里的组件路径获取不到，windows 有环境变量，
+但是仍然无法自动获取"。
+
+### 两个真实成因（都在本机模拟出来了）
+
+1. **进程的 PATH 可能是旧的**。Windows 在登录/启动进程时复制一份 PATH：用户在"系统属性"里刚加完
+   目录，**已经在运行的 explorer.exe 仍是旧环境**，从它启动的 GUI（双击 exe）自然拿不到新目录 ——
+   而用户的终端是新开的，所以"我明明配了、终端里也有"。注册表 `HKCU\Environment` /
+   `HKLM\...\Session Manager\Environment` 里的 `Path` 才是当前设置。
+2. **`shutil.which` 依赖 `PATHEXT`**。npm / scoop / pipx 装的 CLI 是 `.cmd` 包壳：名字没有扩展名时
+   `which` 要靠 `PATHEXT` 才知道试 `.CMD`；被服务/上层程序启动时它可能被清掉，于是"在 PATH 里
+   却找不到"。
+
+顺带还有第三种（界面层）：**查到了什么用户看不到** —— 组件路径那三栏只有占位文字
+"留空则从 PATH 中查找"，所以"没装"和"没找到"在界面上长得一模一样。
+
+### 修法
+
+- 新增 `tu_shell_agent/envpath.py`：
+  - `effective_path()` = 进程 PATH + 注册表 PATH（用户级在前、展开 `%NAME%`、大小写不敏感去重）；
+  - `find_executable()`：名字没扩展名时**显式**按 `.exe → .cmd → .bat → .ps1 → .com → 原名`
+    依次试一遍，不依赖 `PATHEXT`；已经是路径就直接看它在不在；
+  - 平台判断同时认 `"nt"` 与 `"win32"`（探测层用的是后者；只看 `"nt"` 会让整条逻辑静默失效）。
+- `detect.system_deps()` 的 `which` 换成它（`platform` 可注入，方便在 Linux 上钉 Windows 分支）；
+  `agent_backends/invocation.resolve_command` 的默认查找也换成它 —— 于是 opencode / bash /
+  shellcheck / codeagent / claude 的自动获取走同一条路。
+- 设置页「组件路径」加「自动检测」按钮：把三个组件在**当前环境**里找到的真实路径填进**空栏**
+  （用户手填过的不覆盖），并在提示行写明"已自动填入：…"。环境自检完成时也会顺带填一次 ——
+  这样"自动获取到了什么"在界面上一眼可见。
+
+### 用例（`tests/test_envpath.py`，11 条）
+
+`%NAME%` 展开、注册表 PATH 合并顺序与去重、用户级优先于系统级、非 Windows 不动 PATH、
+没有 `PATHEXT` 也能找到 `.cmd`、同名优先 `.exe`、**进程 PATH 是旧的而注册表里有 → 仍能找到**、
+绝对路径直查、POSIX 仍按原名查、探测链路真的用了这个实现（注入 `platform="win32"`；
+不能改 `os.name` —— 那会让 `pathlib` 去实例化 `WindowsPath` 直接抛异常）、
+「自动检测」只填空栏且不覆盖手填值。
+变异验证：不合并注册表 PATH / 不补扩展名 / 探测链路改回 `shutil.which` / 自动填入覆盖手填值 —— 四条全红。
