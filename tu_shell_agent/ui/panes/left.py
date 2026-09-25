@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Signal
+from ..markdown import MarkdownBrowser
 from ..widgets.scroll import form_container, scrollable
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
@@ -69,13 +70,16 @@ class LeftPane(QWidget):
         plan_row.addWidget(self.plan_edit, 1)
         plan_row.addWidget(browse_button)
 
-        self.plan_preview = QPlainTextEdit()
+        # 方案预览渲染 Markdown（用户："选择方案后展示的这个框没有渲染"）：
+        # 方案文档本身就是 Markdown，之前当纯文本显示 —— 标题、列表、代码块全成了平铺的字。
+        # `MarkdownBrowser` 是 QTextBrowser：一样能选中复制、能滚、能被 `install_ask_action`
+        # 接管右键菜单（"就选中的内容提问"那条路不受影响）。
+        self.plan_preview = MarkdownBrowser()
         self.plan_preview.setObjectName("planPreview")
-        self.plan_preview.setReadOnly(True)
         # 最小高度：没有它的时候，窗口一缩小 QVBoxLayout 会把这个预览压到 12px（实测），
         # 方案正文等于看不见 —— 用户报的"挤压到看不见"就是这个。
         self.plan_preview.setMinimumHeight(90)
-        self.plan_preview.setPlainText(_PREVIEW_IDLE)
+        self.plan_preview.set_plain(_PREVIEW_IDLE)
 
         self.run_root_edit = QLineEdit()
         self.run_root_edit.setObjectName("runRootEdit")
@@ -151,7 +155,7 @@ class LeftPane(QWidget):
         if not self._plan_path:
             self._plan_error = ""
             self._plan_text = ""
-            self.plan_preview.setPlainText(_PREVIEW_IDLE)
+            self.plan_preview.set_plain(_PREVIEW_IDLE)
             self.plan_changed.emit("")
             return
         self._reload_preview()
@@ -177,17 +181,17 @@ class LeftPane(QWidget):
                 "请用编辑器另存为 UTF-8 后重试"
             )
             self._plan_text = ""
-            self.plan_preview.setPlainText(self._plan_error)
+            self.plan_preview.set_plain(self._plan_error)
             return
         except OSError as error:
             # 方案是给人看的，读不了就是读不了，先说清原因再谈运行
             self._plan_error = f"读不到方案文档：{error}"
             self._plan_text = ""
-            self.plan_preview.setPlainText(self._plan_error)
+            self.plan_preview.set_plain(self._plan_error)
             return
         self._plan_error = ""
         self._plan_text = text
-        self.plan_preview.setPlainText(text)
+        self.plan_preview.set_markdown(text)      # 方案是 Markdown，按 Markdown 显示
 
     def plan_path(self) -> str:
         """已选方案的路径；空串表示未选。"""

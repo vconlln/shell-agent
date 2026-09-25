@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...types import SEVERITY_RANK, ExecuteResult, Severity, ShellcheckFinding, blocks_run
+from ..markdown import MarkdownBrowser
 from ..widgets.collapsible import CollapsibleSection, plan_collapse
 from ..theme import BLOCKING_COLOR, NON_BLOCKING_COLOR, STDERR_COLOR
 
@@ -107,9 +108,11 @@ class RightPane(QWidget):
         self.notes_header.setObjectName("notesHeader")
         self.notes_header.setWordWrap(True)
 
-        self.notes_view = QPlainTextEdit()
+        # 报告视图也渲染 Markdown：模型写的取舍说明与假设本来就常带列表与行内代码，
+        # 当纯文本显示时 `**加粗**`、`- 列表` 会原样露出来（用户："几乎所有的对话框都没有
+        # markdown 渲染"）。
+        self.notes_view = MarkdownBrowser()
         self.notes_view.setObjectName("notesView")
-        self.notes_view.setReadOnly(True)
 
         # 三块各自可折叠（默认展开）：窗口矮的时候让用户自己决定先看哪块，而不是让布局
         # 把三块一起压扁。内部控件仍挂在对象树上（折叠只是 setVisible(False)），
@@ -139,7 +142,7 @@ class RightPane(QWidget):
 
         self._refresh_findings()
         self.execute_summary.setText("执行结果：尚未执行")
-        self.notes_view.setPlainText(f"{_UNSET_NOTES}\n\n假设（脚本成立的前提）：\n{_UNSET_ASSUMPTIONS}")
+        self.notes_view.set_plain(f"{_UNSET_NOTES}\n\n假设（脚本成立的前提）：\n{_UNSET_ASSUMPTIONS}")
 
     @staticmethod
     def _wrap(widgets: Sequence[QWidget], *, stretch: bool) -> QWidget:
@@ -357,14 +360,19 @@ class RightPane(QWidget):
         缺内容时写明确的一句话而不是留白：空白会被读成"没有取舍"，而更常见的情况是
         "模型没交代"——前者可以放过，后者必须追问，两者的处理方式完全不同。
         """
-        lines = [
-            "取舍说明（模型自述：为跑通而放宽或改动了方案里的哪些约束）",
+        # 拼成 Markdown：小标题 + 模型原文（它自己就是 Markdown）+ 假设列表
+        parts = [
+            "### 取舍说明",
+            "模型自述：为跑通而放宽或改动了方案里的哪些约束。",
+            "",
             notes.strip() or _UNSET_NOTES,
             "",
-            "假设（脚本成立的前提）：",
+            "### 假设",
+            "脚本成立的前提：",
+            "",
         ]
         if assumptions:
-            lines.extend(f"- {item}" for item in assumptions)
+            parts.extend(f"- {item}" for item in assumptions)
         else:
-            lines.append(_UNSET_ASSUMPTIONS)
-        self.notes_view.setPlainText("\n".join(lines))
+            parts.append(f"- {_UNSET_ASSUMPTIONS}")
+        self.notes_view.set_markdown("\n".join(parts))

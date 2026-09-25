@@ -766,8 +766,8 @@ QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
    于是只读视图的滚动条被涂成"可编辑输入框"的 #121317 —— 117 个像素混在深色底里，
    看起来就是圆角旁边一小块长方形深色（用户报的"尖尖的黑色"）。 */
 QPlainTextEdit#outputView QScrollBar, QPlainTextEdit#scriptView QScrollBar,
-QPlainTextEdit#notesView QScrollBar, QPlainTextEdit#chatTranscript QScrollBar,
-QTextBrowser#compareView QScrollBar, QPlainTextEdit#planPreview QScrollBar
+QTextBrowser#notesView QScrollBar, QScrollArea#chatTranscript QScrollBar,
+QTextBrowser#compareView QScrollBar, QTextBrowser#planPreview QScrollBar
 {{ background: {_color('bg_under', colors)}; }}
 QPlainTextEdit#extraInstructionEdit QScrollBar, QPlainTextEdit#chatInput QScrollBar
 {{ background: {_color('bg_input', colors)}; }}
@@ -788,14 +788,28 @@ QCheckBox::indicator {{
 }}
 QCheckBox::indicator:checked {{ background-color: {_color('accent', colors)}; border-color: {_color('accent', colors)}; }}
 
-/* ── 等宽区：脚本 / 报告 / 输出 / diff / 预览 ─────────────────── */
-QPlainTextEdit#scriptView, QPlainTextEdit#outputView, QPlainTextEdit#notesView,
-QTreeWidget#findingsTree, QTextBrowser#compareView, QPlainTextEdit#planPreview,
+/* ── 等宽区：脚本 / 输出 / diff / 模板 ─────────────────────────
+   `#planPreview`（方案）与 `#notesView`（模型取舍说明）**不在这里**：它们是 Markdown
+   文档，正文必须是比例字体，代码片段由 Markdown 渲染器自己给等宽（见 ui/markdown.py）。 */
+QPlainTextEdit#scriptView, QPlainTextEdit#outputView,
+QTreeWidget#findingsTree, QTextBrowser#compareView,
 QPlainTextEdit#templateBody, QPlainTextEdit#templatePreview, QPlainTextEdit#confirmScriptView {{
     font-family: "{mono}";
     font-size: {sized('font_size_small', scale)};
 }}
-QPlainTextEdit#notesView {{ font-family: inherit; }}
+/* Markdown 视图（方案预览 / 报告视图）：比例字体 + 稍大的行距 —— 文档要读得下去。
+   底色跟**其它只读视图一致**（`bg_under`，深一档）：这一路的约定是"只读更深、可编辑更浅"
+   （脚本视图 / 输出视图 / 对话记录区都是 bg_under），Markdown 视图没有理由例外 ——
+   渲染成输入框那种亮底会让人以为可以在里面打字。 */
+QTextBrowser#planPreview, QTextBrowser#notesView {{
+    background-color: {_color('bg_under', colors)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
+    font-family: inherit;
+    font-size: {sized('font_size', scale)};
+    padding: 2px 4px;
+}}
+QWidget#markdownViewport {{ background: transparent; }}
 /* 对话记录区（`QScrollArea`，里面是"每轮一张卡片"）与输入框都用等宽：脚本片段要能对齐。
    记录区**显式**给"更深的只读底"：它挂在右列页签里，`QPlainTextEdit:read-only` 那条通用规则
    不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
@@ -831,7 +845,25 @@ QLabel#chatReplyHeader {{
     font-size: {sized('font_size_small', scale)};
 }}
 QWidget#chatReplyBody, QWidget#chatActivities, QWidget#chatTurnFooter,
-QWidget#chatActivityRow, QWidget#chatCodeHeader {{ background: transparent; }}
+QWidget#chatActivityRow, QWidget#chatCodeHeader, QWidget#chatThinking {{ background: transparent; }}
+/* ── 思考过程（可折叠）────────────────────────────────────────────
+   标题行是一颗"看起来像一行字"的按钮：没有边框底色，只在 hover 时亮一点 ——
+   它要读起来像小标题，而不是像一颗按钮（用户点的是"展开看看"，不是"执行什么"）。 */
+QPushButton#chatThinkingHeader {{
+    background: transparent;
+    border: none;
+    color: {_color('fg_tertiary', colors)};
+    font-size: {sized('font_size_small', scale)};
+    padding: 2px 0;
+    min-height: 0;
+    text-align: left;
+}}
+QPushButton#chatThinkingHeader:hover {{ color: {_color('fg_secondary', colors)}; }}
+QLabel#chatThinkingText {{
+    color: {_color('fg_tertiary', colors)};
+    font-size: {sized('font_size_small', scale)};
+    padding-left: 8px;
+}}
 QLabel#chatReplyText {{ color: {_color('fg', colors)}; }}
 QLabel#chatActivityTag {{
     color: {_color('fg_tertiary', colors)};

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..agent_backends.api_client import ANSWER_HEADER, THINKING_HEADER
 from .chat_view import TranscriptView
 from .widgets.wrap_row import WrapRow
 
@@ -338,6 +339,8 @@ class ChatPanel(QWidget):
         self._quote_truncated = False
         # 上一次**真正**选中的模型文本：选中「重新获取可用模型」时用它还原选择
         self._model_text = ""
+        # 当前流式片段属于思考还是正文（由 append_delta 里的分节标记切换）
+        self._stream_section = "reply"
 
         layout = QVBoxLayout(self)
         layout.addWidget(session_row)
@@ -607,12 +610,37 @@ class ChatPanel(QWidget):
         self.transcript.current_turn().add_activity(_activity_tag(text), text)
 
     def begin_stream(self, title: str) -> None:
-        """开始一段流式输出：后续 append_delta 往这一轮的正文块里追加。"""
+        """开始一段流式输出：后续 append_delta 往这一轮里追加。"""
+        self._stream_section = "reply"
         self.transcript.current_turn().begin_reply(title)
 
     def append_delta(self, text: str) -> None:
-        self.transcript.current_turn().append_reply(text)
+        """流式增量：先认**分节标记**（思考 / 回复），再把文字送进对应的小节。
+
+        标记是我们自己插的（`api_client.delta_stream` 在思考与正文之间发一行标题），
+        所以一定整段到达、不会跨块 —— 按它分节就能把"思考过程"折起来，而不是让它和答案
+        连成一片（用户要求："模型的思考过程你加一个可以折叠和展开"）。
+        """
+        if not text:
+            return
+        section = self._stream_section
+        for marker, kind in ((THINKING_HEADER, "thinking"), (ANSWER_HEADER, "reply")):
+            if marker in text:
+                head, _, text = text.partition(marker)
+                self._push_delta(head, section)
+                section = kind
+        self._stream_section = section
+        self._push_delta(text, section)
         self.transcript.scroll_to_bottom()
+
+    def _push_delta(self, text: str, section: str) -> None:
+        if not text:
+            return
+        turn = self.transcript.current_turn()
+        if section == "thinking":
+            turn.append_thinking(text)
+        else:
+            turn.append_reply(text)
 
     def _stream_label_ref(self):
         """当前轮里"还在长字"的那个标签（收尾后必须是 None）—— 只给用例与诊断用。"""

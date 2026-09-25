@@ -1649,3 +1649,57 @@ WrapRow 按 QSS 的 `min-height: 0` 算出行高 28px，30px 的圆被压成椭�
   OpenAI 路不带 max_tokens / 截断不出声 / 最后一轮不收回工具 / 最后一轮仍带工具）。
 - 顺带发现：用户保存的 `max_rounds = 1`（引擎默认 3）——1 轮等于关掉了"失败回灌重试"，
   任何抖动都直接 `needs_human`（两次失败都由此放大）。已写进 `PENDING-APPROVALS.md` 请他改。
+
+## 修订三十七（2026-09-20）：Markdown 渲染 + 思考过程可折叠
+
+用户："基本上所有的对话框都没有 markdown 渲染，这个需要加上，不然看起来特别不好看，
+特别是选择方案后展示的这个框没有渲染，还有模型对话框也没有渲染，模型对话框模型的思考过程
+你加一个可以折叠和展开"。
+
+### 用 Qt 自带的 Markdown 解析（不引第三方库）
+
+`QTextDocument.setMarkdown()` 与 `QLabel(textFormat=MarkdownText)`：本机 PySide6 6.11 实测支持
+标题、粗斜体、行内代码、围栏代码、有序/无序列表、引用、GFM 表格。引 python-markdown 意味着
+打包（PyInstaller hidden import / datas）与 Windows 侧都要跟着改，还得跟它的依赖树；
+Qt 这套零依赖、离线可用。新模块 `ui/markdown.py` 是**唯一入口**。
+
+两个坑（都写进注释了）：
+
+1. 解析好的文档**不吃** `setDefaultStyleSheet`（实测 h1 无字号、pre 无底色、表格是默认黑框）
+   → 解析完再 `theme_document()` 按主题上一遍色：标题按 `headingLevel()` 给字号（比例表
+   `_HEADING_RATIOS`）、整块等宽 = 围栏代码块 → 块底色 + 内边距、只有片段等宽 = 行内代码 →
+   片段底色、`QTextTable` → 边框/内边距/表头底色。
+2. **两个会打崩进程的坑**：`QTextCharFormat.fontFamily()` 在 PySide6 6.11 已废弃，调用即
+   段错误（连堆栈都没有，实测 core dumped）——判等宽只能用 `fontFamilies()`；
+   一边遍历 `QTextFragment` 一边改格式，手里的片段已失效，再取 `position()` 同样崩 ——
+   所以 `theme_document` 走**两遍**：第一遍只读地收集（位置/长度记成普通整数），
+   第二遍按块号重新取游标改，并整体包在 `beginEditBlock/endEditBlock` 里。
+
+### 接进界面
+
+- `#planPreview`（左栏方案预览）与 `#notesView`（右栏报告视图）：`QPlainTextEdit` →
+  `MarkdownBrowser`（`QTextBrowser` 子类：留源文、字体变化时按新字号重渲染）。两者都有
+  `set_plain()` 这条路给"我们自己写的提示语/错误原因"用 —— 那些句子里的 `*`、反引号是普通
+  字符，拿去渲染会被吃掉。
+- 对话正文：`chatReplyText`/`chatThinkingText` 用 `QLabel` 的 Markdown 模式；
+  **用户自己敲的字仍然 PlainText**（渲染别人的输出、原样显示用户的输入）。
+- QSS：两个视图改用比例字体（原来是等宽那条组规则里的），视口单独点名 `transparent`
+  （`QAbstractScrollArea` 的视口按调色板 Base 画，不点名就会把主题底色盖掉）。
+
+### 思考过程：折叠 / 展开
+
+`TurnView` 新增折叠小节：`QPushButton#chatThinkingHeader`（长得像一行小标题，hover 才亮）+
+`QLabel#chatThinkingText`。行为：思考期间默认展开、标题带实时字数与"思考中"；正文一开始
+**自动收起**；点标题行随时切换；没有思考的回复不出现这一节。
+
+分节靠 `api_client.delta_stream` 插进来的标题行（`THINKING_HEADER`/`ANSWER_HEADER`）——
+`ChatPanel.append_delta` 按它路由到 `append_thinking` / `append_reply`。踩到一次边界：
+分节标记前后的**换行**会先落进正文里，"正文是否为空"的判据必须是
+`not self._reply_text.strip()`（用 `not self._reply_text` 会被那个换行骗过去，思考一直不收）。
+
+### 用例与验证
+
+新增 `tests/test_markdown_render.py` 16 条，断言落在**渲染出来的结构**上（块的字号集合、
+最粗权重、片段/块底色、表格行列与边框），不绑实现。**变异验证 11 条全部转红**：
+去掉标题字号、去掉代码块底色、去掉行内代码底色、去掉表格边框、方案预览与报告视图分别改回
+不渲染、流式与定稿两处正文分别不渲染、不再自动收起思考、分节标记不再路由、标题行不可点。

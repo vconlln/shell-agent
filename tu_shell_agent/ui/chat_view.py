@@ -32,6 +32,7 @@ import time
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer
+
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -52,6 +53,11 @@ _FENCE = re.compile(r"```([a-zA-Z0-9_+.-]*)[ \t]*\n(.*?)(?:```|\Z)", re.S)
 # 用户消息里的引用头（`关于以下引用内容…`）在卡片里不必再占满整段：显示时收成一行摘要，
 # 但**发给模型的正文一个字符都不动**（原样在上面那句话里，见 compose_message）。
 _QUOTE_MARK = "关于以下引用内容"
+
+# 思考过程的分节标记：与 `api_client.THINKING_HEADER` 是同一个字符串（那边是唯一来源，
+# 这里 import 过来用，免得两处字面量各写一遍后漂移）
+from ..agent_backends.api_client import THINKING_HEADER  # noqa: E402 - 见上方说明
+from .markdown import use_markdown_label
 
 
 def split_segments(text: str) -> list[tuple[str, str]]:
@@ -176,11 +182,20 @@ class _CopyButton(QPushButton):
         QTimer.singleShot(1200, lambda: self.setText("⧉"))
 
 
-def _selectable_label(text: str, object_name: str) -> QLabel:
-    """可选中的正文标签（选中 → 右键「就选中的内容提问」，与记录区旧行为一致）。"""
+def _selectable_label(text: str, object_name: str, *, markdown: bool = False) -> QLabel:
+    """可选中的正文标签（选中 → 右键「就选中的内容提问」，与记录区旧行为一致）。
+
+    `markdown=True` 时按 Markdown 渲染（模型说的话常常带 `**加粗**`、列表、行内代码）。
+    **用户自己敲的字不渲染**（`markdown=False`）：他写的 `2 * 3`、`_变量_`、`a_b_c` 被当成
+    语法吃掉才是真的难用 —— 渲染别人的输出、原样显示用户的输入。
+    """
     label = QLabel(text)
     label.setObjectName(object_name)
     label.setWordWrap(True)
+    if markdown:
+        use_markdown_label(label)
+    else:
+        label.setTextFormat(Qt.TextFormat.PlainText)
     label.setTextInteractionFlags(
         Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
     )
@@ -206,6 +221,28 @@ class TurnView(QFrame):
         self.user_label.setVisible(False)
         user_layout.addWidget(self.user_label)
         self.user_block.setVisible(False)
+
+        # ── 思考过程（可折叠）─────────────────────────────────────────
+        # 用户要求："模型对话框模型的思考过程你加一个可以折叠和展开"。
+        # 展开态：流式期间默认展开（看得见它在想什么，这也是"直连 API 而不是 CLI"的卖点）；
+        # 只要开始写正文就自动收起，让答案占住视线；用户点标题行随时能再展开。
+        self.thinking = QWidget()
+        self.thinking.setObjectName("chatThinking")
+        thinking_layout = QVBoxLayout(self.thinking)
+        thinking_layout.setContentsMargins(0, 0, 0, 0)
+        thinking_layout.setSpacing(4)
+        self.thinking_header = QPushButton()
+        self.thinking_header.setObjectName("chatThinkingHeader")
+        self.thinking_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.thinking_header.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.thinking_header.clicked.connect(lambda _checked=False: self.toggle_thinking())
+        self.thinking_label = _selectable_label("", "chatThinkingText", markdown=True)
+        self.thinking_label.setVisible(False)
+        thinking_layout.addWidget(self.thinking_header)
+        thinking_layout.addWidget(self.thinking_label)
+        self.thinking.setVisible(False)
+        self._thinking_text = ""
+        self._thinking_open = True
 
         self.reply_header = QLabel("—— 模型回复 ——")
         self.reply_header.setObjectName("chatReplyHeader")
@@ -241,6 +278,7 @@ class TurnView(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.user_block)
+        layout.addWidget(self.thinking)
         layout.addWidget(self.reply_header)
         layout.addWidget(self.reply_body)
         layout.addWidget(self.activities)
@@ -269,13 +307,49 @@ class TurnView(QFrame):
         if when:
             self.time_label.setText(when)
 
+    def append_thinking(self, text: str) -> None:
+        """追加思考过程的增量（与正文分开：思考要能折起来，不然答案被一大段推理推走）。"""
+        if not text:
+            return
+        if not self._thinking_text:
+            self.thinking.setVisible(True)          # 第一次来思考：露头
+        self._thinking_text += text
+        self.thinking_label.setText(self._thinking_text)
+        self._sync_thinking()
+
+    def toggle_thinking(self, *, open_: bool | None = None) -> None:
+        """折叠 / 展开思考过程（点标题行，或代码里显式指定）。"""
+        self._thinking_open = (not self._thinking_open) if open_ is None else bool(open_)
+        self._sync_thinking()
+        if self._thinking_open and self._thinking_text:
+            # 展开后把标题行滚进视野：思考在小节上方，不滚的话用户以为"点了没反应"
+            self.thinking_header.setFocus()
+
+    def thinking_open(self) -> bool:
+        return self._thinking_open
+
+    def _sync_thinking(self) -> None:
+        """标题行文字与正文可见性都由这里定（含实时字数：流式期间它是"还在想"的信号）。"""
+        if not self._thinking_text:
+            self.thinking.setVisible(False)
+            return
+        arrow = "▾" if self._thinking_open else "▸"
+        size = len(self._thinking_text)
+        tail = " · 思考中" if (self._thinking_open and not self._reply_text.strip()) else ""
+        self.thinking_header.setText(f"{arrow} 思考过程（{size} 字{tail}）")
+        self.thinking_label.setVisible(self._thinking_open)
+        self.thinking.setVisible(True)
+
     def begin_reply(self, title: str = "模型回复") -> None:
+        if self._thinking_text and self._thinking_open:
+            # 开始写答案就自动收起思考：答案才是要读的东西，用户想看再点开
+            self.toggle_thinking(open_=False)
         self.reply_header.setText(f"—— {title} ——")
         self.reply_header.setVisible(True)
         self.reply_body.setVisible(True)
         self.footer.setVisible(True)
         if self._stream_label is None:
-            self._stream_label = _selectable_label("", "chatReplyText")
+            self._stream_label = _selectable_label("", "chatReplyText", markdown=True)
             self._install_ask(self._stream_label)
             self.reply_layout.addWidget(self._stream_label)
 
@@ -285,6 +359,12 @@ class TurnView(QFrame):
             return
         if self._stream_label is None:
             self.begin_reply()
+        # 判据是"正文里还没有**有内容**的字"：分节标记前后的换行会先落进正文里，
+        # 用 `not self._reply_text` 会被那个换行骗过去（实测：思考一直不收）
+        if self._thinking_text and not self._reply_text.strip() and self._thinking_open:
+            # 正文**刚开始**就收起思考。不能只在 `begin_reply()` 里收：标题在流开始时就发过了，
+            # 真正"开始写答案"是这里 —— 不收的话思考会一直占着屏幕（实测点开折叠才发现）。
+            self.toggle_thinking(open_=False)
         assert self._stream_label is not None
         self._reply_text += text
         self._stream_label.setText(self._reply_text)
@@ -305,6 +385,9 @@ class TurnView(QFrame):
             label.setParent(None)
             label.deleteLater()
             self._stream_label = None
+        if self._thinking_text:
+            self.thinking_label.setText(self._thinking_text)     # 定稿：Markdown 一次渲染
+            self._sync_thinking()
         text = self._reply_text.strip("\n")
         if not text:
             return
@@ -319,7 +402,7 @@ class TurnView(QFrame):
                 self.reply_layout.addWidget(self._code_block(body, language))
                 language = ""
                 continue
-            label = _selectable_label(body, "chatReplyText")
+            label = _selectable_label(body, "chatReplyText", markdown=True)
             self._install_ask(label)
             self.reply_layout.addWidget(label)
 
@@ -361,6 +444,10 @@ class TurnView(QFrame):
         parts: list[str] = []
         if self._has_user and self._user_text:
             parts.append(f"\n你：{self._user_text}\n")
+        if self._thinking_text.strip():
+            # 与旧版逐字一致：思考过程也在纯文本里（它以前是一段普通正文）。
+            # 抠脚本取的是"最后一段围栏"，少一段会不会取错是另一回事 —— 先不做行为变更。
+            parts.append(f"\n{THINKING_HEADER}\n{self._thinking_text}\n")
         if self._reply_text.strip():
             parts.append(f"\n模型：{self._reply_text}\n")
         for index in range(self.activity_layout.count()):
