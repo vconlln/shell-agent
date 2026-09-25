@@ -35,6 +35,17 @@ import httpx
 # 但 httpx 只支持整请求超时，所以给一个宽松的值（用户可在设置里改生成超时）。
 DEFAULT_TIMEOUT_S = 300.0
 
+# 输出长度上限（max_tokens）。为什么开了深度思考要给更大的一档：
+# 思考型模型把**思考过程也算进同一个输出预算**，4096 会被"想"吃掉一大半，
+# 正文从中间被切断 —— 实测（真实全链路冒烟）拿到的就是
+# `stop_reason=max_tokens, output_tokens=4096`，表现是"契约标记缺了最后两段"，
+# 而错误消息只会说"缺少标记"，看不出是长度被砍了。
+DEFAULT_MAX_TOKENS = 4096
+THINKING_MAX_TOKENS = 8192
+
+# 上游说"我是被长度截断的"时用的词（OpenAI 的 finish_reason / Anthropic 的 stop_reason）
+TRUNCATED_REASONS = frozenset({"length", "max_tokens"})
+
 # 「列模型 / 检测」这类请求必须**短**：它只是问一句"能不能用"，不该让界面停在
 # "正在向模型 API 获取可用模型…"上五分钟（用户实测就是这样：一直显示正在获取）。
 LIST_TIMEOUT_S = 20.0
@@ -316,6 +327,33 @@ def _finish_openai_tool_calls(buffer: dict[int, dict[str, Any]]) -> list[Any]:
     return calls
 
 
+def _openai_finish_reason(payload: dict[str, Any]) -> str:
+    """OpenAI 兼容流里的 `choices[0].finish_reason`（最后一帧才有值）。"""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return ""
+    return str(choice.get("finish_reason") or "")
+
+
+def _anthropic_stop_reason(events: list[dict[str, Any]]) -> str:
+    """Anthropic 流的 `message_delta.delta.stop_reason`（收尾那一帧）。"""
+    for payload in events:
+        if not isinstance(payload, dict):
+            continue
+        delta = payload.get("delta")
+        if isinstance(delta, dict) and delta.get("stop_reason"):
+            return str(delta["stop_reason"])
+    return ""
+
+
+def was_truncated(completion: "Completion") -> bool:
+    """这一轮的正文是不是被输出长度上限截断的（上游自己说的）。"""
+    return str(getattr(completion, "finish_reason", "") or "") in TRUNCATED_REASONS
+
+
 def _parse_openai_chunk(payload: dict[str, Any]) -> StreamEvent | None:
     """OpenAI 兼容流里的一帧 → 文本片段（认不出来返回 None）。"""
     choices = payload.get("choices")
@@ -566,6 +604,10 @@ class ModelApiClient:
                 "messages": ([{"role": "system", "content": system}] if system.strip() else [])
                 + messages,
                 "stream": True,
+                # 输出上限**必须显式带上**：不带就等于听服务商的默认值（DeepSeek 的
+                # deepseek-chat 默认 4096），于是"开了深度思考要放大预算"这一条对
+                # OpenAI 兼容这条路完全失效 —— 思考过程与正文抢同一个额度，正文被截断。
+                "max_tokens": max_tokens,
             }
             if thinking:
                 # 用户给的官方示例就是这么写的（`reasoning_effort="high"` +
@@ -605,6 +647,14 @@ class ModelApiClient:
                     if not isinstance(event_payload, dict):
                         continue
                     result.raw_events += 1
+                    # 停止原因要在**解析正文之前**收：收尾那一帧本来就没有正文
+                    #（`parsed is None` 会被 continue 跳过），而"被长度截断"恰恰只在那一帧里说。
+                    if self.style != "anthropic":
+                        reason = _openai_finish_reason(event_payload)
+                        if reason:
+                            result.finish_reason = reason
+                    elif not result.finish_reason:
+                        result.finish_reason = _anthropic_stop_reason([event_payload])
                     if self.style != "anthropic":
                         _merge_openai_tool_calls(tool_buffer, _openai_tool_calls(event_payload))
                     else:

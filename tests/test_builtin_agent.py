@@ -1392,16 +1392,18 @@ def test_tools_can_be_turned_off(tmp_path):
 
 
 def test_tool_loop_stops_at_the_round_limit(tmp_path):
-    """模型一直要看更多文件时，循环要在上限处停下（不能无限翻）。"""
+    """模型一直要看更多文件时，循环要在上限处停下（不能无限翻），并且**收回工具**再问最后一次。"""
     from tu_shell_agent.agent_backends.builtin_agent import MAX_TOOL_ROUNDS
 
     root = tmp_path / "r"
     root.mkdir()
     (root / "a.txt").write_text("甲\n", encoding="utf-8")
     calls = {"n": 0}
+    tools_seen: list[bool] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
+        tools_seen.append("tools" in json.loads(request.content.decode("utf-8")))
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -1413,8 +1415,47 @@ def test_tool_loop_stops_at_the_round_limit(tmp_path):
     session = adapter.start(str(root), "agent", "m")
     adapter.chat(session, "看看目录", 30_000)
 
-    assert calls["n"] == MAX_TOOL_ROUNDS + 1, f"工具轮数没在上限处停下：{calls['n']}"
+    assert calls["n"] == MAX_TOOL_ROUNDS + 2, f"工具轮数没在上限处停下：{calls['n']}"
+    assert tools_seen[: MAX_TOOL_ROUNDS + 1] == [True] * (MAX_TOOL_ROUNDS + 1)
+    assert tools_seen[-1] is False, "最后那一次必须**不带工具**：它就是用来逼出正文的"
     assert any("上限" in note for note in inlets), inlets
+
+
+def test_last_round_asks_without_tools_so_the_model_must_answer(tmp_path):
+    """模型把工具轮数花光了也不肯写正文时，最后一次**不给工具**，它就只能说话。
+
+    真实全链路冒烟抓到过这个：模型一直 list_dir / read_file 到上限，最后一轮只回了
+    tool_calls、正文是空的 → 上层报"模型没有返回任何文本"，而真正的原因（预算花在翻文件上）
+    从消息里完全看不出来。修法就是收回工具再问一次 —— 这条用例钉住"收回了、且拿到了正文"。
+    """
+    from tu_shell_agent.agent_backends.builtin_agent import MAX_TOOL_ROUNDS
+
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.txt").write_text("甲\n", encoding="utf-8")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= MAX_TOOL_ROUNDS + 1:      # 前面每一轮都只想看文件
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(_tool_call_chunk(f"call_{calls['n']}", "list_dir", "{}")),
+            )
+        # 收回工具之后它终于说话了
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="看完了，这就是答案。")),
+        )
+
+    adapter = _adapter(handler)
+    session = adapter.start(str(root), "agent", "m")
+    reply = adapter.chat(session, "看看目录", 30_000)
+
+    assert reply == "看完了，这就是答案。", f"没有拿到正文：{reply!r}"
+    assert calls["n"] == MAX_TOOL_ROUNDS + 2
 
 
 def test_anthropic_style_tool_calls_are_parsed(tmp_path):
@@ -1468,3 +1509,116 @@ def test_anthropic_style_tool_calls_are_parsed(tmp_path):
     blocks = seen[-1]["messages"][-1]["content"]
     assert isinstance(blocks, list) and blocks[0]["type"] == "tool_result"
     assert "方案" in blocks[0]["content"]
+
+
+# ── 输出长度：停止原因必须收下来（真实冒烟抓到过"被截断却看不出原因"）────
+
+
+def test_stop_reason_is_captured_from_both_styles():
+    """上游说"我被长度截断了"时要把这句话收下来 —— 之前这个字段**根本没解析**。
+
+    OpenAI 兼容把它放在 `choices[0].finish_reason`，Anthropic 兼容放在
+    `message_delta.delta.stop_reason`。不收的后果：真实全链路冒烟里那一次回复被
+    `max_tokens` 从中间切断，界面上只看到"契约标记缺了最后两段"，看不出是被长度砍的。
+    """
+    from tu_shell_agent.agent_backends.api_client import was_truncated
+
+    def openai_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                _openai_chunk(content="正文"),
+                {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            ),
+        )
+
+    completion = _client(openai_handler).stream_chat(
+        model="m", messages=[{"role": "user", "content": "x"}]
+    )
+    assert completion.finish_reason == "length", completion.finish_reason
+    assert was_truncated(completion) is True
+
+    def anthropic_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "正文"}},
+                {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+            ),
+        )
+
+    completion = ModelApiClient(
+        base_url="https://api.anthropic.com",
+        api_key="k",
+        style="anthropic",
+        transport=httpx.MockTransport(anthropic_handler),
+    ).stream_chat(model="m", messages=[{"role": "user", "content": "x"}])
+    assert completion.finish_reason == "max_tokens", completion.finish_reason
+    assert was_truncated(completion) is True
+
+    # 正常说完不该被当成截断
+    plain = _client(lambda request: httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=_sse(_openai_chunk(content="正文"), {"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+    )).stream_chat(model="m", messages=[{"role": "user", "content": "x"}])
+    assert was_truncated(plain) is False
+
+
+def test_thinking_gets_a_larger_output_budget():
+    """开了「深度思考」要放大 max_tokens：思考过程与正文**共用**同一个输出预算。
+
+    实测（真实冒烟）：`max_tokens=4096` + thinking，上游回
+    `stop_reason=max_tokens, output_tokens=4096` —— 正文被从中间切断。
+    """
+    from tu_shell_agent.agent_backends.api_client import DEFAULT_MAX_TOKENS, THINKING_MAX_TOKENS
+
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(int(json.loads(request.content.decode("utf-8"))["max_tokens"]))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="答")),
+        )
+
+    assert THINKING_MAX_TOKENS > DEFAULT_MAX_TOKENS, "深度思考那一档必须更大，否则放大没意义"
+
+    adapter = _adapter(handler, thinking=True)
+    session = adapter.start("/tmp/run", "agent", "m")
+    adapter.chat(session, "在吗", 30_000)
+    assert seen[-1] == THINKING_MAX_TOKENS
+
+    adapter = _adapter(handler, thinking=False)
+    session = adapter.start("/tmp/run", "agent", "m")
+    adapter.chat(session, "在吗", 30_000)
+    assert seen[-1] == DEFAULT_MAX_TOKENS, "没开深度思考时不该跟着放大"
+
+
+def test_truncated_reply_is_reported_in_the_ui():
+    """被截断时要在界面上说一句（"上限 4096 tokens、正在回灌重试"），不能悄悄少一段。"""
+    notes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                _openai_chunk(content="===TU-SCRIPT===\n#!/bin/bash\n"),
+                {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            ),
+        )
+
+    adapter = _adapter(handler, note=notes.append)
+    session = adapter.start("/tmp/run", "agent", "m")
+    with pytest.raises(RuntimeError):
+        adapter.generate(session, "写个脚本", {}, 30_000)
+
+    joined = "\n".join(notes)
+    assert "截断" in joined, notes
+    assert "finish_reason=length" in joined, f"要写清上游给的原因：{notes}"
+    assert "4096" in joined, "要写出上限是多少（用户才知道往哪儿调）"
+    assert "深度思考" in joined, "要告诉用户下一步能关掉深度思考"

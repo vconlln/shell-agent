@@ -91,6 +91,12 @@ class LeftPane(QWidget):
         self.max_rounds_spin.setObjectName("maxRoundsSpin")
         self.max_rounds_spin.setRange(1, 10)      # 允许比规格的 3 轮更宽，但下限 1：0 轮等于不生成脚本
         self.max_rounds_spin.setValue(3)
+        # 说清 1 意味着什么：真实全链路冒烟里，用户保存的 1 轮把"模型偶尔把契约标记写缺"
+        # 从"引擎自己回灌重试就能修"变成了直接 needs_human —— 而界面上当时没有任何提示。
+        self.max_rounds_spin.setToolTip(
+            "最多生成几轮。大于 1 时，契约不完整或 shellcheck 没过会把失败原因回灌给模型重试；\n"
+            "填 1 表示**一次不成即停**（没有重试机会），建议留在默认的 3。"
+        )
 
         self.generate_timeout_spin = QSpinBox()
         self.generate_timeout_spin.setObjectName("generateTimeoutSpin")

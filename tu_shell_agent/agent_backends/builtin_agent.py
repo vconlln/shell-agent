@@ -39,7 +39,14 @@ from ..orchestrator.cli_contract import (
     with_output_instructions,
 )
 from ..types import GeneratedScript
-from .api_client import ApiError, ModelApiClient, delta_stream
+from .api_client import (
+    DEFAULT_MAX_TOKENS,
+    THINKING_MAX_TOKENS,
+    ApiError,
+    ModelApiClient,
+    delta_stream,
+    was_truncated,
+)
 from .readonly_tools import LIST_TOOL, READ_TOOL, ToolCall, WorkspaceReader, tool_specs
 from .skills import compose_system_prompt, discover_skills, select_skills
 
@@ -169,7 +176,15 @@ class BuiltinAdapter:
             on_delta=on_delta,
         )
         if not reply.strip():
-            raise RuntimeError("模型没有返回任何文本（流里既没有正文也没有推理内容）")
+            # 这条错误在真实全链路冒烟里出现过一次：模型把工具轮数全花在"翻运行目录"上，
+            # 最后一轮只发了 tool_calls、没有正文 —— 上层只看到"没有返回任何文本"，
+            # 真正的原因（预算花光了）谁也看不出来。所以消息里要把它写出来。
+            raise RuntimeError(
+                "模型没有返回任何文本（流里既没有正文也没有推理内容）。\n"
+                "常见原因：它把工具轮数都花在翻文件上，最后没来得及给出正文；"
+                "或该模型不支持当前的请求参数。可以重试一次，或在「设置 → 后端 agent」里"
+                "换一个更强的模型。"
+            )
         try:
             return parse_generated_script(reply)
         except CliContractError as error:
@@ -231,6 +246,10 @@ class BuiltinAdapter:
             )
         messages = self._trim_messages([*self._messages, {"role": "user", "content": prompt}])
         client = self._ensure_client()
+        # 思考型模型把思考过程也算进输出预算：不放大上限的话正文会被从中间切断
+        #（实测上游回的就是 stop_reason=max_tokens / output_tokens=4096，
+        #  现象是"契约标记缺了最后两段"，而错误消息只会说少了标记）。
+        max_tokens = THINKING_MAX_TOKENS if self._thinking else DEFAULT_MAX_TOKENS
         handler = delta_stream(None, on_delta)
         system_prompt = self._system_prompt(system)
         specs = tool_specs(self._style) if self._tools_enabled and self._run_dir else None
@@ -238,6 +257,7 @@ class BuiltinAdapter:
             completion = self._stream_with_tools(
                 client=client,
                 model=model,
+                max_tokens=max_tokens,
                 messages=messages,
                 system=system_prompt,
                 on_event=handler,
@@ -246,6 +266,15 @@ class BuiltinAdapter:
             )
         except ApiError as error:
             raise RuntimeError(str(error)) from error
+        if was_truncated(completion):
+            # 上游自己说了"我是被长度截断的"：必须说出来。不说的话，用户看到的只是
+            # "契约标记缺了最后两段"，会以为是模型不会写代码；而真正该做的是加大输出上限
+            #（或关掉「深度思考」）—— 这句话就是给那一步指路的。
+            self._note(
+                f"这一轮的回复被输出长度上限截断了（上限 {max_tokens} tokens，"
+                f"finish_reason={completion.finish_reason}）：正文可能不完整，"
+                "正在按契约回灌重试；若反复如此，可关掉「深度思考」或换一个输出更长的模型。"
+            )
         if remember and completion.content.strip():
             self._messages.append({"role": "user", "content": prompt})
             self._messages.append({"role": "assistant", "content": completion.content})
@@ -268,6 +297,7 @@ class BuiltinAdapter:
         on_event: Any,
         timeout_ms: int,
         tools: list[dict[str, Any]] | None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> Any:
         """一次调用的**工具循环**：模型要求看文件 → 我们（只读地）给它看 → 再问一次。
 
@@ -288,12 +318,30 @@ class BuiltinAdapter:
                 timeout_s=max(timeout_ms, 1_000) / 1000.0,
                 thinking=self._thinking,
                 tools=tools,
+                max_tokens=max_tokens,
             )
             if not completion.tool_calls or reader is None:
                 return completion
             if round_no >= MAX_TOOL_ROUNDS:
                 self._note(f"工具调用已达到 {MAX_TOOL_ROUNDS} 轮上限，不再继续读取文件。")
-                return completion
+                # 工具预算用完了，但模型还是只想看文件：**再问一次，这次不给它工具**。
+                # 少了这一步，最后这次回复里只有 tool_calls、没有正文，上层收到的是
+                # "模型没有返回任何文本" —— 而真正的原因（它把轮数花在翻文件上）看不出来。
+                # 实测：真实全链路冒烟就是这么失败过一次（needs_human，证据只有那句话）。
+                final = client.stream_chat(
+                    model=model,
+                    messages=current,
+                    system=system,
+                    cancel=self._cancel_or_external,
+                    on_event=on_event,
+                    timeout_s=max(timeout_ms, 1_000) / 1000.0,
+                    thinking=self._thinking,
+                    tools=None,          # 关键：没有工具可用，它只能说话
+                    max_tokens=max_tokens,
+                )
+                if final.content.strip() or final.reasoning.strip():
+                    return final
+                return completion          # 不给工具也不说话：原样还回去，上层照旧报错
             self._apply_tool_calls(current, completion, reader)
         return completion
 
