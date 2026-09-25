@@ -798,8 +798,16 @@ def test_ask_creates_a_session_and_streams_the_reply(qtbot, tmp_path):
 
     text = chat.transcript_text()
     assert "你：为什么第一轮失败了？" in text
-    assert "模型回复" in text
     assert "先备份再删除" in text                 # 流式增量落进了记录区
+    # "这一轮是模型回复"现在由卡片里的标题块表达（不再是纯文本里的 `── 模型回复 ──`），
+    # 所以按**控件**断言：卡片里必须有那个标题，回复正文必须带代码块（分块渲染生效了）
+    from PySide6.QtWidgets import QLabel, QWidget
+
+    turn = chat.transcript.last_turn()
+    assert turn is not None
+    header = turn.findChild(QLabel, "chatReplyHeader")
+    assert header is not None and "模型回复" in header.text()
+    assert turn.findChild(QWidget, "chatCodeText") is not None, "代码块没有被单独分块渲染"
     assert opencode.sessions, "应当建立了一个对话会话"
     # 新会话的第一句话带上方案上下文：否则模型不知道这个项目在干什么
     assert "别动 logs/ 目录" in opencode.questions[0][2]
@@ -841,7 +849,7 @@ def test_extract_script_puts_it_in_the_center_pane_without_running_it(qtbot, tmp
     chat = window.chat_panel
     chat.add_assistant("改好的版本：\n\n```bash\necho 来自对话的脚本\n```\n")
 
-    chat.extract_button.click()
+    chat.extract_action.trigger()          # 「＋」菜单里的那一项（旧版是独立按钮）
 
     assert "来自对话的脚本" in window.center_pane.current_text()
     assert toolchain.executed == 0, "对话里的脚本绝不能被自动执行"
@@ -862,8 +870,15 @@ def test_assistant_delta_streams_into_the_chat_transcript(qtbot, tmp_path):
     controller._on_event(RunEvent("assistant_delta", 1, {"text": "echo hi\n"}))
 
     text = window.chat_panel.transcript_text()
-    assert "第 1 轮 · 模型输出" in text
     assert "echo hi" in text
+    # 段落标题同样是卡片里的块（见上一条用例的说明）
+    from PySide6.QtWidgets import QLabel
+
+    turn = window.chat_panel.transcript.last_turn()
+    assert turn is not None
+    header = turn.findChild(QLabel, "chatReplyHeader")
+    assert header is not None and "第 1 轮 · 模型输出" in header.text()
+    assert turn.findChild(QLabel, "chatReplyText") is not None
 
 
 def test_extra_instruction_reaches_the_engine_prompt(qtbot, tmp_path):
@@ -1126,3 +1141,68 @@ def test_restored_conversation_remembers_its_model(qtbot, tmp_path):
     controller.ask("再问一句")
     _wait_for_chat(qtbot, controller)
     assert opencode.models[-1] == "glms-3/glm-5.3"
+
+
+# ── 对话面板的模式胶囊：切后端 ────────────────────────────────────────
+
+
+def test_switching_the_backend_from_the_chat_pill_takes_effect(qtbot, tmp_path):
+    """胶囊切后端＝设置里改后端：写进设置、落盘、作废旧适配器、两处显示一致。
+
+    少任何一件都会出现"显示的是 A、跑的是 B"：不适配器作废 → 下一句话还是旧后端在答；
+    不同步设置页 → 用户不知道该信哪个显示。
+    """
+    # 设置对象必须"记得自己的文件"（`loaded_from` 只读）：用 load() 造一份指向临时文件的
+    settings = AppSettings.load(tmp_path / "settings.json")
+    settings.run_root = str(tmp_path / "runs")
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"), settings=settings,
+    )
+    settings.agent_backend = "opencode"
+    controller._adapter = _FakeOpencode()                        # 假装已经建好了旧后端的适配器
+    disposed: list[bool] = []
+    controller._adapter.dispose = lambda: disposed.append(True)
+
+    controller.switch_backend("builtin")
+
+    assert settings.agent_backend == "builtin"
+    assert disposed == [True], "旧后端的适配器没有被作废（下一句话还会用它回答）"
+    assert controller._adapter is None
+    assert "内置 agent" in window.chat_panel.mode_button.text(), "胶囊没有跟着变"
+    assert window.settings_page.selected_backend_id() == "builtin", "设置页与胶囊显示不一致"
+    saved = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert saved["agent_backend"] == "builtin", "后端没写进设置文件（重启会变回去）"
+
+
+def test_switching_the_backend_is_refused_while_a_reply_is_streaming(qtbot, tmp_path):
+    """正在生成回复时不许切后端：半途换后端＝这条回复来自一个已经不存在的会话。"""
+    settings = AppSettings(run_root=str(tmp_path / "runs"))
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+        run_root=str(tmp_path / "runs"), settings=settings,
+    )
+    settings.agent_backend = "opencode"
+
+    class _Running:
+        """够用的替身：`isRunning()` 说忙，`cancel()` 让关窗时的收尾能正常走完。"""
+
+        def isRunning(self) -> bool:
+            return True
+
+        def cancel(self) -> None:
+            pass
+
+        def wait(self, _ms: int = 0) -> None:
+            pass
+
+    controller._chat_worker = _Running()
+    controller.switch_backend("builtin")
+
+    assert settings.agent_backend == "opencode", "忙的时候把后端切走了"
+    assert "opencode" in window.chat_panel.mode_button.text(), "胶囊显示成了一个没生效的选择"
+    assert "等这一轮结束" in window.chat_panel.status.text()

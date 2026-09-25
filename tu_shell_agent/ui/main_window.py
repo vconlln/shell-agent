@@ -353,6 +353,14 @@ class MainWindow(QMainWindow):
         self.console_dialog.raise_()
         self.console_dialog.activateWindow()
 
+    def open_console_settings(self) -> None:
+        """直接打开「控制台 → 设置」那一页（对话面板胶囊菜单的最后一项用）。
+
+        单独留一个无参方法：`open_console` 要被当成按钮槽用时得容忍 `checked` 那个布尔实参，
+        而这里的调用方是信号的 lambda，语义就是"要设置页"，写死更清楚。
+        """
+        self.open_console(self.settings_page)
+
     def focus_tool_tab(self, page: QWidget) -> None:
         """把某个面板显示给用户：对话在右栏分页里，其余面板在控制台弹窗里。"""
         if page is self.chat_panel:

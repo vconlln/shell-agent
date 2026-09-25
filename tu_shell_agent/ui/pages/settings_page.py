@@ -786,6 +786,25 @@ class SettingsPage(QWidget):
         """当前下拉选中的后端 id（控件上的值，未必已经保存）。"""
         return str(self.backend_combo.currentData() or "")
 
+    def select_backend(self, backend_id: str) -> bool:
+        """把下拉切到某个后端（**不落盘、不触发**切换处理）。
+
+        对话面板的模式胶囊切后端时要叫上它：胶囊与设置页显示的是同一项设置，
+        一处改了另一处不动，用户就不知道该信哪个（"显示 opencode、实际跑内置 agent"）。
+        信号刻意屏蔽 —— 落盘与适配器重建由调用方（控制器）统一做，避免两条路各做一半。
+        """
+        index = self.backend_combo.findData(str(backend_id or ""))
+        if index < 0:
+            return False
+        self.backend_combo.blockSignals(True)
+        try:
+            self.backend_combo.setCurrentIndex(index)
+        finally:
+            self.backend_combo.blockSignals(False)
+        self._refresh_backend_hint()
+        self._refresh_components_hint()
+        return True
+
     def effective_command(self) -> str:
         """当前选择下**实际会执行**的命令。
 

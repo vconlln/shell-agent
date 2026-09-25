@@ -16,17 +16,20 @@ import re
 import time
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from .widgets.selection_menu import install_ask_action
+from .chat_view import TranscriptView
 from .widgets.wrap_row import WrapRow
 
 # 从回复里抠出代码块（```bash / ```sh / ``` 后面到下一个围栏）
@@ -38,6 +41,44 @@ REFRESH_MODELS = object()
 # 点开下拉时，多久算"列表还新鲜"（秒）。在这之内不再去要，避免连点几下就起好几个子进程；
 # 想强制刷新有末项「重新获取可用模型」。
 _MODEL_LIST_TTL_S = 300.0
+
+
+def _activity_tag(text: str) -> str:
+    """活动行前面那个小标签：按内容分档，认不出来就是"提示"。"""
+    body = (text or "").strip()
+    if body.startswith("读取 "):
+        return "读取"
+    if "技能" in body:
+        return "技能"
+    if body.startswith("工具调用"):
+        return "工具"
+    return "提示"
+
+
+class ChatInput(QPlainTextEdit):
+    """输入框：**Enter 发送、Ctrl+Enter 换行**（用户 2026-09-20 要求）。
+
+    改之前是反的（Enter 换行、Ctrl+Enter 发送）：在聊天框里敲完一句话按回车是所有人都有的
+    肌肉记忆，而"想换行按 Ctrl"与记事本/浏览器地址栏的习惯也一致。`Shift+Enter` 同样换行
+    （老习惯，一起留着不冲突）。
+
+    为什么要子类：`QPlainTextEdit` 自己会吃掉回车（插换行），父控件的 `keyPressEvent` 拿不到，
+    所以只能在输入框这一层拦。
+    """
+
+    send_requested = Signal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            modifiers = event.modifiers()
+            if modifiers & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+            ):
+                self.insertPlainText("\n")      # 明确插一行：不指望基类在这个修饰键下的行为
+                return
+            self.send_requested.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class ModelCombo(QComboBox):
@@ -111,6 +152,8 @@ class ChatPanel(QWidget):
     proposal_rejected = Signal()       # 用户拒绝（中栏脚本保持不动）
     model_changed = Signal(str)        # 对话用的模型改了（provider/model，空 = 用会话默认）
     models_requested = Signal()        # 需要可用模型列表（首次显示 / 点刷新）
+    backend_changed = Signal(str)      # 模式胶囊切换了后端 agent（携带后端 id）
+    console_requested = Signal()       # 想打开「控制台 → 设置」（胶囊菜单里的最后一手）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -146,7 +189,9 @@ class ChatPanel(QWidget):
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.setMinimumWidth(130)
         self.model_combo.addItem("", "")
-        self.model_combo.lineEdit().setPlaceholderText("使用会话模型")
+        # 占位文字取短的：右列 150% 下只有 400 逻辑像素，"使用会话模型" 会被截成
+        # "使用会…"；含义不变（留空 = 用会话/设置里那个模型），细节在提示气泡里
+        self.model_combo.lineEdit().setPlaceholderText("会话模型")
         self.model_combo.setToolTip(
             "对话用的模型：点开可选择可用模型（末项「重新获取可用模型」会重新向后台要一次列表），"
             "也可以直接输入完整模型名；留空则用会话默认。\n"
@@ -167,52 +212,80 @@ class ChatPanel(QWidget):
         # 模型控件放**底部按钮行**的右端：与「发送 / 取消 / 把最新脚本放进中栏」同一行。
         # 会话那行只留会话本身，上面不再堆两排控件。
 
-        self.transcript = QPlainTextEdit()
-        self.transcript.setObjectName("chatTranscript")
-        self.transcript.setReadOnly(True)
-        # 120 太高了：Windows 150% 缩放下工具区常常只有两三百逻辑像素，
-        # 记录 120 + 输入 72 就把面板顶到 324，窗口地板被抬到 666 —— 再没余量就重叠。
-        self.transcript.setMinimumHeight(64)
+        self.transcript = TranscriptView(on_ask=lambda text: self._quote(text, "对话记录"))
+        # 记录区不再是一个纯文本控件，而是"每轮一张卡片"的滚动区（见 chat_view.py）：
+        # 用户块与回复块各自成块、卡内带活动行与时间/复制 —— 旧版把所有轮次拼成一片文字，
+        # 用户的原话是"每一轮会话都在一块，看不清楚"。
         self.transcript.setPlaceholderText(
             "显示与模型的对话；运行期间的模型输出也会追加在此处。"
         )
-        # 记录区里选中的内容也能提问（想追问模型上一句里的某段代码时最常用）
-        install_ask_action(
-            self.transcript,
-            lambda text: self._quote(text, "对话记录"),
-            label="就选中的内容提问",
-        )
 
-        self.input = QPlainTextEdit()
+        self.input = ChatInput()
         self.input.setObjectName("chatInput")
         self.input.setPlaceholderText(
-            "输入问题，例如：该报告的含义 / 第二轮失败的原因 / 将脚本改为先备份再删除。（Ctrl+Enter 发送）"
+            "发消息或做任务…（Enter 发送 / Ctrl+Enter 换行）"
         )
         self.input.setFixedHeight(56)
+        self.input.send_requested.connect(self._on_send)
 
-        self.send_button = QPushButton("发送")
+        # 发送：圆形主色按钮（↑）—— 与"发送"两个字相比，圆形更像聊天工具，
+        # 也把底部那一行让给模型与模式选择（用户给的参照图就是这个形状）。
+        self.send_button = QPushButton("↑")
         self.send_button.setObjectName("chatSendButton")
-        self.cancel_button = QPushButton("取消")
+        self.send_button.setProperty("role", "primary")
+        self.send_button.setToolTip("发送（Enter）")
+        # 取消：圆形停止按钮，**只在忙时出现**（不忙时它没有对象，占着位置只会挤）
+        self.cancel_button = QPushButton("■")
         self.cancel_button.setObjectName("chatCancelButton")
-        # 标签缩短是为了**一行放得下**：整行要塞在右列最小宽度（约 385px）里，
-        # 「把最新脚本放进中栏」比「存入中栏」宽 67px，会把它挤到第二行。
-        # 完整含义放进提示气泡，不长篇占据按钮宽度。
-        self.extract_button = QPushButton("存入中栏")
-        self.extract_button.setToolTip("把回复里最新的一段脚本放进中栏（之后可「改后重跑」）")
-        self.extract_button.setObjectName("chatExtractButton")
+        self.cancel_button.setToolTip("取消本轮生成")
+        self.cancel_button.setVisible(False)
+
+        # 「＋」：次要动作收进菜单（把最新脚本放进中栏 / 扫描历史会话 / 新对话）。
+        # 三个都是"偶尔用一次"的动作，各自占一个按钮会把底部那一行挤爆（右列最小 385px）。
+        self.plus_button = QPushButton("＋")
+        self.plus_button.setObjectName("chatPlusButton")
+        self.plus_button.setToolTip("更多：把最新脚本放进中栏 / 扫描历史会话 / 新对话")
+        self.extract_action = QAction("把最新脚本放进中栏", self)
+        self.extract_action.setToolTip("把回复里最新的一段脚本放进中栏（之后可「改后重跑」）")
+        self.extract_action.triggered.connect(lambda _checked=False: self._on_extract())
+        self.plus_menu = QMenu(self.plus_button)
+        self.plus_menu.addAction(self.extract_action)
+        self.plus_menu.addSeparator()
+        self.plus_menu.addAction("扫描历史会话", lambda: self.sessions_refresh_requested.emit())
+        self.plus_menu.addAction("新对话", lambda: self.new_session_requested.emit())
+        self.plus_button.setMenu(self.plus_menu)
+
+        # 模式胶囊：当前**后端 agent**（内置 agent / opencode / claude / codeagent…）。
+        # 参照图里那个胶囊是"权限模式"，这一路没有那个概念 —— 真正决定"谁在回答"的是后端，
+        # 所以胶囊就是它：点开即切，切完这句话就用新后端（与设置页里改「后端」同一件事）。
+        self.mode_button = QPushButton(self._backend_label())
+        self.mode_button.setObjectName("chatModeButton")
+        self.mode_button.setToolTip("当前回答你的是哪个 agent 后端；点开可切换（与设置页里的「后端」同一项）")
+        self.mode_menu = QMenu(self.mode_button)
+        self._fill_mode_menu()
+        self.mode_button.setMenu(self.mode_menu)
+
+        # 兼容旧行为：面板（而不是输入框）拿到 Ctrl+Enter 时仍然发送
         self.status = QLabel("尚未建立对话会话；点「发送」会自动建立一个。")
         self.status.setObjectName("chatStatus")
         self.status.setProperty("role", "muted")
         self.status.setWordWrap(True)
 
-        # 底部这行：左边是动作（发送/取消/存入中栏），右边是模型选择（同一行，用户点名要求）。
-        # 用 WrapRow 而不是 QHBoxLayout：兜底 —— 窗口被压到比最小尺寸还小时**折行**而不是
-        # 让控件重叠（实测早期版本在右列 386px 时模型下拉盖住旁边的按钮）。
-        # 正常窗口下这一行只需要 330px，而右列最小 385px，永远是**一行**（有用例钉住）。
+        # 底部这一行：左侧「＋ + 模式胶囊」、右侧「模型 + 取消 + 发送」。
+        # 仍然用 WrapRow：兜底 —— 窗口被压到比最小尺寸还小时**折行**而不是让控件重叠
+        # （实测早期版本在右列 386px 时模型下拉盖住旁边的按钮）。
         self.controls_row = WrapRow(
-            [self.send_button, self.cancel_button, self.extract_button, self.model_combo],
-            gap=3,      # 左组＝动作按钮，右组＝模型（宽的时候贴右端）
+            [self.plus_button, self.mode_button, self.model_combo, self.cancel_button, self.send_button],
+            gap=2,      # 左组＝入口（＋ / 模式），右组＝模型与发送（宽的时候贴右端）
         )
+        # 输入框与这一行同属一个"输入卡片"（参照图的形状：输入区有圆角外框，按钮在框内下沿）
+        self.composer = QFrame()
+        self.composer.setObjectName("chatComposer")
+        composer_layout = QVBoxLayout(self.composer)
+        composer_layout.setContentsMargins(8, 6, 8, 6)
+        composer_layout.setSpacing(4)
+        composer_layout.addWidget(self.input)
+        composer_layout.addWidget(self.controls_row)
 
         # ── 模型提议栏：像 Cursor 那样给出"接受 / 拒绝" ──────────────────
         # 差异正文显示在**中栏**（那里有地方、也已有一套红绿 diff 渲染），
@@ -272,13 +345,11 @@ class ChatPanel(QWidget):
         layout.addWidget(QLabel("与模型对话（对话不会执行任何脚本）"))
         layout.addWidget(self.transcript, 1)
         layout.addWidget(self.quote_bar)
-        layout.addWidget(self.input)
-        layout.addWidget(self.controls_row)
+        layout.addWidget(self.composer)
         layout.addWidget(self.status)
 
         self.send_button.clicked.connect(self._on_send)
         self.cancel_button.clicked.connect(lambda _checked=False: self.cancel_requested.emit())
-        self.extract_button.clicked.connect(self._on_extract)
         self.set_busy(False)
 
     # ── 对外 ──────────────────────────────────────────────────────────────
@@ -479,40 +550,88 @@ class ChatPanel(QWidget):
         self.transcript.clear()
 
     def load_history(self, entries) -> None:
-        """把磁盘上的对话记录回填进面板（角色 → 说话人，与实时追加同一套呈现）。"""
-        self.clear_history()
+        """把磁盘上的对话记录回填进面板：**每条回复一轮**，用户消息与模型回复分别成块。
+
+        旧版是按"角色 → 说话人"拼成一片文字（`你：…` / `模型：…`），回填出来同样看不出轮次；
+        现在按顺序把 user 开一轮、其余（模型回复 / 错误）挂进这一轮里，与实时对话一模一样。
+        """
         from ..run_store.sessions import ROLE_LABELS
 
+        self.clear_history()
         for entry in entries:
-            speaker = ROLE_LABELS.get(entry.role, entry.role)
-            stamp = f"（{entry.when}）" if entry.when else ""
-            self._append_raw(f"\n{speaker}{stamp}：{entry.text}\n")
-        self.transcript.ensureCursorVisible()
+            role = str(getattr(entry, "role", "") or "")
+            text = str(getattr(entry, "text", "") or "")
+            stamp = str(getattr(entry, "when", "") or "")
+            if role == "user":
+                turn = self.transcript.begin_turn()
+                turn.set_user(text, when=stamp[-5:] if stamp else "")
+            elif role in ("error", "failed"):
+                self.transcript.current_turn().add_error(text)
+            else:
+                turn = self.transcript.current_turn()
+                turn.begin_reply(ROLE_LABELS.get(role, "模型回复"))
+                turn.append_reply(text)
+                turn.finish_reply()
+        self.transcript.scroll_to_bottom()
 
     def set_busy(self, busy: bool) -> None:
+        # 发送按钮"能用 == 空闲"这一条**保留**：它是外部（用例、控制器）判断"这一轮结束了"
+        # 的可观察标志。刻意**不**按"输入框有没有字"来禁用 —— 那样空闲但没打字时按钮也是灰的，
+        # 这个标志就失效了（改这一版时踩到过：五条既有用例等的就是这个信号）。
         self.send_button.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
+        # 停止按钮只在忙时出现：不忙时它没有对象，占着位置只会把那一行挤窄
+        self.cancel_button.setVisible(busy)
         self.input.setReadOnly(busy)
 
     def add_user(self, text: str) -> None:
-        self._append("你", text)
+        """开一轮新对话（用户发了一条消息）——上一轮就此定稿。"""
+        previous = self.transcript.last_turn()
+        if previous is not None:
+            previous.finish_reply()
+        self.transcript.begin_turn().set_user(text)
 
     def add_assistant(self, text: str) -> None:
-        self._append("模型", text)
+        """一整段模型回复（非流式：历史回填、引擎侧的说明都走这里）。"""
+        turn = self.transcript.current_turn()
+        turn.begin_reply()
+        turn.append_reply(text)
+        turn.finish_reply()
 
     def add_note(self, text: str) -> None:
-        """系统提示（阶段、错误、取消）——与对话正文区分开，避免读成模型说的话。"""
-        self._append("·", text)
+        """系统提示/活动行（阶段、工具读取、取消）——与对话正文区分开，别读成模型说的话。
+
+        标签按内容分档（读取 / 技能 / 提示）：参照图里这些行前面都有一个小标签（"思考"、"Bash"），
+        一律写"提示"等于没写 —— 用户扫一眼就知道那是"读了文件"还是"加载了技能"。
+        """
+        self.transcript.current_turn().add_activity(_activity_tag(text), text)
 
     def begin_stream(self, title: str) -> None:
-        """开始一段流式输出：先写标题行，后续 append_delta 往同一段里追加。"""
-        self._append_raw(f"\n── {title} ──\n")
+        """开始一段流式输出：后续 append_delta 往这一轮的正文块里追加。"""
+        self.transcript.current_turn().begin_reply(title)
 
     def append_delta(self, text: str) -> None:
-        self._append_raw(text)
+        self.transcript.current_turn().append_reply(text)
+        self.transcript.scroll_to_bottom()
+
+    def _stream_label_ref(self):
+        """当前轮里"还在长字"的那个标签（收尾后必须是 None）—— 只给用例与诊断用。"""
+        turn = self.transcript.last_turn()
+        return None if turn is None else turn._stream_label
+
+    def end_stream(self) -> None:
+        """一段流结束：这一轮定稿（正文切分块、显示时间与复制）。
+
+        必须显式收尾：分块渲染只在收尾时做（流式期间每个增量都重排整轮太贵），
+        不收尾的话代码块永远显示成一段普通文字。
+        """
+        turn = self.transcript.last_turn()
+        if turn is not None:
+            turn.finish_reply()
 
     def add_error(self, text: str) -> None:
-        self._append("！", text)
+        self.transcript.current_turn().add_error(text)
+        self.transcript.scroll_to_bottom()
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
@@ -520,17 +639,61 @@ class ChatPanel(QWidget):
     def transcript_text(self) -> str:
         return self.transcript.toPlainText()
 
+    # ── 后端（模式胶囊）──────────────────────────────────────────────────
+    def set_backend(self, backend_id: str) -> None:
+        """把胶囊切到某个后端（设置页改了后端时同步过来，两处显示不许不一致）。"""
+        self._backend_id = str(backend_id or self._backend_id)
+        self.mode_button.setText(self._backend_label())
+
+    def _backend_label(self) -> str:
+        """胶囊上的字：当前后端的**短名**（取不到就给 id，绝不显示成空白）。
+
+        只用短名：右列在 150% 缩放下只有 400 逻辑像素左右，显示名里的括号说明
+        （"内置 agent（直连模型 API）"）会把胶囊撑到被裁字 —— 实测那一刻看到的是
+        "置 agent（直连模型 API）"，左边第一个字被切掉。全名留在提示气泡与菜单里，
+        想知道细节的人点开就有。
+        """
+        from ..agent_backends import DEFAULT_BACKEND_ID, backend_descriptor
+
+        backend_id = getattr(self, "_backend_id", "") or DEFAULT_BACKEND_ID
+        try:
+            name = backend_descriptor(backend_id).display_name
+        except Exception:  # noqa: BLE001 - 未知 id 不该把面板拖崩，显示 id 即可
+            name = backend_id
+        short = name.split("（", 1)[0].split("(", 1)[0].strip() or name
+        return f"{short} ▾"
+
+    def _fill_mode_menu(self) -> None:
+        from ..agent_backends import available_backends, backend_descriptor
+
+        self.mode_menu.clear()
+        current = getattr(self, "_backend_id", "")
+        for descriptor in available_backends():
+            label = descriptor.display_name
+            if descriptor.id == current:
+                label = f"✓ {label}"
+            action = self.mode_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, chosen=descriptor.id: self._choose_backend(chosen)
+            )
+        self.mode_menu.addSeparator()
+        self.mode_menu.addAction("在「控制台 → 设置」里配置后端").triggered.connect(
+            lambda _checked=False: self.console_requested.emit()
+        )
+        try:
+            self.mode_button.setToolTip(
+                f"当前后端：{backend_descriptor(current).display_name}。"
+                "点开可切换（与设置页里的「后端」同一项）。"
+            )
+        except Exception:  # noqa: BLE001 - 同上
+            pass
+
+    def _choose_backend(self, backend_id: str) -> None:
+        self.set_backend(backend_id)
+        self._fill_mode_menu()
+        self.backend_changed.emit(backend_id)
+
     # ── 内部 ──────────────────────────────────────────────────────────────
-    def _append(self, speaker: str, text: str) -> None:
-        self._append_raw(f"\n{speaker}：{text}\n")
-
-    def _append_raw(self, text: str) -> None:
-        cursor = self.transcript.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(text)
-        self.transcript.setTextCursor(cursor)
-        self.transcript.ensureCursorVisible()
-
     def _on_send(self) -> None:
         text = self.input.toPlainText().strip()
         if not text:
@@ -550,10 +713,11 @@ class ChatPanel(QWidget):
         self.script_extracted.emit(script)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        # Ctrl+Enter 发送（聊天框的常规习惯）；单独 Enter 留给换行
+        # 输入框自己处理 Enter（发送）与 Ctrl+Enter（换行，见 ChatInput）；
+        # 这里兜住"焦点不在输入框上但按了 Ctrl+Enter"的情况（焦点在记录区/下拉时）
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and (
             event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        ):
+        ) and self.focusWidget() is not self.input:
             self._on_send()
             return
         super().keyPressEvent(event)

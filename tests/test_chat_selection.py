@@ -174,14 +174,20 @@ def test_clear_quote_button_removes_it(chat, qtbot):
 
 
 def test_record_selection_is_quoted(chat, qtbot, monkeypatch):
-    """记录区里选中的内容也能提问（追问模型上一句里的某段代码）。"""
-    from tu_shell_agent.ui.widgets import selection_menu
+    """记录区里选中的内容也能提问（追问模型上一句里的某段代码）。
 
-    record = "模型：先备份再删除。\n你：为什么？"
-    chat.transcript.setPlainText(record)
-    _select(chat.transcript, 0, 6)
+    记录区改成"每轮一张卡片"之后，正文是 `QLabel`（可选可复制），不再是纯文本控件 ——
+    所以选中的位置也从控件游标改成标签自身的选区（`QLabel.setSelection`）。
+    用户看到的行为一个字没变：选中 → 右键 → 「就选中的内容提问」。
+    """
+    chat.add_assistant("先备份再删除。")
 
-    menu = _open_context_menu(monkeypatch, chat.transcript)
+    label = chat.transcript.findChild(type(chat.status), "chatReplyText")
+    assert label is not None, "回复正文没有渲染成可选中的标签"
+    record = label.text()
+    label.setSelection(0, 6)
+
+    menu = _open_context_menu(monkeypatch, label)
     assert menu.actions()[0].text() == "就选中的内容提问"
     menu.actions()[0].trigger()
 

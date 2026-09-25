@@ -94,6 +94,9 @@ TOKENS: dict[str, str | tuple[int, int, int, int]] = {
     # 就整个退回画直角（实测 28px 高的页签：14px 生效，16px 变直角）—— 999px 那种写法
     # 在这里不是"更大的圆角"，而是"没有圆角"。11px 在页签高 24~34px 时都安全。
     "radius_pill": "11px",
+    # 圆形按钮：半径 = 直径的一半才是正圆。直径不是 row_height 而是它 +2px —— QSS 的
+    # min-width/min-height 算的是内容盒，外面的 1px 边框要另加（实测 30px 写进 QSS 得到 32px）。
+    "radius_round": "16px",
     "row_height": "30px",
     "handle": "6px",   # 分割条的**可抓宽度**（不是画出 6px 粗线：见 QSS 里的 hover 规则）
     "font_size": "13px",
@@ -793,17 +796,165 @@ QPlainTextEdit#templateBody, QPlainTextEdit#templatePreview, QPlainTextEdit#conf
     font-size: {sized('font_size_small', scale)};
 }}
 QPlainTextEdit#notesView {{ font-family: inherit; }}
-/* 对话记录与输入框也用等宽：里面的脚本片段要能对齐。
-   记录区**显式**给"更深的只读底"：它挂在工具区页签里之后，`QPlainTextEdit:read-only`
-   这条通用规则不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
+/* 对话记录区（`QScrollArea`，里面是"每轮一张卡片"）与输入框都用等宽：脚本片段要能对齐。
+   记录区**显式**给"更深的只读底"：它挂在右列页签里，`QPlainTextEdit:read-only` 那条通用规则
+   不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
    "只读区看起来和输入框一样"会让人以为可以直接在记录里打字。 */
-QPlainTextEdit#chatTranscript {{
+QScrollArea#chatTranscript {{
     background-color: {_color('bg_under', colors)};
-    font-family: "{mono}";
-    font-size: {sized('font_size_small', scale)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
 }}
+QScrollArea#chatTranscript > QWidget > QWidget,
+QWidget#chatTranscriptViewport {{ background: transparent; }}
+QWidget#chatTranscriptBody {{ background: transparent; }}
+QLabel#chatPlaceholder {{ color: {_color('fg_tertiary', colors)}; }}
 QPlainTextEdit#chatInput {{ font-family: "{mono}"; font-size: {sized('font_size_small', scale)}; }}
 
+/* ── 对话记录：一轮一张卡片（用户块 / 回复块 / 活动行 / 页脚）─────────
+   参照用户给的对话界面：用户消息与模型回复**各自成块**，块内留白，轮与轮之间留白。
+   卡片自己画 1px 淡边框 + 圆角（`radius`，不用 radius_lg：Qt 在半径 >= 高度一半时
+   直接退回直角，见输入类那条注释）。 */
+QFrame#chatTurn {{
+    background-color: {_color('bg_card', colors)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QFrame#chatUserBlock {{
+    background-color: {_color('bg_input', colors)};
+    border: 1px solid {_color('border', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QLabel#chatUserText {{ color: {_color('fg', colors)}; }}
+QLabel#chatReplyHeader {{
+    color: {_color('fg_tertiary', colors)};
+    font-size: {sized('font_size_small', scale)};
+}}
+QWidget#chatReplyBody, QWidget#chatActivities, QWidget#chatTurnFooter,
+QWidget#chatActivityRow, QWidget#chatCodeHeader {{ background: transparent; }}
+QLabel#chatReplyText {{ color: {_color('fg', colors)}; }}
+QLabel#chatActivityTag {{
+    color: {_color('fg_tertiary', colors)};
+    font-size: {sized('font_size_section', scale)};
+    font-weight: 600;
+    padding-top: 2px;
+}}
+QLabel#chatActivityText {{ color: {_color('fg_secondary', colors)}; font-size: {sized('font_size_small', scale)}; }}
+QLabel#chatTurnTime {{ color: {_color('fg_disabled', colors)}; font-size: {sized('font_size_small', scale)}; }}
+QFrame#chatErrorBlock {{
+    background-color: {_color('bg_under', colors)};
+    border: 1px solid {_color('error_dim', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QLabel#chatErrorText {{ color: {_color('error', colors)}; }}
+QFrame#chatCodeBlock {{
+    background-color: {_color('bg_under', colors)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QLabel#chatCodeLanguage {{ color: {_color('fg_tertiary', colors)}; font-size: {sized('font_size_section', scale)}; }}
+QPlainTextEdit#chatCodeText {{
+    background: transparent;
+    border: none;
+    color: {_color('fg', colors)};
+    font-family: "{mono}";
+    font-size: {sized('font_size_small', scale)};
+    padding: 0;
+}}
+QPushButton#chatCopyButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {sized('radius', scale)};
+    color: {_color('fg_tertiary', colors)};
+    padding: 0;
+    min-height: 0;
+    font-size: {sized('font_size_small', scale)};
+}}
+QPushButton#chatCopyButton:hover {{
+    background-color: {_color('bg_button_hover', colors)};
+    color: {_color('fg', colors)};
+}}
+
+/* ── 输入卡片（参照图的形状：圆角外框，按钮在框内下沿）────────────── */
+QFrame#chatComposer {{
+    background-color: {_color('bg_input', colors)};
+    border: 1px solid {_color('border_heavy', colors)};
+    border-radius: {sized('radius_lg', scale)};
+}}
+/* 框内的输入框**不再自己画底与边框**：两层边框会变成"框中框"，参照图里是干净的。 */
+QFrame#chatComposer QPlainTextEdit#chatInput {{
+    background: transparent;
+    border: none;
+    padding: 2px 2px;
+}}
+QFrame#chatComposer QPlainTextEdit#chatInput:focus {{ border: none; }}
+/* 圆形按钮：＋ / 停止 / 发送。「半径 >= 高度一半就退回直角」这条在这里是**故意**的：
+   半径正好等于边长的一半 → 圆。 */
+/* 尺寸写在 QSS 里而**不是**只靠 setFixedSize：底部那一行是 WrapRow，它按控件的
+   sizeHint/最小尺寸算行高 —— 只设 fixedSize 时行高按 QSS 的 min-height(0) 算成 28px，
+   30px 的按钮被压成 28px 的椭圆（用例抓到的就是这个）。QSS 的 min/max 同时给死，
+   量出来的与画出来的就是同一个数。 */
+QPushButton#chatPlusButton, QPushButton#chatCancelButton, QPushButton#chatSendButton {{
+    border-radius: {sized('radius_round', scale)};
+    padding: 0;
+    min-width: {sized('row_height', scale)};
+    max-width: {sized('row_height', scale)};
+    min-height: {sized('row_height', scale)};
+    max-height: {sized('row_height', scale)};
+    font-size: {sized('font_size', scale)};
+}}
+QPushButton#chatPlusButton {{
+    background-color: transparent;
+    border: 1px solid {_color('border_heavy', colors)};
+    color: {_color('fg_secondary', colors)};
+}}
+QPushButton#chatPlusButton:hover {{ background-color: {_color('bg_button_hover', colors)}; color: {_color('fg', colors)}; }}
+QPushButton#chatCancelButton {{
+    background-color: transparent;
+    border: 1px solid {_color('border_heavy', colors)};
+    color: {_color('fg_secondary', colors)};
+}}
+QPushButton#chatCancelButton:hover {{ background-color: {_color('bg_button_hover', colors)}; color: {_color('fg', colors)}; }}
+/* 发送用主色（accent）：这一路的主操作，与"开始"那颗白底主按钮区分开——
+   白底在输入框里太抢眼，蓝色圆点是聊天工具的通用形状。 */
+QPushButton#chatSendButton {{
+    background-color: {_color('accent', colors)};
+    border: 1px solid {_color('accent', colors)};
+    color: {_color('fg_on_accent', colors)};
+    font-weight: 600;
+}}
+QPushButton#chatSendButton:hover {{ background-color: #8fabff; border-color: #8fabff; }}
+QPushButton#chatSendButton:disabled {{
+    background-color: {_color('bg_button', colors)};
+    border-color: {_color('border_light', colors)};
+    color: {_color('fg_disabled', colors)};
+}}
+/* 模式胶囊（当前后端）：与输入框同底的胶囊，右侧带 ▾ */
+QPushButton#chatModeButton {{
+    background-color: transparent;
+    border: 1px solid {_color('border_heavy', colors)};
+    border-radius: {sized('radius_pill', scale)};
+    color: {_color('fg_secondary', colors)};
+    padding: 2px 10px;
+    min-height: 22px;
+}}
+QPushButton#chatModeButton:hover {{ background-color: {_color('bg_button_hover', colors)}; color: {_color('fg', colors)}; }}
+/* 两颗带菜单的按钮（＋ 与模式胶囊）都不画 Qt 默认的菜单小三角：
+   ＋ 自己就是那个图标，再叠一个三角会挤在一起（实测 150% 下＋被压成 "+ ·"）。 */
+QPushButton#chatModeButton::menu-indicator,
+QPushButton#chatPlusButton::menu-indicator {{ image: none; width: 0; }}
+/* 模型下拉也是一颗胶囊：藏在输入框里时不该再画成输入框的样子 */
+QFrame#chatComposer QComboBox#chatModelCombo {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {sized('radius_pill', scale)};
+    color: {_color('fg_secondary', colors)};
+    padding: 2px 8px;
+}}
+QFrame#chatComposer QComboBox#chatModelCombo:hover {{
+    background-color: {_color('bg_button_hover', colors)};
+    color: {_color('fg', colors)};
+}}
 /* ── 底栏状态：单行、次级色、上方一条细线 ─────────────────────── */
 QLabel#statusLabel {{
     color: {_color('fg_secondary', colors)};

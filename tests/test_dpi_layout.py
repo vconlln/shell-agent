@@ -75,6 +75,14 @@ def test_window_minimum_grows_with_big_screens_but_is_capped():
 # ── 对话面板：不许重叠 ────────────────────────────────────────────────
 
 
+def _in_panel(panel, widget):
+    """把控件的矩形换算到面板坐标系（不同父控件的 geometry() 不能直接比）。"""
+    from PySide6.QtCore import QRect
+
+    top_left = widget.mapTo(panel, widget.rect().topLeft())
+    return QRect(top_left, widget.size())
+
+
 def test_chat_panel_never_overlaps_at_small_logical_sizes(qtbot):
     """小逻辑分辨率下，对话记录 / 输入框 / 按钮行不许互相重叠。
 
@@ -89,11 +97,23 @@ def test_chat_panel_never_overlaps_at_small_logical_sizes(qtbot):
         window.apply_appearance()
 
         chat = window.chat_panel
-        transcript, input_box = chat.transcript.geometry(), chat.input.geometry()
+        # 全部换算到**面板坐标**再比：输入框与按钮行现在同属输入卡片，
+        # 各自的 `geometry()` 是相对自己的父控件（卡片 / 按钮行），直接比是两套坐标系。
+        transcript = _in_panel(chat, chat.transcript)
+        input_box = _in_panel(chat, chat.input)
+        composer = _in_panel(chat, chat.composer)
         assert not _overlaps(transcript, input_box), f"{width}x{height} 下对话记录与输入框重叠"
-        assert not _overlaps(input_box, chat.send_button.geometry()), (
-            f"{width}x{height} 下输入框与按钮行重叠"
-        )
+        assert not _overlaps(transcript, composer), f"{width}x{height} 下对话记录与输入卡片重叠"
+        assert composer.contains(input_box), f"{width}x{height} 下输入框跑出了输入卡片"
+        for button in (chat.plus_button, chat.mode_button, chat.model_combo,
+                       chat.send_button, chat.cancel_button):
+            if not button.isVisible():
+                continue
+            box = _in_panel(chat, button)
+            assert not _overlaps(input_box, box), (
+                f"{width}x{height} 下输入框与 {button.objectName()} 重叠"
+            )
+            assert composer.contains(box), f"{width}x{height} 下 {button.objectName()} 跑出了输入卡片"
         assert chat.transcript.height() >= chat.transcript.minimumHeight()
         window.close()
 

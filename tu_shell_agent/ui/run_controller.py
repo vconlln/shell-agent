@@ -191,6 +191,10 @@ class RunController(QObject):
         chat.session_selected.connect(self._on_session_selected)
         chat.model_changed.connect(self._on_chat_model_changed)
         chat.models_requested.connect(self._on_models_requested)
+        # 输入卡片上的模式胶囊：切换后端（与设置页里的「后端」同一件事）
+        chat.backend_changed.connect(self.switch_backend)
+        chat.console_requested.connect(window.open_console_settings)
+        chat.set_backend(self._backend_id())     # 胶囊显示当前后端，别让两处显示不一致
         # 「设置 → 组件路径 → 自动检测」：把当前环境里找到的真实路径填进空栏
         window.settings_page.components_detect_requested.connect(self.detect_component_paths)
         chat.sessions_refresh_requested.connect(self.refresh_sessions)
@@ -815,6 +819,10 @@ class RunController(QObject):
             chat.add_note("模型返回了空回复。")
         if self._run_dir:
             append_chat(self._run_dir, "model", reply)
+        # 先定稿这一轮（正文切成散文 + 代码块、显示时间与复制），再收状态：
+        # 分块渲染只在收尾做（流式期间每个增量都重排整轮太贵），漏了这一步代码块就永远
+        # 显示成一段普通文字。
+        chat.end_stream()
         chat.set_busy(False)
         # 回复结束再定稿一次：流式期间可能因为节流错过了最后一段
         if not self._offer_proposal(reply, chat=chat):
@@ -828,8 +836,48 @@ class RunController(QObject):
         chat.add_error(f"对话失败：{message}" + (f"\n{hint}" if hint else ""))
         if self._run_dir:
             append_chat(self._run_dir, "error", message)
+        chat.end_stream()
         chat.set_busy(False)
         chat.set_status("对话失败；上面是原始错误。" + ("已附上处理建议。" if hint else ""))
+
+    def switch_backend(self, backend_id: str) -> None:
+        """对话面板的模式胶囊切后端 —— 与设置页里改「后端」是同一件事。
+
+        三件事必须一起做，少一件就会出现"显示的是 A、跑的是 B"：
+
+        1. 写进设置对象（**并落盘**：后端是跨会话的偏好，重启后不该变回去）；
+        2. 让设置页跟着显示同一个值（两个地方显示不一致＝用户不知道该信哪个）；
+        3. 作废当前适配器 —— 已经建好的那个还连着旧后端（opencode 的 serve / 内置 agent 的
+           HTTP 客户端），不换的话下一句话还是旧后端在答。
+        """
+        from ..agent_backends import backend_descriptor
+
+        chat = self.window.chat_panel
+        if self._chat_worker is not None and self._chat_worker.isRunning():
+            chat.set_status("正在生成回复：等这一轮结束或点停止之后再切后端。")
+            chat.set_backend(self._backend_id())     # 胶囊回到真实值，别显示成一个没生效的选择
+            return
+        try:
+            descriptor = backend_descriptor(backend_id)
+        except Exception as error:  # noqa: BLE001 - 未知 id 就如实说，不静默换一个
+            chat.set_status(f"无法切到该后端：{error}")
+            chat.set_backend(self._backend_id())
+            return
+
+        self.settings.agent_backend = backend_id
+        page = getattr(self.window, "settings_page", None)
+        if page is not None and hasattr(page, "select_backend"):
+            page.select_backend(backend_id)
+        try:
+            self.settings.save()
+        except (OSError, ValueError) as error:      # 写盘失败不该把切换本身废掉
+            self._status(f"后端已切到「{descriptor.display_name}」，但设置没写进文件：{error}")
+        self._dispose_adapter()
+        # 胶囊由控制器来定："当前生效的是谁"这件事只有这里知道（它才写设置、才作废适配器）。
+        # 交给调用方自己刷新会出现"没生效的选择留在屏幕上"（编程式调用尤其明显）。
+        chat.set_backend(backend_id)
+        self._status(f"已切到「{descriptor.display_name}」；下一句话用它回答。")
+        chat.set_status(f"当前后端：{descriptor.display_name}（已保存）。")
 
     def _on_script_extracted(self, script: str) -> None:
         """把对话里抠出来的脚本放进中栏——**只放进去，不执行**。
@@ -1124,6 +1172,7 @@ class RunController(QObject):
             phase = payload.get("phase")
             if phase in {"confirming", "checking", "executing", "settled"}:
                 self._stream_open = False   # 这一段输出结束，下次增量另起一段
+                self.window.chat_panel.end_stream()     # 这一段定稿（切成散文 + 代码块）
             self._status(f"第 {event.round} 轮 · {phase}")
         elif event.type == "assistant_delta":
             # 增量文本原来是被丢掉的（只有状态栏一句"模型输出中…"）：生成一版要几十秒，

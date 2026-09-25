@@ -28,7 +28,7 @@ def _top_left(panel, widget) -> tuple[int, int]:
 
 
 def test_model_picker_sits_in_the_bottom_button_row(qtbot, restore_app):
-    """模型选择放在**底部按钮行**的右端（用户要求：跟「发送」那些按钮同一行，不要堆在上面）。
+    """模型选择在**输入卡片的下沿**、紧挨发送按钮（用户给的参照图形状）。
 
     用户第二次点名这条（"把这个模型移动到跟发送在同一行"），所以这里按**面板最小宽度下的
     真实几何**断言"同一行"，而不是只看宽面板。
@@ -39,15 +39,67 @@ def test_model_picker_sits_in_the_bottom_button_row(qtbot, restore_app):
     send_x, send_y = _top_left(panel, panel.send_button)
     model_x, model_y = _top_left(panel, panel.model_combo)
     input_x, input_y = _top_left(panel, panel.input)
+    mode_x, _mode_y = _top_left(panel, panel.mode_button)
     _session_x, session_y = _top_left(panel, panel.session_combo)
 
     assert abs(send_y - model_y) <= 4, f"模型下拉与发送按钮不在同一行（{model_y} vs {send_y}）"
-    assert model_x > send_x, "模型下拉应当在按钮的右侧"
+    assert send_x > model_x, "发送按钮在模型选择的右侧（参照图里它是最右那颗圆点）"
     assert model_y > input_y, "模型下拉应当在输入框下方，而不是顶部"
+    assert mode_x < model_x, "模式胶囊在左侧，模型在右侧"
     assert session_y < model_y, "会话选择仍留在顶部那一行"
     assert panel.controls_row.row_count() == 1, (
         "面板最小宽度下底部控件被折成了两行 —— 用户要的是模型跟发送同一行"
     )
+
+
+def test_send_and_cancel_are_round_buttons_inside_the_composer(qtbot, restore_app):
+    """发送/停止是**圆形**按钮、长在输入卡片里（参照图的形状），停止只在忙时出现。"""
+    panel = _panel(qtbot, restore_app)
+    qtbot.wait(20)
+
+    assert panel.send_button.text() == "↑", "发送按钮不是那颗圆点（参照图里是一个上箭头）"
+    assert panel.composer.isAncestorOf(panel.send_button), "发送按钮不在输入卡片里"
+    assert panel.composer.isAncestorOf(panel.input), "输入框不在输入卡片里"
+    # 方形＝半径没生效（Qt 里半径 >= 高度一半时退回直角，这里正好取一半 → 圆）
+    assert panel.send_button.width() == panel.send_button.height(), "发送按钮不是正方形，画不成圆"
+    assert not panel.cancel_button.isVisible(), "空闲时不该出现停止按钮"
+    panel.set_busy(True)
+    assert panel.cancel_button.isVisible(), "忙的时候必须能看到停止按钮"
+    panel.set_busy(False)
+
+
+def test_enter_sends_and_ctrl_enter_breaks_the_line(qtbot, restore_app):
+    """Enter 发送、Ctrl+Enter 换行（用户 2026-09-20 明确要求）。
+
+    改之前是反的。这条必须钉在**输入框**上：`QPlainTextEdit` 自己会吃掉回车，
+    父控件的 keyPressEvent 收不到 —— 所以"发得出去"与"换得成行"两件事都要在这里验证。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    panel = _panel(qtbot, restore_app)
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+    panel.input.setFocus()
+    panel.input.setPlainText("第一行")
+    # 光标挪到末尾（真实打字就在这里）；不挪的话插入点在第 0 位，换行会插到行首
+    from PySide6.QtGui import QTextCursor
+
+    panel.input.moveCursor(QTextCursor.MoveOperation.End)
+
+    def press(key, modifiers):
+        event = QKeyEvent(QKeyEvent.Type.KeyPress, key, modifiers)
+        QApplication.sendEvent(panel.input, event)
+
+    press(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+    assert panel.input.toPlainText() == "第一行\n", "Ctrl+Enter 没有换行"
+    assert sent == [], "Ctrl+Enter 不该把消息发出去"
+
+    panel.input.setPlainText("第二行")
+    press(Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    assert sent == ["第二行"], f"单独 Enter 没有发送：{sent}"
+    assert panel.input.toPlainText() == "", "发送之后输入框要清空"
 
 
 def test_session_row_keeps_only_the_session_controls(qtbot, restore_app):
@@ -130,11 +182,12 @@ def _overlaps(panel, widgets) -> list[tuple[str, str]]:
 
 
 def _controls(panel):
-    return [panel.send_button, panel.cancel_button, panel.extract_button, panel.model_combo]
+    """输入卡片下沿那一行上的控件（顺序即左右顺序）。"""
+    return [panel.plus_button, panel.mode_button, panel.model_combo, panel.send_button]
 
 
 def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot, restore_app):
-    """栏够宽时仍然是一行：模型选择与发送按钮同一行、且在右端（用户明确要求过）。"""
+    """栏够宽时仍然是一行：＋ / 模式胶囊在左，模型与发送在右（用户明确要求过）。"""
     panel = _panel(qtbot, restore_app)
     panel.resize(560, 520)
     qtbot.wait(20)
@@ -143,7 +196,7 @@ def test_controls_stay_on_one_row_when_the_column_is_wide(qtbot, restore_app):
     send_y = _top_left(panel, panel.send_button)[1]
     for widget in _controls(panel):
         assert abs(_top_left(panel, widget)[1] - send_y) <= 4, "控件不在同一行"
-    assert _top_left(panel, panel.model_combo)[0] > _top_left(panel, panel.extract_button)[0]
+    assert _top_left(panel, panel.model_combo)[0] > _top_left(panel, panel.mode_button)[0]
     assert not _overlaps(panel, _controls(panel))
 
 
@@ -167,9 +220,10 @@ def test_controls_wrap_instead_of_overlapping_when_narrow(qtbot, restore_app):
         assert geometry.right() <= panel.width(), f"{widget.objectName()} 越出面板右边缘"
         assert geometry.x() >= 0
 
-    # 整组折行：动作按钮与模型下拉各自成组（模型不会被拆到与动作按钮混排）
-    assert panel.controls_row.row_of(panel.send_button) == panel.controls_row.row_of(panel.extract_button)
-    assert panel.controls_row.row_of(panel.model_combo) != panel.controls_row.row_of(panel.send_button)
+    # 整组折行：左侧（＋ / 模式胶囊）与右侧（模型 / 发送）各自成组，不会被拆开混排
+    assert panel.controls_row.row_of(panel.plus_button) == panel.controls_row.row_of(panel.mode_button)
+    assert panel.controls_row.row_of(panel.model_combo) == panel.controls_row.row_of(panel.send_button)
+    assert panel.controls_row.row_of(panel.plus_button) != panel.controls_row.row_of(panel.model_combo)
 
 
 # ── 可用模型列表：点开下拉就现取现列（用户要求"可用模型点开用列表呈现"）────

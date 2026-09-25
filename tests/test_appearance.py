@@ -461,7 +461,13 @@ def test_rendered_surfaces_let_the_backdrop_through(restore_app, qtbot, tmp_path
 
     plain = render("off")
     layered = render("translucent")
-    for label, point in (("窗口空白处", QPoint(1150, 700)), ("脚本视图", QPoint(600, 400))):
+    # 取样点必须落在**真正的空白**上：输入卡片那一带的右下角现在是发送圆点（主色不透明），
+    # 打在它上面量到的是按钮自己的蓝，看不出壁纸有没有透出来（改这一版时踩到过）。
+    for label, point in (
+        ("右列对话面板空白处", QPoint(1150, 150)),
+        ("对话记录区", QPoint(900, 300)),
+        ("脚本视图", QPoint(600, 400)),
+    ):
         a, b = plain.pixelColor(point), layered.pixelColor(point)
         delta = abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue())
         assert delta >= 12, f"{label} 与纯色模式几乎一样（差 {delta}），壁纸没有透出来"
@@ -1082,21 +1088,31 @@ def test_layout_containers_do_not_paint_their_own_background(restore_app, qtbot,
     reference_y = session_row.geometry().bottom() + 20
     reference = luminance(chat.mapTo(window, QPoint(5, reference_y)))
 
-    # 容器内的取样点都取"行内靠上的空隙"：不落在文字/控件上（容器自己是透明的，
-    # 取到的就是容器的底色）
-    spots: dict[str, QPoint] = {
+    # 纯布局容器：里面的空白必须与面板其他空白**一样亮**（容器自己不上色）
+    pure_spots: dict[str, QPoint] = {
         "会话行": session_row.mapTo(window, QPoint(5, 2)),
-        "控件行": controls_row.mapTo(
-            window,
-            QPoint((chat.extract_button.geometry().right() + chat.model_combo.geometry().left()) // 2, 2),
-        ),
         # 右列页签容器：页签条上方那条边缘
         "右列页签容器": window.right_tabs.mapTo(window, QPoint(window.right_tabs.width() // 2, 1)),
     }
-
-    for name, point in spots.items():
+    for name, point in pure_spots.items():
         got = luminance(point)
         assert abs(got - reference) <= 6, (
             f"{name} 的空白处亮度 {got:.0f}，面板其他空白处 {reference:.0f} —— "
             f"容器自己上了色，在透明模式下就是一条深色带（用户报的会话底下的黑色底色）"
         )
+
+    # **输入卡片是例外，而且必须是例外**：它是一张有名字的卡片（`#chatComposer`，
+    # 底色 bg_input），不是"放布局的纯容器" —— 参照图里输入区就是一块独立的圆角框。
+    # 所以这里反过来断言"它确实比面板底色深"：哪天它被误改成透明，这条会红。
+    controls_blank = controls_row.mapTo(
+        window,
+        QPoint(
+            (chat.mode_button.geometry().right() + chat.model_combo.geometry().left()) // 2,
+            2,
+        ),
+    )
+    card = luminance(controls_blank)
+    assert card < reference - 10, (
+        f"输入卡片里的空白亮度 {card:.0f} 与面板底色 {reference:.0f} 几乎一样 —— "
+        "输入卡片没有自己的底色（它该是一块独立卡片，不是透明的布局容器）"
+    )
