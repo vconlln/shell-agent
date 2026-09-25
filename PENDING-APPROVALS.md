@@ -420,13 +420,14 @@ httpx 缺 `socksio` 会在建客户端时就报错（原文是 `Using SOCKS prox
 is not installed`）。依赖已改成 `httpx[socks]`，报错也会翻译成"装 httpx[socks] 或临时清掉
 ALL_PROXY / HTTPS_PROXY"。
 
-另外**界面会主动指路**：地址与接口风格不匹配时，设置页直接写
-`⚠ 这个地址看着是「Anthropic 兼容」端点：接口风格请改成「Anthropic 兼容」`。
+另外**界面会主动指路**：地址与接口风格不匹配时，设置页会直接说明并**替你改对**
+（见下面「你发的 `123` 收到 404」那条 —— 当时只提示不够，你这个坑就是这么第二次踩上的）。
 
 > 早上重建后：设置 → 后端 agent → 内置 agent → API 地址填你那个、
-> **接口风格选「Anthropic 兼容」**、模型填 `deepseek-chat` 或 `deepseek-reasoner`（也可以点
-> 「检测可用模型」让它现取）→ 保存。若仍然取不到列表，提示里现在会列出**试过哪些地址**，
-> 把那行发我即可。
+> 模型填 `deepseek-chat` / `deepseek-reasoner` / `deepseek-flash`（点「检测可用模型」也能现取；
+> 我这边用你的 key 实测能列到 `deepseek-flash` 与 `deepseek-v4-pro`）→ 保存。
+> **接口风格不用你管**：地址以 `/anthropic` 结尾时它会自己选「Anthropic 兼容」。
+> 若仍然取不到列表，提示里现在会列出**试过哪些地址**，把那行发我即可。
 
 ### 内置 agent vs opencode：不是更聪明，但快、透明、依赖少；并按你要求对齐能力（2026-09-20）
 
@@ -534,6 +535,54 @@ skills/
 - 变异验证（6 条，全部转红）：撤掉 `install_ask_action` 的接线 → 两条链路用例红；撤掉 `_clamp_quote`
   → 截断用例红；把 `_apply_pending_proposal` 改成直接返回 True → 空操作用例红；撤掉折行 →
   折行用例红；把对话面板最小宽度顶回 240 → 三栏比例用例红；按 sizeHint 折行 → 折行判定用例红。
+
+### 你发的 `123` 收到 404："我模型配置好了啊" —— 你确实配好了，是**风格**那一项不对（已修）
+
+**先说结论：你的 key、地址、模型名全是对的。** 你保存的配置是
+
+```
+api_base  = https://api.deepseek.com/anthropic
+api_style = openai          ← 就这一项不对
+model     = deepseek-flash
+```
+
+`/anthropic` 那个地址只能按 Anthropic 协议说话，配上「OpenAI 兼容」风格后，实际请求打到的是
+`https://api.deepseek.com/anthropic/chat/completions` —— **这个路径在 DeepSeek 那边不存在**，
+所以是 404。而错误消息里只印了 base 地址（`…/anthropic`），那地址本身完全正确，
+你当然会觉得"我配置好了啊"。
+
+我用你的 key 挨个实测过（现在都通了）：
+
+| 组合 | 结果 |
+| --- | --- |
+| `…/anthropic` + OpenAI 风格（**你原来的**） | ✗ 404（请求打到 `/anthropic/chat/completions`） |
+| `…/anthropic` + Anthropic 风格 | ✓ 正常回答 |
+| `…/v1` + OpenAI 风格 | ✓ 正常回答 |
+| 模型名 `deepseek-flash` | ✓ 两个端点都认（列表里还有 `deepseek-v4-pro`） |
+
+修了三处（**不是让你去改配置**，是让程序不再制造这种组合）：
+
+1. **请求前就按地址对齐风格**（`api_client.resolve_style`）：地址里有一个独立成段的 `anthropic`
+   时，就按 Anthropic 协议发 —— 地址、请求体、鉴权头（`x-api-key`）三处一起对齐，
+   工具描述也按同一套协议拼。**你现在不用改任何设置，直接就能对话。**
+   改判了会在状态栏说明原因（"已按地址用「Anthropic 兼容」请求"）—— 静默改判同样让人一头雾水。
+2. **错误消息报"真正的请求地址"**，不再只报 base，并带上模型名：
+   `（请求地址：…/v1/chat/completions；模型：deepseek-flash）`；404 的建议里也补了一句
+   "地址以 /anthropic 结尾时，接口风格要选「Anthropic 兼容」"。
+3. **设置页替你把配置改对**：粘上 `/anthropic` 地址的那一刻，「接口风格」自动变成
+   「Anthropic 兼容」并写明原因；保存时再对齐一次，所以文件里不会长期躺着一份坏配置。
+   只有**地址能证明**协议时才代改（`https://api.anthropic.com/v1`、`gw.corp/anthropic-proxy/v1`
+   这些"只是看着像"的地址一律不动，只给建议 —— 改判错了会把本来能用的配置弄坏）。
+
+> 我这边用**你保存的原配置、一个字都没改**跑了一遍真实对话，回复"配置正常"，
+> 状态栏同时给出那句说明。你重启应用后就能直接用了。
+
+**这次改动的验证**：整套用例全绿（100% 与 150% 缩放各一遍）+ `--self-test` exit=0；
+新增 7 条用例（风格推断的护栏、改判后真实请求路径与鉴权头、本来就对的配置不被乱改、
+404 消息含真实地址与模型名、适配器同步风格、设置页就地改对、保存落盘一致）；
+**变异验证 7 条全部转红**：撤掉客户端对齐 → 红；`implied_style` 放宽成子串匹配 → 红；
+把"以 /v1 结尾"也当证据（会误改 `api.anthropic.com/v1`）→ 红；错误消息退回只印 base → 红；
+适配器不同步风格 → 红；设置页不代改 → 红；去掉"看着像"的建议 → 红。
 
 ## 四、如果早上你看到有东西不对
 

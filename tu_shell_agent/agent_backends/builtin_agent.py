@@ -371,6 +371,14 @@ class BuiltinAdapter:
         return kept
 
     def _ensure_client(self) -> ModelApiClient:
+        """造（或复用）HTTP 客户端，并把**实际生效**的风格同步给本适配器。
+
+        客户端会按地址就地改判风格（`api_client.resolve_style`：地址是 `.../anthropic` 却选了
+        「OpenAI 兼容」时，请求本来会打到 `/anthropic/chat/completions` 这种不存在的路径上，
+        用户实测就是这样收到 404 的）。这里必须把改判结果抄回 `self._style`：工具描述的形状
+        （OpenAI 的 `tools` vs Anthropic 的 `tools`）和工具回调消息体的形状都按它拼，
+        风格对不上就会"地址对了、协议还是错的"。
+        """
         with self._lock:
             if self._client is None:
                 self._client = self._client_factory(
@@ -379,6 +387,12 @@ class BuiltinAdapter:
                     style=self._style,
                     use_proxy=self._use_proxy,
                 )
+                effective = str(getattr(self._client, "style", "") or "")
+                if effective and effective != self._style:
+                    self._style = effective
+                note = str(getattr(self._client, "style_note", "") or "")
+                if note:
+                    self._note(note)
             return self._client
 
     def _load_history(self) -> list[dict[str, str]]:

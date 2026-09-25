@@ -1476,3 +1476,50 @@ client.chat.completions.create(model="deepseek-flash", ...,
 变异验证六条全红（越界不拦 / 绝对路径放行 / 大小不设限 / 循环不设上限 / 关掉仍发 tools /
 不执行工具调用）；其中"绝对路径"那条一开始**没转红** —— 两道守卫行为重叠，于是把断言改成
 钉住**错误信息**（模型看到"只接受相对路径"才知道怎么改），再验就红了。
+
+## 修订三十四（2026-09-20）：地址与接口风格不一致 → 不再一路 404，而是"地址说了算"
+
+**现象（用户报的第二次）**：在「模型对话」里发 `123`，回一句
+`对话失败：模型 API 返回 HTTP 404 … （地址：https://api.deepseek.com/anthropic）`。
+用户的原话是"为什么显示这个，我模型配置好了啊" —— 因为错误消息里印的 base 地址
+（`…/anthropic`）**完全正确**，用户看不出问题出在"拼出来的路径"上。
+
+**根因**（用用户的 key 逐个组合实测确认）：
+
+| base | style | 实际请求 | 结果 |
+| --- | --- | --- | --- |
+| `…/anthropic` | `openai`（用户保存的） | `/anthropic/chat/completions` | 404（该路径不存在） |
+| `…/anthropic` | `anthropic` | `/anthropic/v1/messages` | ✓ |
+| `…/v1` | `openai` | `/v1/chat/completions` | ✓ |
+
+模型名 `deepseek-flash` 与 key 都没问题（`/models` 能列到 `deepseek-flash` / `deepseek-v4-pro`）。
+修订三十只加了"界面提示"（`suggested_style` + 设置页黄字），**但没有阻止这个组合被使用**：
+配置照样存得下、请求照样发得出，于是同一个坑在另一个入口（对话）又踩了一次。
+教训写进这里：**能被自动判定的错误配置，不该只提示、不该让它在线上生效。**
+
+**改法（三层，逐层收口）**：
+
+1. `api_client.py` —— 单一收口点。新增
+   - `implied_style(base)`：**只有**"路径里独立成段的 `anthropic`"才算证据；
+     刻意**不**把"以 `/v1` 结尾"当证据（`https://api.anthropic.com/v1` 是 Anthropic 官方 SDK
+     的写法，拿它当证据会把对的地址改判成错的），也刻意不认主机名/前缀里的 anthropic
+     （`anthropic-gw.corp`、`/anthropic-proxy` 可能仍是 OpenAI 兼容的网关）；
+   - `resolve_style(base, style)`：地址能证明的优先，否则尊重用户选择；
+   - `style_mismatch_note(...)`：改判的原因（要显示给用户，静默改判同样让人一头雾水）。
+   `ModelApiClient.__init__` 就地对齐 `self.style` —— 因为**地址、请求体、鉴权头**三处都读
+   `self.style`，在这里对齐就等于"不可能再用 OpenAI 的协议去打 Anthropic 端点"。
+2. `builtin_agent._ensure_client()` —— 把生效风格**抄回 `self._style`**：工具描述的形状
+   （OpenAI `tools[].function` vs Anthropic `input_schema`）与工具回调消息体的形状都按它拼，
+   不抄回来就会"地址对了、协议还是错的"；同时把那句说明交给 `note`（状态栏看得到）。
+3. `_error_message(response, url, model)` —— 报**真正的请求地址**与模型名（原来传的是 base，
+   这正是让用户误判"配置没问题"的原因），404 的建议里补上 `/anthropic` ↔ 「Anthropic 兼容」这一条。
+   设置页 `_converge_api_style()`：粘上 `/anthropic` 地址时自动把「接口风格」改对并写明原因，
+   `save()` 前再对齐一次，坏配置不会长期留在文件里。
+
+**用例（47 → 54 条）**：风格推断的护栏表（含 `api.anthropic.com/v1`、
+`anthropic.example.com/v1`、`/anthropic-proxy/v1` 三条"不许瞎猜"）、
+改判后**真实请求路径 + `x-api-key` 头 + 不带顶层 system 的 body**、
+本来就对的三种配置不被乱改且没有多余提示、404 消息含真实地址与模型名、
+适配器层（Anthropic 流被解析成正文 ⇒ 风格确实同步进去了 + 状态栏有那句说明）、
+设置页就地改对、"看着像"时仍只给建议、保存落盘风格与地址一致。
+变异验证七条全红（含"把 `/v1` 也当证据"这条 —— 它会误改 `api.anthropic.com/v1`）。

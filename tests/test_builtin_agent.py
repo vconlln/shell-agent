@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -510,6 +511,145 @@ def test_chat_url_for_the_deepseek_anthropic_base_is_correct():
     )
 
 
+def test_implied_style_demands_a_real_anthropic_path():
+    """只有"路径里独立成段的 anthropic"才算证据 —— 别的写法一律不许自动改判。"""
+    from tu_shell_agent.agent_backends.api_client import implied_style
+
+    assert implied_style("https://api.deepseek.com/anthropic") == "anthropic"
+    assert implied_style("https://api.deepseek.com/anthropic/") == "anthropic"
+    assert implied_style("https://api.deepseek.com/anthropic/v1") == "anthropic"
+    assert implied_style("https://gw.example.com/v1/anthropic") == "anthropic"
+
+    # 这几条是"不许瞎猜"的护栏：改判错了会把本来能用的配置弄坏
+    assert implied_style("https://api.anthropic.com/v1") == "", (
+        "Anthropic 官方 SDK 的写法同样以 /v1 结尾，不能因此改判成 OpenAI 风格"
+    )
+    assert implied_style("https://anthropic.example.com/v1") == "", "主机名里带 anthropic 不算证据"
+    assert implied_style("https://gw.example.com/anthropic-proxy/v1") == "", "只是名字带 anthropic"
+    assert implied_style("") == "" and implied_style("https://api.deepseek.com/v1") == ""
+
+
+def test_mismatched_style_is_reconciled_before_the_request_goes_out():
+    """地址能证明风格时**按地址发**：用户实测"地址对、风格错"就是一路 404。
+
+    这条钉的是"线上真实发生的事"：不只是猜一个建议，而是请求真的打到 `/v1/messages`、
+    真的带 Anthropic 的鉴权头 —— 否则界面上怎么提示都还是会 404。
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["key_header"] = request.headers.get("x-api-key")
+        seen["auth_header"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "好"}}),
+        )
+
+    client = ModelApiClient(
+        base_url="https://api.deepseek.com/anthropic",     # 用户的地址
+        api_key="sk-test",
+        style="openai",                                    # 用户留下的风格
+        transport=httpx.MockTransport(handler),
+    )
+    completion = client.stream_chat(model="deepseek-flash", messages=[{"role": "user", "content": "在吗"}])
+
+    assert completion.content == "好"
+    assert seen["path"] == "/anthropic/v1/messages", f"请求没有按地址的协议发：{seen['path']}"
+    assert seen["key_header"] == "sk-test" and seen["auth_header"] is None
+    assert "system" not in seen["body"], "Anthropic 风格的 system 是顶层字段，不能塞进 messages"
+    assert client.style == "anthropic" and client.style_requested == "openai"
+    assert client.style_note, "改判了就要有话说（静默改判同样让人一头雾水）"
+    assert "Anthropic 兼容" in client.style_note and "接口风格" in client.style_note
+
+
+def test_a_consistent_config_is_left_alone():
+    """本来就是对的配置不许被"顺手改判"，也不该多出一句提示。"""
+    from tu_shell_agent.agent_backends.api_client import ModelApiClient as Client
+
+    for base, style, path in (
+        ("https://api.deepseek.com/v1", "openai", "/v1/chat/completions"),
+        ("https://api.anthropic.com/v1", "anthropic", "/v1/messages"),
+        ("https://api.anthropic.com", "anthropic", "/v1/messages"),
+    ):
+        seen: dict = {}
+
+        def handler(request: httpx.Request, _seen=seen) -> httpx.Response:
+            _seen["path"] = request.url.path
+            return httpx.Response(200, json={})
+
+        client = Client(
+            base_url=base, api_key="k", style=style, transport=httpx.MockTransport(handler)
+        )
+        assert client.style == style, f"{base} 的风格被改判了"
+        assert client.style_note == "", f"{base} 多出了一句话：{client.style_note}"
+        assert chat_completions_url(client.base_url, client.style).endswith(path)
+
+
+def test_404_message_names_the_real_request_url_and_the_model():
+    """404 要报**真正的请求地址**（不是 base）与模型名 —— 用户就是被这条坑住的。
+
+    只印 base 时，`https://api.deepseek.com/anthropic` 看着完全正确，用户只会说
+    "我模型配置好了啊"；印出 `/anthropic/chat/completions` 才能一眼看出路径不对。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "Not Found"}})
+
+    client = ModelApiClient(
+        base_url="https://api.deepseek.com/v1",
+        api_key="sk-test",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ApiError) as error:
+        client.stream_chat(
+            model="deepseek-flash", messages=[{"role": "user", "content": "x"}], retries=0
+        )
+    message = str(error.value)
+    assert "https://api.deepseek.com/v1/chat/completions" in message, message
+    assert "deepseek-flash" in message, "要报出用的是哪个模型"
+    assert "/anthropic" in message, "404 的处理建议里要提一句 /anthropic 该配 Anthropic 风格"
+
+
+def test_adapter_chat_survives_a_mismatched_style_and_says_what_it_did():
+    """适配器这一层：改判后的风格必须**同步进来**（工具协议/消息体都按它拼），并且要出声。
+
+    用户的原始现象就是在这个入口上：对话发出去 → 404。这里连"界面能看到那句说明"一起钉住。
+    """
+    seen: dict = {}
+    notices: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["tools"] = "tools" in json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "在"}}),
+        )
+
+    adapter = BuiltinAdapter(
+        base_url="https://api.deepseek.com/anthropic",
+        api_key="sk-test",
+        style="openai",
+        model="deepseek-flash",
+        note=notices.append,
+        tools=True,
+        client_factory=lambda **kwargs: ModelApiClient(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+    session = adapter.start("/tmp/run", "agent", "deepseek-flash")
+    reply = adapter.chat(session, "在吗", 30_000)
+
+    assert reply == "在", "Anthropic 风格的流没被当成正文解析 —— 说明风格没同步进适配器"
+    assert seen["path"] == "/anthropic/v1/messages"
+    assert adapter._style == "anthropic", "适配器还在按 OpenAI 拼请求体/工具描述"
+    assert any("Anthropic 兼容" in line for line in notices), f"界面上一句话都没有：{notices}"
+
+
 def test_model_list_falls_back_to_the_openai_compatible_root():
     """Anthropic 兼容端点**没有** `/v1/models`：要退到同一站点的 OpenAI 兼容 `/models`。
 
@@ -602,21 +742,68 @@ def test_socks_proxy_without_socksio_gives_an_actionable_error(monkeypatch):
     assert "ALL_PROXY" in message or "环境变量" in message
 
 
-def test_settings_page_warns_when_the_style_does_not_match_the_address(qtbot):
-    """地址与接口风格不匹配时，设置页要**明确指出来**（用户就是这么卡住的）。"""
+def test_settings_page_fixes_the_style_when_the_address_proves_it(qtbot):
+    """地址能证明协议时，设置页**就地改对**并说明原因（用户就是这么卡住的）。
+
+    只提示是不够的：用户看到的是黄字提示 + 一句 HTTP 404，然后说"我模型配置好了啊"。
+    地址是用户自己填的，比下拉框更能说明这个端点说哪种协议 —— 以地址为准，并把改动作说出来。
+    """
     from tu_shell_agent.ui.pages.settings_page import SettingsPage
 
     page = SettingsPage()
     qtbot.addWidget(page)
     page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_style_combo.setCurrentIndex(page.api_style_combo.findData("openai"))
 
     page.api_base_edit.setText("https://api.deepseek.com/anthropic")
-    assert "Anthropic" in page.api_style_hint.text()
-    assert "⚠" in page.api_style_hint.text(), "不匹配时必须显眼地提示"
 
+    assert page.api_style_combo.currentData() == "anthropic", "风格没有跟着地址改"
+    hint = page.api_style_hint.text()
+    assert "Anthropic" in hint and "已按地址改为" in hint, hint
+    assert "⚠" not in hint, "已经改对了就不该再报警"
+
+
+def test_settings_page_still_warns_when_the_address_only_looks_like_one(qtbot):
+    """只能"看着像"的时候**不许自动改判**，只给建议（`https://api.anthropic.com/v1` 就是例子）。"""
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_base_edit.setText("https://api.anthropic.com")
     page.api_style_combo.setCurrentIndex(page.api_style_combo.findData("anthropic"))
     page._refresh_api_style_hint()
-    assert "⚠" not in page.api_style_hint.text(), "改成匹配之后不该再报警"
+    assert page.api_style_combo.currentData() == "anthropic"
+    assert "⚠" not in page.api_style_hint.text(), "这条地址本来就是 Anthropic 风格，不该报警"
+
+    # 换成"以 /v1 结尾 + Anthropic 风格"：有歧义，只提示不代改
+    page.api_base_edit.setText("https://api.example.com/v1")
+    assert page.api_style_combo.currentData() == "anthropic", "有歧义的地址不许自动改判"
+    assert "⚠" in page.api_style_hint.text(), "看着像的地址要给建议"
+
+
+def test_settings_save_persists_the_corrected_style(qtbot, tmp_path):
+    """落盘时的风格必须与地址一致 —— 否则这份坏配置会一直躺在文件里，下次开界面照样 404。"""
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+    from tu_shell_agent.ui.settings import AppSettings
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    # 用 load() 造一份"用户机器上真实存在的那份坏配置"：地址是 Anthropic 端点、风格却是 OpenAI
+    settings = AppSettings.load(tmp_path / "settings.json")
+    settings.run_root = str(tmp_path / "runs")
+    settings.agent_backend = "builtin"
+    settings.api_provider = "deepseek-anthropic"
+    settings.api_base = "https://api.deepseek.com/anthropic"
+    settings.api_style = "openai"
+    page.set_settings(settings)
+    assert page.api_style_combo.currentData() == "anthropic", "reload() 没有对齐风格"
+
+    path = page.save()
+    assert path is not None
+    saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert saved["api_style"] == "anthropic", saved.get("api_style")
+    assert saved["api_base"] == "https://api.deepseek.com/anthropic"
 
 
 # ── 与 opencode 对齐的三件事：超时、重试、上下文预算 ────────────────────

@@ -21,13 +21,10 @@ from typing import Any
 from dataclasses import dataclass
 
 from ...types import DetectedTool
-from ..api_client import ApiError, ModelApiClient
+from ..api_client import STYLE_ANTHROPIC, STYLE_OPENAI, ApiError, ModelApiClient, implied_style
 from ..builtin_agent import BuiltinAdapter
 from ..cli_agent import ProbeResult
 from ..descriptor import BackendDescriptor
-
-STYLE_OPENAI = "openai"
-STYLE_ANTHROPIC = "anthropic"
 
 BASE_HINT = "例如 https://api.deepseek.com/v1（OpenAI 兼容）或 https://api.deepseek.com/anthropic（Anthropic 兼容）"
 KEY_HINT = "留空则读环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY"
@@ -39,19 +36,25 @@ STYLE_HINT = (
 
 
 def suggested_style(base_url: str, current: str = "") -> str:
-    """按地址猜接口风格；猜不出来返回空串（**不改**用户已经选好的值）。
+    """按地址猜接口风格（**给界面提示用**）；猜不出来返回空串。
 
-    判据很朴素但够用：路径里出现 `/anthropic` 就是 Anthropic 兼容端点
-    （DeepSeek、智谱等都提供这种"Anthropic 兼容"入口，方便直接用 Claude 的 SDK）。
+    判据分两档，严的那一档与"自动改判"共用同一个实现（`api_client.implied_style`），
+    免得两处规则各自漂移：
+
+    1. 路径里有独立成段的 `anthropic` → Anthropic 兼容（**无歧义**，`resolve_style` 也用它）；
+    2. 以 `/v1` 结尾或名字里带 openai → OpenAI 兼容（**只是建议**：`https://api.anthropic.com/v1`
+       同样以 /v1 结尾，所以这一档不能拿来自动改判用户的选择）。
     """
+    strict = implied_style(base_url)
+    if strict:
+        return strict
     text = (base_url or "").strip().lower().rstrip("/")
     if not text:
         return ""
-    if "/anthropic" in text:
-        return STYLE_ANTHROPIC
     if text.endswith("/v1") or "/v1/" in text or "openai" in text:
         return STYLE_OPENAI
     return ""
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderPreset:

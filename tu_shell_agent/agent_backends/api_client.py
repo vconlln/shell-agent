@@ -44,6 +44,57 @@ LIST_TIMEOUT_S = 20.0
 THINKING_HEADER = "—— 思考过程 ——"
 ANSWER_HEADER = "—— 回复 ——"
 
+STYLE_OPENAI = "openai"
+STYLE_ANTHROPIC = "anthropic"
+
+# 风格的显示名只在这里写一次：错误消息、界面提示、设置页都用它
+STYLE_LABELS = {STYLE_OPENAI: "OpenAI 兼容", STYLE_ANTHROPIC: "Anthropic 兼容"}
+
+
+def style_label(style: str) -> str:
+    return STYLE_LABELS.get(style, STYLE_LABELS[STYLE_OPENAI])
+
+
+def implied_style(base_url: str) -> str:
+    """地址**本身能证明**的接口风格；证明不了就返回空串。
+
+    判据只有一条：路径里有一个独立成段的 `anthropic`。DeepSeek、智谱这类"Anthropic 兼容"
+    入口都长这样（`https://api.deepseek.com/anthropic`），见到它就只能按 Anthropic 协议说话。
+
+    **为什么要求"独立成段"**：`/anthropic-proxy`、`anthropic-gw.corp` 只是名字里带 anthropic
+    的网关，可能仍是 OpenAI 兼容的 —— 拿名字当证据会改错用户的选择。
+
+    **故意不把"以 /v1 结尾"当判据**：`https://api.anthropic.com/v1` 是 Anthropic 官方 SDK 的
+    标准写法，却也以 /v1 结尾；拿它当证据就会把 Anthropic 地址改判成 OpenAI 风格。
+    那条只用于**界面提示**（`backends/builtin.suggested_style`），不用于自动改判。
+    """
+    text = (base_url or "").strip().lower()
+    if not text:
+        return ""
+    # 只看路径，不看协议与主机名：`https://anthropic.example.com/v1` 不该被认成 Anthropic 端点
+    rest = text.split("://", 1)[-1]
+    path = rest[rest.find("/") :] if "/" in rest else ""
+    segments = [part for part in path.split("/") if part]
+    return STYLE_ANTHROPIC if STYLE_ANTHROPIC in segments else ""
+
+
+def resolve_style(base_url: str, style: str) -> str:
+    """算这次请求**实际**要用哪种风格：地址能证明的优先，否则尊重用户选的。"""
+    return implied_style(base_url) or (
+        STYLE_ANTHROPIC if style == STYLE_ANTHROPIC else STYLE_OPENAI
+    )
+
+
+def style_mismatch_note(base_url: str, requested: str, effective: str) -> str:
+    """风格被地址改判时给用户的那句话（空串 = 没改判）。"""
+    if requested == effective:
+        return ""
+    return (
+        f"接口风格与地址不一致：地址 {base_url} 是「{style_label(effective)}」端点，"
+        f"本次已按地址用「{style_label(effective)}」请求；"
+        f"设置里的「接口风格」改成「{style_label(effective)}」即可永久生效。"
+    )
+
 
 class ApiError(RuntimeError):
     """网络/协议/权限错误，消息直接可以显示给用户（含"该怎么办"）。"""
@@ -155,8 +206,14 @@ def _model_names(payload: Any) -> list[str]:
     return names
 
 
-def _error_message(response: httpx.Response, base_url: str) -> str:
-    """把状态码翻译成"该怎么办" —— 只说"HTTP 401"没人知道要做什么。"""
+def _error_message(response: httpx.Response, url: str, model: str = "") -> str:
+    """把状态码翻译成"该怎么办" —— 只说"HTTP 401"没人知道要做什么。
+
+    **必须报真正的请求地址**（不是 base）：用户实测报过"我模型配置好了啊" —— 界面上只打印
+    base `https://api.deepseek.com/anthropic`，那地址本身是对的，用户根本看不出问题出在
+    "拼出来的路径"（`/anthropic/chat/completions`，不存在的路径）。把实际请求的 URL 和模型名
+    一起写出来，用户才能一眼对上"到底打到哪儿去了"。
+    """
     status = response.status_code
     detail = ""
     try:
@@ -173,12 +230,16 @@ def _error_message(response: httpx.Response, base_url: str) -> str:
     hints = {
         401: "API key 不对或没带上：检查「设置 → 内置 agent」里的 API key。",
         403: "这个 key 没有访问该模型的权限（或在当前地区不可用）。",
-        404: "地址或模型名不对：确认 API 地址（含 /v1）与模型名。",
+        404: (
+            "地址或模型名不对：确认 API 地址与模型名；地址以 /anthropic 结尾时，"
+            "「接口风格」要选「Anthropic 兼容」。"
+        ),
         429: "触发限流或余额不足：稍后再试，或换一个模型。",
     }
     hint = hints.get(status, "检查 API 地址、key 与模型名。")
     tail = f"：{detail}" if detail else ""
-    return f"模型 API 返回 HTTP {status}{tail}\n{hint}（地址：{base_url}）"
+    where = f"（请求地址：{url}" + (f"；模型：{model}" if model else "") + "）"
+    return f"模型 API 返回 HTTP {status}{tail}\n{hint}\n{where}"
 
 
 def _iter_sse_lines(response: httpx.Response) -> Iterator[tuple[str, str]]:
@@ -335,7 +396,13 @@ def _anthropic_tool_calls(events: list[dict[str, Any]]) -> list[Any]:
 
 
 class ModelApiClient:
-    """一次配置对应一个客户端（base / key / style）。线程安全：显式 cancel 用事件。"""
+    """一次配置对应一个客户端（base / key / style）。线程安全：显式 cancel 用事件。
+
+    **风格在这里就地对齐地址**（`resolve_style`）：请求地址、请求体、请求头三处都按
+    `self.style` 走，所以只要这里对齐了，就不可能出现"用 OpenAI 的协议去打 Anthropic 端点"
+    这种打到不存在路径上的组合。改判了就把原因留在 `self.style_note` 里，由上层显示给用户 ——
+    静默改判同样会让人一头雾水（用户实测："我模型配置好了啊"）。
+    """
 
     def __init__(
         self,
@@ -349,7 +416,9 @@ class ModelApiClient:
     ) -> None:
         self.base_url = (base_url or "").strip()
         self.api_key = api_key or ""
-        self.style = "anthropic" if style == "anthropic" else "openai"
+        self.style_requested = STYLE_ANTHROPIC if style == STYLE_ANTHROPIC else STYLE_OPENAI
+        self.style = resolve_style(self.base_url, self.style_requested)
+        self.style_note = style_mismatch_note(self.base_url, self.style_requested, self.style)
         self.timeout_s = timeout_s
         self.use_proxy = bool(use_proxy)
         try:
@@ -520,7 +589,7 @@ class ModelApiClient:
             ) as response:
                 if response.status_code >= 400:
                     response.read()
-                    error = ApiError(_error_message(response, self.base_url))
+                    error = ApiError(_error_message(response, url, model))
                     error.status = response.status_code        # 供重试判断用
                     raise error
                 tool_buffer: dict[int, dict[str, Any]] = {}

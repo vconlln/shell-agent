@@ -39,6 +39,7 @@ from ...agent_backends import (
     resolve_command,
 )
 # 接口风格那两行的说明语由内置后端自己的文件提供（加新风格时不用改这个文件）
+from ...agent_backends.api_client import implied_style, style_label
 from ...agent_backends.backends.builtin import (
     PROVIDERS,
     STYLE_HINT,
@@ -161,7 +162,10 @@ class SettingsPage(QWidget):
         self.api_style_combo.addItem("OpenAI 兼容（DeepSeek / OpenAI / 本地服务）", "openai")
         self.api_style_combo.addItem("Anthropic 兼容", "anthropic")
         self.api_style_combo.setToolTip(STYLE_HINT)
+        # 重入旗标：按地址改判风格时会写回下拉框，而写回又会同步触发这一串回调
+        self._api_style_converging = False
         self.api_style_combo.currentIndexChanged.connect(lambda _index: self._refresh_backend_hint())
+        self.api_style_combo.currentIndexChanged.connect(lambda _index: self._refresh_api_style_hint())
         self.api_base_edit.textChanged.connect(lambda _text: self._refresh_api_style_hint())
         self.api_style_hint = QLabel()
         self.api_style_hint.setObjectName("apiStyleHint")
@@ -414,6 +418,9 @@ class SettingsPage(QWidget):
         self.api_tools_check.setChecked(bool(getattr(settings, "api_tools", True)))
         self.api_proxy_check.setChecked(bool(getattr(settings, "api_use_proxy", True)))
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
+        # 风格**先**按保存的值铺回控件，**再**按地址对齐（顺序不能反：反过来会被保存的旧值改回去）
+        index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
+        self.api_style_combo.setCurrentIndex(index if index >= 0 else 0)
         self.skills_dir_edit.setText(str(getattr(settings, "skills_dir", "") or ""))
         self.enabled_skills_edit.setText(str(getattr(settings, "enabled_skills", "") or ""))
         # 只填空着的地址（已保存的值优先），并让候选来自这个服务商
@@ -421,8 +428,6 @@ class SettingsPage(QWidget):
         self._refresh_api_style_hint()
         self._refresh_skills_hint()
         self.api_key_edit.setText(str(getattr(settings, "api_key", "") or ""))
-        index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
-        self.api_style_combo.setCurrentIndex(index if index >= 0 else 0)
         self.opencode_path_edit.setText(settings.opencode_path)
         self.bash_path_edit.setText(settings.bash_path)
         self.shellcheck_path_edit.setText(settings.shellcheck_path)
@@ -612,26 +617,58 @@ class SettingsPage(QWidget):
         worker.failed.connect(on_failed)
         track(worker)      # 托管：引用被覆盖 / 退出时还在跑都会让 Qt abort（见 ui/workers.py）
 
-    def _refresh_api_style_hint(self) -> None:
-        """地址与接口风格不匹配时**明确指出来**。
+    def _refresh_api_style_hint(self, notice: str = "") -> None:
+        """地址与接口风格不匹配时**明确指出来**，能证明的**直接改对**。
 
-        用户实测踩到：地址填 `https://api.deepseek.com/anthropic`（Anthropic 兼容端点）
-        而风格留在默认的「OpenAI 兼容」—— 于是请求打到 `/anthropic/chat/completions` 这种
-        不存在的路径上，"检测可用模型"一直转圈。地址本身已经说明该选哪一个，界面就该说出来。
+        用户实测踩到两次：地址填 `https://api.deepseek.com/anthropic`（Anthropic 兼容端点）而
+        风格留在默认的「OpenAI 兼容」—— 请求打到 `/anthropic/chat/completions` 这种不存在的
+        路径上。第一次表现为"检测可用模型一直转圈"，第二次表现为对话里一句 HTTP 404，而
+        错误消息里只印了地址（那地址本身没错），用户看到的是"我模型配置好了啊"。
+        所以：地址能证明协议时**就地改对**（`_converge_api_style`），只能"看着像"时给建议。
         """
+        if self._api_style_converging:
+            return
         base = self.api_base_edit.text().strip()
-        current = str(self.api_style_combo.currentData() or "openai")
-        suggestion = suggested_style(base, current)
         if not base:
             self.api_style_hint.setText(STYLE_HINT)
             return
+        notice = notice or self._converge_api_style()
+        current = str(self.api_style_combo.currentData() or "openai")
+        if implied_style(base):
+            # 地址已经说明协议，风格已被对齐：这里没有歧义要提示，只说改了什么
+            self.api_style_hint.setText(notice or STYLE_HINT)
+            return
+        suggestion = suggested_style(base, current)
         if suggestion and suggestion != current:
-            label = "Anthropic 兼容" if suggestion == "anthropic" else "OpenAI 兼容"
+            label = style_label(suggestion)
             self.api_style_hint.setText(
-                f"⚠ 这个地址看着是「{label}」端点：接口风格请改成「{label}」。{STYLE_HINT}"
+                f"⚠ 这个地址看着是「{label}」端点：接口风格建议改成「{label}」。{STYLE_HINT}"
             )
             return
-        self.api_style_hint.setText(STYLE_HINT)
+        self.api_style_hint.setText(notice or STYLE_HINT)
+
+    def _converge_api_style(self) -> str:
+        """地址能证明接口风格时，把「接口风格」改成地址要求的那个；返回对用户说的那句话。
+
+        没改（或改不了）就返回空串。**改判要说出来** —— 静默改动和静默不改一样让人一头雾水。
+        """
+        base = self.api_base_edit.text().strip()
+        implied = implied_style(base)
+        if not implied or implied == str(self.api_style_combo.currentData() or ""):
+            return ""
+        index = self.api_style_combo.findData(implied)
+        if index < 0:
+            return ""
+        # 改下拉框会再触发一次本函数（信号是同步的）：用旗标掐掉那一层重入
+        self._api_style_converging = True
+        try:
+            self.api_style_combo.setCurrentIndex(index)
+        finally:
+            self._api_style_converging = False
+        return (
+            f"地址 {base} 是「{style_label(implied)}」端点：接口风格已按地址改为"
+            f"「{style_label(implied)}」。"
+        )
 
     def _on_api_provider_changed(self) -> None:
         """用户**主动**选了服务商：把地址、风格、模型候选一起填好（这是最容易填错的三处）。"""
@@ -994,6 +1031,11 @@ class SettingsPage(QWidget):
 
     def save(self) -> Path | None:
         """控件 → 绑定对象 → 写回它 load() 时记住的文件；失败只报错不抛（界面不能因写盘失败炸掉）。"""
+        # 落盘前再对齐一次：地址能证明协议时，存进去的风格必须与地址一致 ——
+        # 否则这份"地址对、风格错"的配置会一直躺在文件里，下次开界面照样 404
+        notice = self._converge_api_style()
+        if notice:
+            self._refresh_api_style_hint(notice)
         settings = self.collect()
         try:
             settings.save()
