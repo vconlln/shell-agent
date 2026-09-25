@@ -850,3 +850,220 @@ def test_controller_seeds_skills_into_the_default_dir_when_it_is_missing(qtbot, 
 
     assert config["skills_dir"] == str(target)
     assert (target / "shell-strict" / "SKILL.md").is_file(), "内置技能没有被写出来"
+
+
+# ── 用户给的那份官方示例：DeepSeek + thinking + 取不到列表时的候选 ──────
+
+
+def test_provider_presets_fill_address_style_and_candidates(qtbot):
+    """选服务商就把**地址 + 风格 + 模型候选**一起填好（这三处最容易填错）。"""
+    from tu_shell_agent.agent_backends.backends.builtin import preset_models, suggest_provider
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    assert suggest_provider("https://api.deepseek.com") == "deepseek"
+    assert suggest_provider("https://api.deepseek.com/anthropic") == "deepseek-anthropic"
+    assert preset_models("deepseek")[:3] == ["deepseek-chat", "deepseek-reasoner", "deepseek-flash"]
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_provider_combo.setCurrentIndex(page.api_provider_combo.findData("deepseek"))
+
+    assert page.api_base_edit.text() == "https://api.deepseek.com"
+    assert page.api_style_combo.currentData() == "openai"
+    items = [page.model_combo.itemText(i) for i in range(page.model_combo.count())]
+    assert "deepseek-flash" in items, f"候选里没有官方示例用到的模型：{items}"
+    assert "gpt-4o" not in items, "内置 agent 的候选不该把别的服务商的模型混进来"
+
+
+def test_model_candidates_survive_a_failed_list_request(qtbot):
+    """取不到真实列表时要给候选 —— 用户要的是"能选一个模型"，不是一句失败原因。"""
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_provider_combo.setCurrentIndex(page.api_provider_combo.findData("deepseek"))
+    page.model_combo.clear()
+    page.model_combo.addItem("", "")
+
+    # 直接走"取列表失败"的那条回调路径
+    from tu_shell_agent.ui.engine_worker import ApiModelsWorker
+
+    class _Failing(ApiModelsWorker):
+        def __init__(self, api, parent=None):      # noqa: D107 - 替身
+            super().__init__(api, parent)
+
+        def start(self):                            # noqa: D102 - 替身：立刻报失败
+            self.failed.emit("连不上模型 API（https://api.deepseek.com）")
+
+    monkey = _Failing
+    import tu_shell_agent.ui.engine_worker as worker_module
+
+    original = worker_module.ApiModelsWorker
+    worker_module.ApiModelsWorker = monkey
+    try:
+        page._refresh_models()
+    finally:
+        worker_module.ApiModelsWorker = original
+
+    items = [page.model_combo.itemText(i) for i in range(page.model_combo.count())]
+    assert "deepseek-chat" in items, f"失败时没有给候选：{items}"
+    assert "候选" in page.model_hint.text()
+
+
+def test_thinking_flag_lands_in_the_request_body():
+    """用户给的官方示例用的是 `reasoning_effort="high"` + `thinking={"type":"enabled"}`。
+
+    打开「深度思考」时这两个字段要真的进请求体（其它时候不加：别的服务商可能不认）。
+    """
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(reasoning="想", content="答")),
+        )
+
+    adapter = _adapter(handler, thinking=True)
+    session = adapter.start("/tmp/run", "agent", "deepseek-flash")
+    adapter.chat(session, "在吗", 30_000)
+
+    assert payloads[-1].get("reasoning_effort") == "high"
+    assert payloads[-1].get("thinking") == {"type": "enabled"}
+
+    # 没打开时不许加（否则别的服务商可能直接 400）
+    adapter_plain = _adapter(handler, thinking=False)
+    session = adapter_plain.start("/tmp/run", "agent", "deepseek-flash")
+    adapter_plain.chat(session, "在吗", 30_000)
+    assert "thinking" not in payloads[-1] and "reasoning_effort" not in payloads[-1]
+
+
+def test_proxy_can_be_turned_off(monkeypatch):
+    """本机代理不通时，用户必须能关掉它 —— 否则每个请求都卡在"连不上代理"。
+
+    （国内机器上 ALL_PROXY/HTTPS_PROXY 很常见；关掉即直连。）
+    """
+    captured: dict = {}
+    import httpx as httpx_module
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(httpx_module, "Client", _FakeClient)
+    ModelApiClient(base_url="https://api.deepseek.com", api_key="k", use_proxy=False)
+    assert captured.get("trust_env") is False, "关掉代理时没有设 trust_env=False"
+
+    ModelApiClient(base_url="https://api.deepseek.com", api_key="k", use_proxy=True)
+    assert captured.get("trust_env") is True, "默认应当跟系统代理走"
+
+
+def test_settings_page_passes_thinking_and_proxy_into_the_api_config(qtbot):
+    """设置页把两个勾选框传进 api 配置（不传的话用户勾了也没用）。"""
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_thinking_check.setChecked(True)
+    page.api_proxy_check.setChecked(False)
+
+    config = page._api_config()
+    assert config["thinking"] is True and config["use_proxy"] is False
+
+
+def test_saved_provider_drives_the_candidates_on_reload(qtbot, tmp_path):
+    """打开设置页（不碰下拉）时候选也要来自**已保存的服务商**，不能是所有服务商的并集。
+
+    这条守的是"用户没动过下拉"那条路径：`reload()` → `_apply_backend_model_choices()`。
+    把候选来源改成并集时，一个 DeepSeek 用户会在候选里看到 gpt-4o / claude-*。
+    """
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+    from tu_shell_agent.ui.settings import AppSettings
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.set_settings(
+        AppSettings(
+            run_root=str(tmp_path / "runs"),
+            templates_dir=str(tmp_path / "tpl"),
+            agent_backend="builtin",
+            api_provider="deepseek",
+            api_base="https://api.deepseek.com",
+        )
+    )
+
+    items = [page.model_combo.itemText(i) for i in range(page.model_combo.count())]
+    assert "deepseek-flash" in items
+    assert "gpt-4o" not in items and "claude-sonnet-4-5" not in items, (
+        f"候选里混进了别的服务商的模型：{items}"
+    )
+
+
+def test_provider_defaults_fill_only_empty_fields(qtbot, tmp_path):
+    """打开设置页时只填**空着的**地址；用户手改过的地址不许被预设改回去。
+
+    （踩过：预设下拉默认就停在第一项，用户不重新点一下 → 地址栏是空的。
+    现在 reload 时按选中的服务商补默认值，但已保存的值优先。）
+    """
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+    from tu_shell_agent.ui.settings import AppSettings
+
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.set_settings(AppSettings(agent_backend="builtin", api_provider="deepseek"))
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    assert page.api_base_edit.text() == "https://api.deepseek.com", "空地址没有按预设补上"
+
+    # 用户改过地址并**保存**（collect 写回设置对象）：再打开一次不许被预设改回去。
+    # 注意：`reload()` 的语义就是"丢弃未保存的编辑"，所以必须先 collect —— 未保存的改动
+    # 被回退是设计如此，不是这个用例要保护的东西。
+    page.api_base_edit.setText("https://my-proxy.internal/v1")
+    page.collect()
+    page.reload()
+    assert page.api_base_edit.text() == "https://my-proxy.internal/v1", (
+        "已保存的地址被服务商预设覆盖了"
+    )
+
+    # 「自定义」预设不做任何事
+    page.api_provider_combo.setCurrentIndex(page.api_provider_combo.findData("custom"))
+    page._apply_provider_defaults(force=True)
+    assert page.api_base_edit.text() == "https://my-proxy.internal/v1"
+
+
+def test_api_settings_round_trip_through_the_settings_file(qtbot, tmp_path):
+    """新增的 API 设置（服务商/深度思考/代理/技能）要能存下去、读回来。
+
+    这一条是这类字段的常规事故：界面能勾、保存没写、重启就忘（用户会以为"设置没生效"）。
+    """
+    from tu_shell_agent.ui.pages.settings_page import SettingsPage
+    from tu_shell_agent.ui.settings import AppSettings
+
+    path = tmp_path / "settings.json"
+    page = SettingsPage()
+    qtbot.addWidget(page)
+    page.set_settings(AppSettings.defaults_for(path))
+    page.backend_combo.setCurrentIndex(page.backend_combo.findData("builtin"))
+    page.api_provider_combo.setCurrentIndex(page.api_provider_combo.findData("deepseek"))
+    page._on_api_provider_changed()
+    page.api_key_edit.setText("sk-test")
+    page.api_thinking_check.setChecked(True)
+    page.api_proxy_check.setChecked(False)
+    page.enabled_skills_edit.setText("shell-strict")
+    saved = page.collect()
+    saved.save()
+
+    loaded = AppSettings.load(path)
+    assert loaded.agent_backend == "builtin"
+    assert loaded.api_provider == "deepseek"
+    assert loaded.api_base == "https://api.deepseek.com"
+    assert loaded.api_key == "sk-test"
+    assert loaded.api_thinking is True
+    assert loaded.api_use_proxy is False
+    assert loaded.enabled_skills == "shell-strict"

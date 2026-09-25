@@ -608,6 +608,8 @@ class RunController(QObject):
             "model": self._config_from_ui().model,
             "skills_dir": skills_dir,
             "enabled_skills": str(getattr(settings, "enabled_skills", "") or "").strip(),
+            "thinking": bool(getattr(settings, "api_thinking", False)),
+            "use_proxy": bool(getattr(settings, "api_use_proxy", True)),
         }
 
     def _start_api_model_list(self, chat: Any) -> None:
@@ -629,7 +631,29 @@ class RunController(QObject):
                 chat.set_status("模型 API 返回了空列表：确认该 key 有可用的模型，或直接手输模型名。")
 
         worker.done.connect(on_done)
-        worker.failed.connect(lambda message: chat.set_status(f"取可用模型失败：{message}"))
+
+        def on_api_failed(message: str) -> None:
+            """取不到真实列表时给**候选**：用户要的是"能选一个模型"。
+
+            候选来自服务商预设（按地址反查），是本地常量 —— 代理不通、权限不够、
+            端点差异都拦不住它。
+            """
+            from ..agent_backends.backends.builtin import preset_models
+
+            fallback = preset_models(
+                str(getattr(self.settings, "api_provider", "") or ""),
+                str(getattr(self.settings, "api_base", "") or ""),
+            )
+            if fallback:
+                chat.set_models(fallback)
+                chat.set_status(
+                    f"取模型列表失败：{message}（已按服务商预设给出候选：{'、'.join(fallback)}，"
+                    "可直接选择一个或手输）"
+                )
+            else:
+                chat.set_status(f"取可用模型失败：{message}（可直接手输模型名）")
+
+        worker.failed.connect(on_api_failed)
         self._models_worker = worker
         track(worker)
 

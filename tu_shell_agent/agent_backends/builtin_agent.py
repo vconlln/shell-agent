@@ -70,6 +70,8 @@ class BuiltinAdapter:
         skills_dir: str = "",
         enabled_skills: str = "",
         max_history_chars: int = MAX_HISTORY_CHARS,
+        thinking: bool = False,
+        use_proxy: bool = True,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
@@ -82,6 +84,10 @@ class BuiltinAdapter:
         # 上下文预算：把历史裁到这么多字符以内（roughly tokens×3）。超了从最旧的开始丢，
         # 并留一句"更早的已省略" —— opencode 那边由 serve 自己管窗口，这一路得自己管。
         self._max_history_chars = int(max_history_chars)
+        # 深度思考：按用户给的官方示例加 reasoning_effort / thinking 参数（见 api_client）
+        self._thinking = bool(thinking)
+        # 是否跟系统代理走（本机代理坏掉时可以关掉，见 ModelApiClient）
+        self._use_proxy = bool(use_proxy)
         self._client_factory = client_factory or ModelApiClient
         self._client: ModelApiClient | None = None
         self._lock = threading.Lock()
@@ -226,6 +232,7 @@ class BuiltinAdapter:
                 # 每次调用的超时由引擎给（生成超时 / 对话超时）—— 与命令行后端一致，
                 # 不再固定用客户端那个 300 秒默认值。
                 timeout_s=max(timeout_ms, 1_000) / 1000.0,
+                thinking=self._thinking,
             )
         except ApiError as error:
             raise RuntimeError(str(error)) from error
@@ -276,7 +283,10 @@ class BuiltinAdapter:
         with self._lock:
             if self._client is None:
                 self._client = self._client_factory(
-                    base_url=self._base_url, api_key=self._api_key, style=self._style
+                    base_url=self._base_url,
+                    api_key=self._api_key,
+                    style=self._style,
+                    use_proxy=self._use_proxy,
                 )
             return self._client
 
@@ -333,6 +343,8 @@ def make_adapter(
     note: Callable[[str], None] | None = None,
     skills_dir: str = "",
     enabled_skills: str = "",
+    thinking: bool = False,
+    use_proxy: bool = True,
 ) -> BuiltinAdapter:
     """工厂：注册表用它造适配器（与其它后端同一个签名风格）。"""
     return BuiltinAdapter(
@@ -343,4 +355,6 @@ def make_adapter(
         note=note,
         skills_dir=skills_dir,
         enabled_skills=enabled_skills,
+        thinking=thinking,
+        use_proxy=use_proxy,
     )

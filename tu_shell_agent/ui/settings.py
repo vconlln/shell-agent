@@ -65,6 +65,13 @@ class AppSettings:
     api_key: str = ""
     # 接口风格：openai（默认，覆盖 DeepSeek / OpenAI / 本地 vLLM、Ollama、LM Studio）或 anthropic。
     api_style: str = "openai"
+    # 服务商预设（deepseek / openai / anthropic / ollama / custom）：选它就填好地址+风格+模型候选。
+    api_provider: str = ""
+    # 深度思考：按服务商官方示例加参数（DeepSeek 是 reasoning_effort + thinking）。
+    api_thinking: bool = False
+    # 是否跟系统代理走。默认跟（国内访问 OpenAI/Anthropic 往往必须走代理）；
+    # 本机代理挂掉时可以关掉 —— 那时所有请求都会卡在"连不上代理"上。
+    api_use_proxy: bool = True
     # 技能目录（每个子目录一个 SKILL.md，见 agent_backends/skills.py）。
     # 留空 = 用仓库自带的 `skills/`（与模板库同一套"随代码版本化"的思路）。
     skills_dir: str = ""

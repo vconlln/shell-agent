@@ -17,6 +17,7 @@ from functools import lru_cache
 
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -38,7 +39,14 @@ from ...agent_backends import (
     resolve_command,
 )
 # 接口风格那两行的说明语由内置后端自己的文件提供（加新风格时不用改这个文件）
-from ...agent_backends.backends.builtin import STYLE_HINT, suggested_style
+from ...agent_backends.backends.builtin import (
+    PROVIDERS,
+    STYLE_HINT,
+    preset_models,
+    provider_preset,
+    suggest_provider,
+    suggested_style,
+)
 
 # 阻断级别的条目顺序与左栏（任务 5）逐字一致：同一件事在两个地方不能出现不同顺序
 BLOCKING_LEVELS = ("error", "warning", "info", "style")
@@ -131,6 +139,15 @@ class SettingsPage(QWidget):
 
         # 内置 agent（直连模型 API）的配置。**没有"命令"这一栏**：它不装任何东西。
         # 只在后端选到内置时才可编辑（其余后端下置灰，避免"填了却没人读"的困惑）。
+        self.api_provider_combo = QComboBox()
+        self.api_provider_combo.setObjectName("apiProviderCombo")
+        for preset in PROVIDERS:
+            self.api_provider_combo.addItem(preset.label, preset.id)
+        self.api_provider_combo.currentIndexChanged.connect(self._on_api_provider_changed)
+        self.api_thinking_check = QCheckBox("深度思考（等服务商支持的参数：例如 DeepSeek 的 thinking）")
+        self.api_thinking_check.setObjectName("apiThinkingCheck")
+        self.api_proxy_check = QCheckBox("走系统代理（本机代理不通时请取消勾选，改为直连）")
+        self.api_proxy_check.setObjectName("apiProxyCheck")
         self.api_base_edit = QLineEdit()
         self.api_base_edit.setObjectName("apiBaseEdit")
         self.api_key_edit = QLineEdit()
@@ -174,9 +191,12 @@ class SettingsPage(QWidget):
         self.skills_hint.setProperty("role", "muted")
         self.skills_hint.setWordWrap(True)
 
+        backends_form.addRow("服务商", self.api_provider_combo)
         backends_form.addRow("API 地址", self.api_base_edit)
         backends_form.addRow("API key", self.api_key_edit)
         backends_form.addRow("接口风格", self.api_style_combo)
+        backends_form.addRow("", self.api_thinking_check)
+        backends_form.addRow("", self.api_proxy_check)
         backends_form.addRow("技能目录", skills_row)
         backends_form.addRow("启用技能", self.enabled_skills_edit)
         backends_form.addRow("", self.skills_hint)
@@ -379,9 +399,21 @@ class SettingsPage(QWidget):
     def reload(self) -> None:
         """把绑定对象的值铺回控件（丢弃控件上未保存的编辑）。"""
         settings = self._settings
+        provider = str(getattr(settings, "api_provider", "") or "")
+        if not provider:
+            # 没存过服务商：按地址反查（用户可能只填了地址），填不上就落到第一个预设
+            provider = suggest_provider(str(getattr(settings, "api_base", "") or "")) or "deepseek"
+        self.api_provider_combo.blockSignals(True)
+        index = self.api_provider_combo.findData(provider)
+        self.api_provider_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.api_provider_combo.blockSignals(False)
+        self.api_thinking_check.setChecked(bool(getattr(settings, "api_thinking", False)))
+        self.api_proxy_check.setChecked(bool(getattr(settings, "api_use_proxy", True)))
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
         self.skills_dir_edit.setText(str(getattr(settings, "skills_dir", "") or ""))
         self.enabled_skills_edit.setText(str(getattr(settings, "enabled_skills", "") or ""))
+        # 只填空着的地址（已保存的值优先），并让候选来自这个服务商
+        self._apply_provider_defaults(force=False)
         self._refresh_api_style_hint()
         self._refresh_skills_hint()
         self.api_key_edit.setText(str(getattr(settings, "api_key", "") or ""))
@@ -491,8 +523,16 @@ class SettingsPage(QWidget):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _refresh_models(self) -> None:
-        """点「检测可用模型」：起线程跑 `opencode models`，回来后填进下拉（保留当前选择）。"""
+        """点「检测可用模型」：按后端取模型。
+
+        三条路：内置 agent → 一次 HTTP 列表请求；opencode → 跑 `opencode models` 子进程；
+        命令行后端 → 用它自己声明的候选。**都在线程里**，且都要 `track()` 托管
+        （引用被覆盖 / 退出时还在跑都会让 Qt abort）。`track` 与 worker 的 import 提到函数
+        最前面：分支里用到它们时它们才必须已经绑定 —— 之前 import 写在分支之后，
+        内置 agent 那条路直接 `UnboundLocalError`（用例抓到的）。
+        """
         from ..engine_worker import ModelsWorker
+        from ..workers import track
 
         descriptor_now = backend_descriptor(self.selected_backend_id())
         if descriptor_now.is_api:
@@ -515,7 +555,23 @@ class SettingsPage(QWidget):
 
             def on_api_failed(message: str) -> None:
                 self.model_refresh_button.setEnabled(True)
-                self.model_hint.setText(f"取模型列表失败：{message}")
+                # 取不到真实列表也要**给出可选项**：用户要的是"能选一个模型"，
+                # 而不是一句失败原因（他手上就一个 DeepSeek key，候选足够他跑起来）。
+                fallback = preset_models(
+                    str(self.api_provider_combo.currentData() or ""),
+                    self.api_base_edit.text().strip(),
+                )
+                if fallback:
+                    self._fill_models(fallback)
+                    self.model_hint.setText(
+                        f"取模型列表失败：{message}\n"
+                        f"已按服务商预设给出候选：{'、'.join(fallback)}；"
+                        "可直接选择一个，或手输完整模型名。"
+                    )
+                else:
+                    self.model_hint.setText(
+                        f"取模型列表失败：{message}\n可直接手输完整模型名。"
+                    )
 
             worker.done.connect(on_api_done)
             worker.failed.connect(on_api_failed)
@@ -537,8 +593,6 @@ class SettingsPage(QWidget):
 
         self.model_refresh_button.setEnabled(False)
         self.model_hint.setText("正在检测可用模型…")
-        from ..workers import track
-
         worker = ModelsWorker(self.opencode_path_edit.text().strip())
 
         def on_done(models: object) -> None:
@@ -574,6 +628,33 @@ class SettingsPage(QWidget):
             )
             return
         self.api_style_hint.setText(STYLE_HINT)
+
+    def _on_api_provider_changed(self) -> None:
+        """用户**主动**选了服务商：把地址、风格、模型候选一起填好（这是最容易填错的三处）。"""
+        self._apply_provider_defaults(force=True)
+
+    def _apply_provider_defaults(self, *, force: bool = False) -> None:
+        """按当前选中的服务商填默认值。
+
+        - `force=True`（用户主动选）：地址、风格都按预设覆盖；
+        - `force=False`（打开设置页时）：**只填空着的**，已保存的值优先 ——
+          否则用户手改过的地址会在每次打开设置页时被预设改回去。
+        「自定义」不做任何事（那才是真的自定义）。
+        """
+        preset = provider_preset(str(self.api_provider_combo.currentData() or ""))
+        if preset is None or preset.id == "custom":
+            return
+        if preset.base_url and (force or not self.api_base_edit.text().strip()):
+            self.api_base_edit.setText(preset.base_url)
+        if force and self.api_style_combo.findData(preset.style) >= 0:
+            self.api_style_combo.setCurrentIndex(self.api_style_combo.findData(preset.style))
+        if preset.models:
+            current = self.model_combo.currentText().strip()
+            self._fill_models(list(preset.models))
+            if current:
+                self.model_combo.setEditText(current)
+        self._refresh_api_style_hint()
+        self._refresh_model_hint()
 
     def _pick_skills_dir(self) -> None:
         """选技能目录（与方案文档用同一个文件对话框习惯）。"""
@@ -636,6 +717,8 @@ class SettingsPage(QWidget):
             "model": self.model_combo.currentText().strip(),
             "skills_dir": self._skills_dir_path(),
             "enabled_skills": self.enabled_skills_edit.text().strip(),
+            "thinking": self.api_thinking_check.isChecked(),
+            "use_proxy": self.api_proxy_check.isChecked(),
         }
 
     def _fill_models(self, models: list[str]) -> None:
@@ -688,11 +771,20 @@ class SettingsPage(QWidget):
         except Exception:  # noqa: BLE001 - 未知后端由下拉保证不会出现，这里只做兜底
             return
         current = self.model_combo.currentText().strip()
+        # 内置 agent 的候选来自**当前服务商预设**（DeepSeek 就只有 deepseek-* 三个），
+        # 而不是所有服务商的并集 —— 后者会把 gpt-4o / claude 一起塞给一个 DeepSeek 用户。
+        choices = list(descriptor.model_suggestions)
+        if descriptor.is_api:
+            preset = provider_preset(str(self.api_provider_combo.currentData() or ""))
+            if preset is None:
+                preset = provider_preset(suggest_provider(self.api_base_edit.text().strip()))
+            if preset is not None and preset.models:
+                choices = list(preset.models)
         self.model_combo.blockSignals(True)
         try:
             self.model_combo.clear()
             self.model_combo.addItem("", "")
-            for name in descriptor.model_suggestions:
+            for name in choices:
                 self.model_combo.addItem(name, name)
             index = self.model_combo.findText(current)
             if index >= 0:
@@ -869,6 +961,9 @@ class SettingsPage(QWidget):
         settings.api_base = self.api_base_edit.text().strip()
         settings.api_key = self.api_key_edit.text().strip()
         settings.api_style = str(self.api_style_combo.currentData() or "openai")
+        settings.api_provider = str(self.api_provider_combo.currentData() or "")
+        settings.api_thinking = self.api_thinking_check.isChecked()
+        settings.api_use_proxy = self.api_proxy_check.isChecked()
         settings.skills_dir = self.skills_dir_edit.text().strip()
         settings.enabled_skills = self.enabled_skills_edit.text().strip()
         settings.opencode_path = self.opencode_path_edit.text().strip()

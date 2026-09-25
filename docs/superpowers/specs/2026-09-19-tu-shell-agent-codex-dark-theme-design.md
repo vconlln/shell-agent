@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **547 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **555 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1391,3 +1391,45 @@ skills/
 仓库自带技能可解析、内置技能按需落盘且不覆盖用户改动、
 仓库文件与内置常量一致、控制器在默认目录缺失时落盘。
 变异验证五条全红：忽略超时 / 不重试 / 不裁剪 / 不注入技能 / 把 README 当技能。
+
+
+## 修订三十二（2026-09-20）：按官方示例补齐 DeepSeek 的用法 + 取不到列表也要能选模型
+
+用户贴出 DeepSeek 官方 Python 示例，并说："你现在还是无法获取 API 的可用模型"。
+示例里有关键信息：
+
+```python
+client = OpenAI(api_key=..., base_url="https://api.deepseek.com")
+client.chat.completions.create(model="deepseek-flash", ...,
+    reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}})
+```
+
+### 三条结论与三处改动
+
+1. **地址是 `https://api.deepseek.com`（不带 /v1 也对）**：OpenAI SDK 会把
+   `/chat/completions` 拼在后面，我们的 `chat_completions_url()` 同样拼
+   `https://api.deepseek.com/chat/completions` ✓。所以"该选什么风格"的答案是
+   **OpenAI 兼容**（若填 `/anthropic` 那个入口才是 Anthropic 兼容）。
+2. **模型名可以是 `deepseek-flash`**，并且**深度思考要显式传参**
+   （`reasoning_effort="high"` + `thinking={"type":"enabled"}`）。我们之前只被动接收
+   `reasoning_content`，没有主动打开思考 —— 现在设置页加了「深度思考」勾选框，
+   打开后按官方示例把这两个字段放进请求体；**不开就不加**（别的服务商可能不认）。
+3. **"取不到模型列表"不该等于"选不了模型"**。列模型是一次网络请求，会被代理、权限、
+   端点差异挡住；而用户要的是**能选一个模型**。所以：新增**服务商预设**
+   （DeepSeek / DeepSeek-Anthropic / OpenAI / Anthropic / 本地 Ollama / 自定义），
+   选中即填好地址+风格+**模型候选**；取列表失败时把预设候选铺进下拉并说明原因。
+   预设还会**按地址反查**（用户只填了 `https://api.deepseek.com` 也能对上）。
+   顺带修掉"候选是所有服务商并集"的问题（DeepSeek 用户会看到 gpt-4o / claude-*）。
+4. **本机代理开关**：默认跟系统代理走（国内访问 OpenAI/Anthropic 往往必须走），
+   但设置页可以**取消勾选改为直连** —— 代理挂掉时所有请求都会卡在"连不上代理"，
+   而用户只会看到"连不上模型 API"。`trust_env=False` 就是那条出路。
+
+### 用例
+
+`tests/test_builtin_agent.py` 33 → 39 条：预设填地址/风格/候选（且不混入别家模型）、
+保存的服务商在**打开设置页**时也决定候选、取列表失败时给候选、
+`thinking` 参数进请求体（关闭时不加）、`trust_env` 随勾选框变化、勾选框进 api 配置。
+变异验证五条全红。
+**其中一条用例抓到了真 bug**：`_refresh_models()` 的 API 分支用了 `track()`，
+而 `track` 的 import 写在分支之后 → 内置 agent 点「检测可用模型」会
+`UnboundLocalError`。已把 worker 与 `track` 的 import 提到函数最前面。

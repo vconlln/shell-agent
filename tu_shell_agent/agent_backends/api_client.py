@@ -250,13 +250,19 @@ class ModelApiClient:
         style: str = "openai",
         timeout_s: float = DEFAULT_TIMEOUT_S,
         transport: httpx.BaseTransport | None = None,
+        use_proxy: bool = True,
     ) -> None:
         self.base_url = (base_url or "").strip()
         self.api_key = api_key or ""
         self.style = "anthropic" if style == "anthropic" else "openai"
         self.timeout_s = timeout_s
+        self.use_proxy = bool(use_proxy)
         try:
             self._client = httpx.Client(
+                # 代理：默认跟系统走（用户在国内访问 OpenAI/Anthropic 往往必须走代理），
+                # 但设置里可以**关掉**：本机代理挂掉时，所有请求都会卡在连不上代理上，
+                # 而用户只会看到"连不上模型 API"。关掉 = 直连。
+                trust_env=self.use_proxy,
                 timeout=httpx.Timeout(timeout_s, connect=15.0),
                 # 代理：这里**不**继承系统代理设置里的 loopback 例外表 —— 直连的是公网 API，
                 # 用户配了代理就该走代理（与本机 opencode serve 那条"必须绕过代理"的规则相反）。
@@ -330,6 +336,7 @@ class ModelApiClient:
         max_tokens: int = 4096,
         timeout_s: float | None = None,
         retries: int = 2,
+        thinking: bool = False,
     ) -> Completion:
         """一次流式对话；`on_event` 逐段回调（思考与正文分开），返回汇总结果。
 
@@ -350,6 +357,7 @@ class ModelApiClient:
                     on_event=on_event,
                     max_tokens=max_tokens,
                     timeout_s=timeout_s,
+                    thinking=thinking,
                 )
             except ApiError as error:
                 if not _retryable(error) or attempt >= max(retries, 0) or _cancelled(cancel):
@@ -367,6 +375,7 @@ class ModelApiClient:
         on_event: Callable[[StreamEvent], None] | None,
         max_tokens: int,
         timeout_s: float | None,
+        thinking: bool = False,
     ) -> Completion:
         """真正发一次请求（重试逻辑在 `stream_chat` 里）。"""
         url = chat_completions_url(self.base_url, self.style)
@@ -377,6 +386,9 @@ class ModelApiClient:
                 "max_tokens": max_tokens,
                 "stream": True,
             }
+            if thinking:
+                # Anthropic 风格的思考开关是 `thinking`（budget_tokens 给足才会真的思考）
+                payload["thinking"] = {"type": "enabled", "budget_tokens": 4096}
             if system.strip():
                 payload["system"] = system
         else:
@@ -386,6 +398,12 @@ class ModelApiClient:
                 + messages,
                 "stream": True,
             }
+            if thinking:
+                # 用户给的官方示例就是这么写的（`reasoning_effort="high"` +
+                # `extra_body={"thinking": {"type": "enabled"}}`）：把它原样落进请求体。
+                # 只有用户显式打开「深度思考」时才加 —— 别的服务商可能不认这两个字段。
+                payload["reasoning_effort"] = "high"
+                payload["thinking"] = {"type": "enabled"}
         result = Completion(model=model)
         request_timeout = (
             httpx.Timeout(timeout_s, connect=15.0) if timeout_s else None
