@@ -610,6 +610,7 @@ class RunController(QObject):
             "enabled_skills": str(getattr(settings, "enabled_skills", "") or "").strip(),
             "thinking": bool(getattr(settings, "api_thinking", False)),
             "use_proxy": bool(getattr(settings, "api_use_proxy", True)),
+            "tools": bool(getattr(settings, "api_tools", True)),
         }
 
     def _start_api_model_list(self, chat: Any) -> None:

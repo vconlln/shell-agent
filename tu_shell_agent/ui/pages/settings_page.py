@@ -146,6 +146,8 @@ class SettingsPage(QWidget):
         self.api_provider_combo.currentIndexChanged.connect(self._on_api_provider_changed)
         self.api_thinking_check = QCheckBox("深度思考（等服务商支持的参数：例如 DeepSeek 的 thinking）")
         self.api_thinking_check.setObjectName("apiThinkingCheck")
+        self.api_tools_check = QCheckBox("允许读取运行目录（只读工具：列目录 / 读文件，范围仅限运行目录）")
+        self.api_tools_check.setObjectName("apiToolsCheck")
         self.api_proxy_check = QCheckBox("走系统代理（本机代理不通时请取消勾选，改为直连）")
         self.api_proxy_check.setObjectName("apiProxyCheck")
         self.api_base_edit = QLineEdit()
@@ -196,6 +198,7 @@ class SettingsPage(QWidget):
         backends_form.addRow("API key", self.api_key_edit)
         backends_form.addRow("接口风格", self.api_style_combo)
         backends_form.addRow("", self.api_thinking_check)
+        backends_form.addRow("", self.api_tools_check)
         backends_form.addRow("", self.api_proxy_check)
         backends_form.addRow("技能目录", skills_row)
         backends_form.addRow("启用技能", self.enabled_skills_edit)
@@ -408,6 +411,7 @@ class SettingsPage(QWidget):
         self.api_provider_combo.setCurrentIndex(index if index >= 0 else 0)
         self.api_provider_combo.blockSignals(False)
         self.api_thinking_check.setChecked(bool(getattr(settings, "api_thinking", False)))
+        self.api_tools_check.setChecked(bool(getattr(settings, "api_tools", True)))
         self.api_proxy_check.setChecked(bool(getattr(settings, "api_use_proxy", True)))
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
         self.skills_dir_edit.setText(str(getattr(settings, "skills_dir", "") or ""))
@@ -719,6 +723,7 @@ class SettingsPage(QWidget):
             "enabled_skills": self.enabled_skills_edit.text().strip(),
             "thinking": self.api_thinking_check.isChecked(),
             "use_proxy": self.api_proxy_check.isChecked(),
+            "tools": self.api_tools_check.isChecked(),
         }
 
     def _fill_models(self, models: list[str]) -> None:
@@ -963,6 +968,7 @@ class SettingsPage(QWidget):
         settings.api_style = str(self.api_style_combo.currentData() or "openai")
         settings.api_provider = str(self.api_provider_combo.currentData() or "")
         settings.api_thinking = self.api_thinking_check.isChecked()
+        settings.api_tools = self.api_tools_check.isChecked()
         settings.api_use_proxy = self.api_proxy_check.isChecked()
         settings.skills_dir = self.skills_dir_edit.text().strip()
         settings.enabled_skills = self.enabled_skills_edit.text().strip()

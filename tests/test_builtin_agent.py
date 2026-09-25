@@ -1067,3 +1067,217 @@ def test_api_settings_round_trip_through_the_settings_file(qtbot, tmp_path):
     assert loaded.api_thinking is True
     assert loaded.api_use_proxy is False
     assert loaded.enabled_skills == "shell-strict"
+
+
+# ── 只读工具：让模型能看运行目录（与 opencode 的 Read/Glob/Grep 对齐）──
+
+
+def test_readonly_tools_stay_inside_the_run_dir(tmp_path):
+    """工具只能读运行目录：`..`、绝对路径、符号链接指向外面、二进制，全部拒绝。
+
+    这是"模型能看文件"这件事的**唯一**边界，必须逐个钉住。
+    """
+    from tu_shell_agent.agent_backends.readonly_tools import ToolCall, WorkspaceReader
+
+    root = tmp_path / "runs" / "r1"
+    (root / "attempts" / "1").mkdir(parents=True)
+    (root / "plan.md").write_text("方案正文\n", encoding="utf-8")
+    (root / "data.bin").write_bytes(b"\x00\x01" * 40)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("不该被读到\n", encoding="utf-8")
+    link = root / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        link = None
+
+    reader = WorkspaceReader(str(root))
+
+    assert "plan.md" in reader.run(ToolCall("1", "list_dir", {}))
+    assert reader.read_file("plan.md") == "方案正文\n"
+
+    for bad in ("../secret.txt", "attempts/../../secret.txt"):
+        assert "超出" in reader.run(ToolCall("2", "read_file", {"path": bad})), bad
+    # 绝对路径单独拦一次：给它一句**说得清**的错误（而不是笼统的"超出范围"）——
+    # 模型看到原因才会改成相对路径；这条断言也把"绝对路径守卫"本身钉住了
+    # （两道守卫在行为上重叠，去掉前者时错误信息会变成"超出运行目录"）。
+    absolute = reader.run(ToolCall("2b", "read_file", {"path": str(outside)}))
+    assert "只接受相对" in absolute, absolute
+    if link is not None:
+        assert "错误" in reader.run(ToolCall("3", "read_file", {"path": "link.txt"})), (
+            "符号链接指向外面也必须拒绝"
+        )
+    assert "二进制" in reader.run(ToolCall("4", "read_file", {"path": "data.bin"}))
+    assert "没有名为" in reader.run(ToolCall("5", "bash", {"cmd": "rm -rf /"}))
+
+
+def test_tool_read_limits_are_enforced(tmp_path):
+    """单文件与目录条目都有上限：不能让模型一次性把上下文灌满。"""
+    from tu_shell_agent.agent_backends.readonly_tools import ToolCall, WorkspaceReader
+
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "big.txt").write_text("x" * 5000, encoding="utf-8")
+    for index in range(20):
+        (root / f"f{index:02d}.txt").write_text("y", encoding="utf-8")
+
+    reader = WorkspaceReader(str(root), max_file_bytes=1000, max_entries=5)
+    assert "太大" in reader.run(ToolCall("1", "read_file", {"path": "big.txt"}))
+    listing = reader.run(ToolCall("2", "list_dir", {}))
+    assert "只列了前 5 项" in listing, listing
+
+
+def _tool_call_chunk(call_id: str, name: str, arguments: str) -> dict:
+    return {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {"index": 0, "id": call_id, "function": {"name": name, "arguments": arguments}}
+                    ]
+                }
+            }
+        ]
+    }
+
+
+def test_tool_calls_are_parsed_and_executed_then_the_model_answers(tmp_path):
+    """完整一轮：模型先要求读文件 → 我们把内容给它 → 它再给出脚本（过契约）。
+
+    这条是"内置 agent 能自己看运行目录"的端到端证据（与 opencode 允许 Read 的口径对齐）。
+    """
+    root = tmp_path / "r1"
+    root.mkdir()
+    (root / "plan.md").write_text("把一句话拆成单词逐行打印\n", encoding="utf-8")
+
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append(payload)
+        assert payload.get("tools"), "有工具可用时请求里必须带 tools"
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    _tool_call_chunk("call_1", "read_file", '{"path": "plan.md"}'),
+                    {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+                ),
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content=CONTRACT_REPLY)),
+        )
+
+    notes: list[str] = []
+    adapter = _adapter(handler, note=notes.append)
+    session = adapter.start(str(root), "agent", "m")
+    script = adapter.generate(session, "按方案写脚本", {}, 30_000)
+
+    assert script.script.strip().startswith("#!/bin/bash")
+    # 第二轮请求里必须带上工具结果（模型是看着文件内容写的）
+    second = seen[-1]["messages"]
+    assert any(item.get("role") == "tool" for item in second), second
+    tool_message = next(item for item in second if item.get("role") == "tool")
+    assert "把一句话拆成单词逐行打印" in tool_message["content"]
+    assert any("plan.md" in note for note in notes), f"界面上应当能看到读了什么：{notes}"
+
+
+def test_tools_can_be_turned_off(tmp_path):
+    """关掉只读工具时，请求里不能带 tools（用户可能就是不希望模型翻目录）。"""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_openai_chunk(content="好")),
+        )
+
+    adapter = _adapter(handler, tools=False)
+    session = adapter.start(str(tmp_path), "agent", "m")
+    adapter.chat(session, "在吗", 30_000)
+
+    assert "tools" not in seen[-1]
+
+
+def test_tool_loop_stops_at_the_round_limit(tmp_path):
+    """模型一直要看更多文件时，循环要在上限处停下（不能无限翻）。"""
+    from tu_shell_agent.agent_backends.builtin_agent import MAX_TOOL_ROUNDS
+
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.txt").write_text("甲\n", encoding="utf-8")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(_tool_call_chunk(f"call_{calls['n']}", "list_dir", "{}")),
+        )
+
+    inlets: list[str] = []
+    adapter = _adapter(handler, note=inlets.append)
+    session = adapter.start(str(root), "agent", "m")
+    adapter.chat(session, "看看目录", 30_000)
+
+    assert calls["n"] == MAX_TOOL_ROUNDS + 1, f"工具轮数没在上限处停下：{calls['n']}"
+    assert any("上限" in note for note in inlets), inlets
+
+
+def test_anthropic_style_tool_calls_are_parsed(tmp_path):
+    """Anthropic 风格的 tool_use / tool_result 形状也要走通。"""
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "plan.md").write_text("方案\n", encoding="utf-8")
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append(payload)
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"},
+                    },
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "input_json_delta", "partial_json": '{"path": "plan.md"}'},
+                    },
+                    {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+                ),
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "好"}}),
+        )
+
+    adapter = BuiltinAdapter(
+        base_url="https://api.anthropic.com",
+        api_key="k",
+        style="anthropic",
+        model="claude-sonnet-4-5",
+        client_factory=lambda **kwargs: ModelApiClient(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+    session = adapter.start(str(root), "agent", "claude-sonnet-4-5")
+    reply = adapter.chat(session, "看看方案", 30_000)
+
+    assert reply == "好"
+    # 第二轮的 user 消息里应当是 tool_result 块
+    blocks = seen[-1]["messages"][-1]["content"]
+    assert isinstance(blocks, list) and blocks[0]["type"] == "tool_result"
+    assert "方案" in blocks[0]["content"]

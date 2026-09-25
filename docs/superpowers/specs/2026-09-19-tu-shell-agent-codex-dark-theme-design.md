@@ -916,7 +916,7 @@ WrapRow 仍然保留作兜底（窗口被压到比最小尺寸还小时折行而
 
 ### 测试
 
-整套 **555 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
+整套 **561 passed / 2 skipped**（100% 与 150% 缩放各跑一遍，结论一致）；
 应用 `--self-test` exit=0。
 
 
@@ -1433,3 +1433,46 @@ client.chat.completions.create(model="deepseek-flash", ...,
 **其中一条用例抓到了真 bug**：`_refresh_models()` 的 API 分支用了 `track()`，
 而 `track` 的 import 写在分支之后 → 内置 agent 点「检测可用模型」会
 `UnboundLocalError`。已把 worker 与 `track` 的 import 提到函数最前面。
+
+
+## 修订三十三（2026-09-20）：内置 agent 有了**只读工具**（与 opencode 的 Read/Glob/Grep 对齐）
+
+上一轮列出的"与 opencode 唯一剩下的实质差距"就是工具：opencode 那条路的 agent 允许
+`Read` / `Glob` / `Grep`（只读），`Bash` / `Write` / `Edit` 全部 deny；而内置 agent 一个工具都没有，
+只能看到提示词里那段方案文本 —— 看不到骨架、模板、上一轮的脚本与 shellcheck 报告。
+本轮补上，范围**比 opencode 更窄**：
+
+| | opencode | 内置 agent（本轮） |
+| --- | --- | --- |
+| 能读 | 由 agent 定义文件的 permission 决定 | 只能读**运行目录**（本应用自己的产物目录） |
+| 动作 | Read / Glob / Grep + 其它（已 deny） | 只有 `list_dir` / `read_file` |
+| 上限 | 无（由模型自己把握） | 单文件 64KB、一次列 500 条 |
+| 写 / 执行 | deny | **根本没有这两个动作** |
+
+### 实现
+
+- `agent_backends/readonly_tools.py`：`WorkspaceReader` 把所有路径都收敛到运行目录内 ——
+  先拼根目录再 `resolve()`（符号链接会展开）再检查仍在根内；绝对路径、`..`、指向外面的软链
+  全部拒绝；二进制文件（前 4KB 有 `\x00`）拒绝；读有上限。工具声明按接口风格给两套
+  （OpenAI 的 `tools[].function`、Anthropic 的 `input_schema`）。
+- `api_client.py`：解析两家的工具调用 —— OpenAI 的 `delta.tool_calls`（**按 index 分片累积**
+  arguments 的 JSON 片段）、Anthropic 的 `content_block_start(tool_use)` +
+  `input_json_delta`；统一成 `ToolCall`，放进 `Completion.tool_calls`。
+- `builtin_agent.py`：`_stream_with_tools()` 是那个循环 —— 模型要求看文件 → **我们**只读地取给它
+  → 再问一次；上限 `MAX_TOOL_ROUNDS = 4`（模型可能一直想看更多，不能无限翻）；每次读取都在
+  界面上留一行（"读取 read_file（read_file plan.md）：把一句话拆成单词…"），用户看得到它翻了什么。
+  两种风格的消息形状不同（OpenAI：assistant.tool_calls + `role=tool`；Anthropic：
+  assistant 的 tool_use 块 + user 的 tool_result 块），分别在 `_apply_tool_calls` 里拼。
+- 设置页新增「允许读取运行目录（只读工具）」勾选框，默认开（与 opencode 允许 Read 的口径一致），
+  关掉后请求里根本不带 `tools`，模型只能看提示词。
+- **执行权没有变**：脚本仍然由引擎从文本里解析、写盘、shellcheck、人工确认后才执行；
+  模型多出来的能力只有"看"。
+
+### 用例（`tests/test_builtin_agent.py` 41 → 47 条）
+
+越界路径（`..`、绝对路径、软链指向外面）与二进制被拒、读数上限、
+完整一轮"模型要文件 → 我们给它 → 它按方案写出脚本"、关掉工具时请求不带 tools、
+工具轮数在上限处停下、Anthropic 风格的 tool_use/tool_result 形状。
+变异验证六条全红（越界不拦 / 绝对路径放行 / 大小不设限 / 循环不设上限 / 关掉仍发 tools /
+不执行工具调用）；其中"绝对路径"那条一开始**没转红** —— 两道守卫行为重叠，于是把断言改成
+钉住**错误信息**（模型看到"只接受相对路径"才知道怎么改），再验就红了。

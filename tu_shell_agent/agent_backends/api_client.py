@@ -59,13 +59,16 @@ class StreamEvent:
 
 @dataclass(slots=True)
 class Completion:
-    """一次调用的结果。"""
+    """一次调用的结果（含模型请求的工具调用）。"""
 
     content: str = ""
     reasoning: str = ""
     model: str = ""
     finish_reason: str = ""
     raw_events: int = field(default=0)
+    # 模型请求的工具调用（OpenAI 的 tool_calls / Anthropic 的 tool_use）。
+    # 形状统一成 `readonly_tools.ToolCall`，两种风格在这里合流。
+    tool_calls: list[Any] = field(default_factory=list)
 
 
 def _headers(style: str, api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -200,6 +203,58 @@ def _iter_sse_lines(response: httpx.Response) -> Iterator[tuple[str, str]]:
         yield event, data
 
 
+def _openai_tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """取这一帧里的 tool_calls 分片（OpenAI 是**分片累积**：index 相同就拼 arguments）。"""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return []
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return []
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        return []
+    calls = delta.get("tool_calls")
+    return [item for item in calls if isinstance(item, dict)] if isinstance(calls, list) else []
+
+
+def _merge_openai_tool_calls(buffer: dict[int, dict[str, Any]], chunks: list[dict[str, Any]]) -> None:
+    for chunk in chunks:
+        index = int(chunk.get("index") or 0)
+        slot = buffer.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        if chunk.get("id"):
+            slot["id"] = str(chunk["id"])
+        function = chunk.get("function")
+        if isinstance(function, dict):
+            if function.get("name"):
+                slot["name"] = str(function["name"])
+            if isinstance(function.get("arguments"), str):
+                slot["arguments"] += function["arguments"]
+
+
+def _finish_openai_tool_calls(buffer: dict[int, dict[str, Any]]) -> list[Any]:
+    """把累积的分片变成 `ToolCall`（arguments 是 JSON 字符串，解析失败就给空参数）。"""
+    from .readonly_tools import ToolCall
+
+    calls: list[Any] = []
+    for index in sorted(buffer):
+        slot = buffer[index]
+        name = str(slot.get("name") or "").strip()
+        if not name:
+            continue
+        raw = str(slot.get("arguments") or "").strip() or "{}"
+        try:
+            arguments = json.loads(raw)
+        except json.JSONDecodeError:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        calls.append(
+            ToolCall(id=str(slot.get("id") or f"call_{index}"), name=name, arguments=arguments)
+        )
+    return calls
+
+
 def _parse_openai_chunk(payload: dict[str, Any]) -> StreamEvent | None:
     """OpenAI 兼容流里的一帧 → 文本片段（认不出来返回 None）。"""
     choices = payload.get("choices")
@@ -237,6 +292,46 @@ def _parse_anthropic_chunk(payload: dict[str, Any]) -> StreamEvent | None:
     if isinstance(text, str) and text:
         return StreamEvent("content", text)
     return None
+
+
+def _anthropic_tool_calls(events: list[dict[str, Any]]) -> list[Any]:
+    """从 Anthropic 流里收集 tool_use 块（`content_block_start` 起块，`input_json_delta` 攒 JSON）。"""
+    from .readonly_tools import ToolCall
+
+    blocks: dict[int, dict[str, Any]] = {}
+    for event in events:
+        kind = event.get("type")
+        if kind == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                blocks[int(event.get("index") or 0)] = {
+                    "id": str(block.get("id") or ""),
+                    "name": str(block.get("name") or ""),
+                    "json": "",
+                }
+        elif kind == "content_block_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and isinstance(delta.get("partial_json"), str):
+                slot = blocks.get(int(event.get("index") or 0))
+                if slot is not None:
+                    slot["json"] += delta["partial_json"]
+    calls: list[Any] = []
+    for index in sorted(blocks):
+        slot = blocks[index]
+        if not slot["name"]:
+            continue
+        try:
+            arguments = json.loads(slot["json"] or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=slot["id"] or f"toolu_{index}",
+                name=slot["name"],
+                arguments=arguments if isinstance(arguments, dict) else {},
+            )
+        )
+    return calls
 
 
 class ModelApiClient:
@@ -337,6 +432,7 @@ class ModelApiClient:
         timeout_s: float | None = None,
         retries: int = 2,
         thinking: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> Completion:
         """一次流式对话；`on_event` 逐段回调（思考与正文分开），返回汇总结果。
 
@@ -358,6 +454,7 @@ class ModelApiClient:
                     max_tokens=max_tokens,
                     timeout_s=timeout_s,
                     thinking=thinking,
+                    tools=tools,
                 )
             except ApiError as error:
                 if not _retryable(error) or attempt >= max(retries, 0) or _cancelled(cancel):
@@ -376,6 +473,7 @@ class ModelApiClient:
         max_tokens: int,
         timeout_s: float | None,
         thinking: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> Completion:
         """真正发一次请求（重试逻辑在 `stream_chat` 里）。"""
         url = chat_completions_url(self.base_url, self.style)
@@ -389,6 +487,8 @@ class ModelApiClient:
             if thinking:
                 # Anthropic 风格的思考开关是 `thinking`（budget_tokens 给足才会真的思考）
                 payload["thinking"] = {"type": "enabled", "budget_tokens": 4096}
+            if tools:
+                payload["tools"] = tools
             if system.strip():
                 payload["system"] = system
         else:
@@ -404,6 +504,8 @@ class ModelApiClient:
                 # 只有用户显式打开「深度思考」时才加 —— 别的服务商可能不认这两个字段。
                 payload["reasoning_effort"] = "high"
                 payload["thinking"] = {"type": "enabled"}
+            if tools:
+                payload["tools"] = tools
         result = Completion(model=model)
         request_timeout = (
             httpx.Timeout(timeout_s, connect=15.0) if timeout_s else None
@@ -421,6 +523,8 @@ class ModelApiClient:
                     error = ApiError(_error_message(response, self.base_url))
                     error.status = response.status_code        # 供重试判断用
                     raise error
+                tool_buffer: dict[int, dict[str, Any]] = {}
+                anthropic_events: list[dict[str, Any]] = []
                 for event_name, data in _iter_sse_lines(response):
                     if _cancelled(cancel):
                         result.finish_reason = result.finish_reason or "cancelled"
@@ -432,6 +536,10 @@ class ModelApiClient:
                     if not isinstance(event_payload, dict):
                         continue
                     result.raw_events += 1
+                    if self.style != "anthropic":
+                        _merge_openai_tool_calls(tool_buffer, _openai_tool_calls(event_payload))
+                    else:
+                        anthropic_events.append(event_payload)
                     parsed = (
                         _parse_anthropic_chunk(event_payload)
                         if self.style == "anthropic" or event_name
@@ -457,6 +565,10 @@ class ModelApiClient:
                 result.finish_reason = "cancelled"
                 return result
             raise ApiError(f"连不上模型 API（{self.base_url}）：{error}") from error
+        if self.style == "anthropic":
+            result.tool_calls = _anthropic_tool_calls(anthropic_events)
+        else:
+            result.tool_calls = _finish_openai_tool_calls(tool_buffer)
         return result
 
     def _sleep(self, seconds: float, cancel: Any) -> None:

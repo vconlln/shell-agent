@@ -176,6 +176,7 @@ def make_adapter(config: dict[str, Any]) -> BuiltinAdapter:
         enabled_skills=str(config.get("enabled_skills") or ""),
         thinking=bool(config.get("thinking", False)),
         use_proxy=bool(config.get("use_proxy", True)),
+        tools=bool(config.get("tools", True)),
     )
 
 

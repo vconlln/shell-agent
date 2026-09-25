@@ -69,6 +69,10 @@ class AppSettings:
     api_provider: str = ""
     # 深度思考：按服务商官方示例加参数（DeepSeek 是 reasoning_effort + thinking）。
     api_thinking: bool = False
+    # 允许内置 agent 使用**只读工具**读运行目录（列目录 / 读文件；范围与上限见
+    # agent_backends/readonly_tools.py）。默认开 —— 与 opencode 那条允许 Read/Glob/Grep
+    # 的口径一致；关掉后模型只能看到提示词里的方案文本。
+    api_tools: bool = True
     # 是否跟系统代理走。默认跟（国内访问 OpenAI/Anthropic 往往必须走代理）；
     # 本机代理挂掉时可以关掉 —— 那时所有请求都会卡在"连不上代理"上。
     api_use_proxy: bool = True

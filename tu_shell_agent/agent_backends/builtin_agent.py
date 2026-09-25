@@ -26,6 +26,7 @@ CLI 后端每轮都要起一个 node 进程（冷启动几秒）+ 让 CLI 自己
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from collections.abc import Callable
@@ -39,6 +40,7 @@ from ..orchestrator.cli_contract import (
 )
 from ..types import GeneratedScript
 from .api_client import ApiError, ModelApiClient, delta_stream
+from .readonly_tools import LIST_TOOL, READ_TOOL, ToolCall, WorkspaceReader, tool_specs
 from .skills import compose_system_prompt, discover_skills, select_skills
 
 DEFAULT_SYSTEM_RULES = CLI_SYSTEM_RULES
@@ -53,6 +55,10 @@ MAX_HISTORY_CHARS = 300_000
 
 # 历史被裁剪时插进对话的一句说明（让模型知道"更早的内容我看不到了"）
 TRIM_NOTE = "（更早的对话因上下文长度限制已省略）"
+
+# 工具循环最多几轮：每一轮是一次"模型要看东西 → 我们给它看"。
+# 4 轮足够它把方案、骨架、上一轮报告都看一遍；再多就只会在同几个文件上打转。
+MAX_TOOL_ROUNDS = 4
 
 
 class BuiltinAdapter:
@@ -72,6 +78,7 @@ class BuiltinAdapter:
         max_history_chars: int = MAX_HISTORY_CHARS,
         thinking: bool = False,
         use_proxy: bool = True,
+        tools: bool = True,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
@@ -88,6 +95,9 @@ class BuiltinAdapter:
         self._thinking = bool(thinking)
         # 是否跟系统代理走（本机代理坏掉时可以关掉，见 ModelApiClient）
         self._use_proxy = bool(use_proxy)
+        # 只读工具：让模型能翻运行目录（范围与上限见 readonly_tools.py）。
+        # 默认开（与 opencode 那条允许 Read/Glob/Grep 的口径一致），可在设置里关掉。
+        self._tools_enabled = bool(tools)
         self._client_factory = client_factory or ModelApiClient
         self._client: ModelApiClient | None = None
         self._lock = threading.Lock()
@@ -222,17 +232,17 @@ class BuiltinAdapter:
         messages = self._trim_messages([*self._messages, {"role": "user", "content": prompt}])
         client = self._ensure_client()
         handler = delta_stream(None, on_delta)
+        system_prompt = self._system_prompt(system)
+        specs = tool_specs(self._style) if self._tools_enabled and self._run_dir else None
         try:
-            completion = client.stream_chat(
+            completion = self._stream_with_tools(
+                client=client,
                 model=model,
                 messages=messages,
-                system=self._system_prompt(system),
-                cancel=self._cancel_or_external,
+                system=system_prompt,
                 on_event=handler,
-                # 每次调用的超时由引擎给（生成超时 / 对话超时）—— 与命令行后端一致，
-                # 不再固定用客户端那个 300 秒默认值。
-                timeout_s=max(timeout_ms, 1_000) / 1000.0,
-                thinking=self._thinking,
+                timeout_ms=timeout_ms,
+                tools=specs,
             )
         except ApiError as error:
             raise RuntimeError(str(error)) from error
@@ -247,6 +257,87 @@ class BuiltinAdapter:
         if external is None:
             return self._cancel
         return _Either(self._cancel, external)
+
+    def _stream_with_tools(
+        self,
+        *,
+        client: ModelApiClient,
+        model: str,
+        messages: list[dict[str, str]],
+        system: str,
+        on_event: Any,
+        timeout_ms: int,
+        tools: list[dict[str, Any]] | None,
+    ) -> Any:
+        """一次调用的**工具循环**：模型要求看文件 → 我们（只读地）给它看 → 再问一次。
+
+        权限边界写在 `readonly_tools.WorkspaceReader`：只能读运行目录、只读、有上限。
+        循环上限 `MAX_TOOL_ROUNDS`：模型可能一直想看更多，不能让它无限翻。
+        """
+        reader = WorkspaceReader(self._run_dir) if tools else None
+        current = list(messages)
+        for round_no in range(MAX_TOOL_ROUNDS + 1):
+            completion = client.stream_chat(
+                model=model,
+                messages=current,
+                system=system,
+                cancel=self._cancel_or_external,
+                on_event=on_event,
+                # 每次调用的超时由引擎给（生成超时 / 对话超时）—— 与命令行后端一致，
+                # 不再固定用客户端那个 300 秒默认值。
+                timeout_s=max(timeout_ms, 1_000) / 1000.0,
+                thinking=self._thinking,
+                tools=tools,
+            )
+            if not completion.tool_calls or reader is None:
+                return completion
+            if round_no >= MAX_TOOL_ROUNDS:
+                self._note(f"工具调用已达到 {MAX_TOOL_ROUNDS} 轮上限，不再继续读取文件。")
+                return completion
+            self._apply_tool_calls(current, completion, reader)
+        return completion
+
+    def _apply_tool_calls(
+        self, messages: list[dict[str, str]], completion: Any, reader: WorkspaceReader
+    ) -> None:
+        """把模型的工具调用执行掉，并把结果按**当前风格**的形状追加进消息列表。"""
+        assistant_text = completion.content
+        if self._style == "anthropic":
+            blocks: list[dict[str, Any]] = []
+            if assistant_text.strip():
+                blocks.append({"type": "text", "text": assistant_text})
+            results: list[dict[str, Any]] = []
+            for call in completion.tool_calls:
+                output = reader.run(call)
+                self._note(f"读取 {call.name}（{_summarize(call)}）：{_first_line(output)}")
+                blocks.append(
+                    {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+                )
+                results.append(
+                    {"type": "tool_result", "tool_use_id": call.id, "content": output}
+                )
+            messages.append({"role": "assistant", "content": blocks})       # type: ignore[arg-type]
+            messages.append({"role": "user", "content": results})          # type: ignore[arg-type]
+            return
+        # OpenAI 风格：assistant 带 tool_calls，随后每个结果一条 role=tool
+        calls_payload = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                },
+            }
+            for call in completion.tool_calls
+        ]
+        messages.append(
+            {"role": "assistant", "content": assistant_text, "tool_calls": calls_payload}  # type: ignore[dict-item]
+        )
+        for call in completion.tool_calls:
+            output = reader.run(call)
+            self._note(f"读取 {call.name}（{_summarize(call)}）：{_first_line(output)}")
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": output})  # type: ignore[dict-item]
 
     def _system_prompt(self, base: str) -> str:
         """系统提示 = 基础规则 + 启用的技能正文（技能只是文本，见 skills.py）。"""
@@ -311,6 +402,17 @@ class BuiltinAdapter:
         return messages
 
 
+def _summarize(call: ToolCall) -> str:
+    """工具调用的一行摘要（给界面看："读了哪个文件"）。"""
+    path = str(call.arguments.get("path") or "运行目录")
+    return f"{call.name} {path}"
+
+
+def _first_line(text: str) -> str:
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else "（空）"
+    return line[:80]
+
+
 class _Either:
     """两个取消原语取"或"：自己置位的（abort/dispose）与外部传来的都要认。"""
 
@@ -345,6 +447,7 @@ def make_adapter(
     enabled_skills: str = "",
     thinking: bool = False,
     use_proxy: bool = True,
+    tools: bool = True,
 ) -> BuiltinAdapter:
     """工厂：注册表用它造适配器（与其它后端同一个签名风格）。"""
     return BuiltinAdapter(
@@ -357,4 +460,5 @@ def make_adapter(
         enabled_skills=enabled_skills,
         thinking=thinking,
         use_proxy=use_proxy,
+        tools=tools,
     )
