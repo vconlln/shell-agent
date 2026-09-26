@@ -171,6 +171,8 @@ class MainWindow(QMainWindow):
         self.right_tabs = QTabWidget()
         self.right_tabs.setObjectName("rightTabs")
         self.right_tabs.addTab(self.chat_panel, "模型对话")
+        # 中栏的自动整理说明（粘贴换行符、格式化）直接进状态栏：那是最靠近眼睛的一行
+        self.center_pane.notice.connect(self.set_status)
         self.right_tabs.addTab(self.right_pane, "校验与输出")
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)

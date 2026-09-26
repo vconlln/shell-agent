@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .shell_highlight import ShellHighlighter
+
 # (正则, 人话说明)。顺序即展示顺序；只做模式匹配，不做语义分析。
 DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\brm\s+(-\S+\s+)*-\S*[rR]\S*f\b|\brm\s+-\S*f\S*[rR]\b", "rm 递归强制删除"),
@@ -68,6 +70,9 @@ class ConfirmDialog(QDialog):
         self.script_view = QPlainTextEdit()
         self.script_view.setObjectName("confirmScriptView")
         self.script_view.setReadOnly(True)
+        # 执行前确认框里那份脚本也要高亮：用户盯着它决定"跑不跑"，
+        # 大片同色文本里最容易漏掉 `rm -rf` 这种要命的一行
+        ShellHighlighter(self.script_view.document())
         self.script_view.setPlainText(script)
 
         hits = dangerous_matches(script)

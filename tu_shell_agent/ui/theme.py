@@ -797,6 +797,13 @@ QPlainTextEdit#templateBody, QPlainTextEdit#templatePreview, QPlainTextEdit#conf
     font-family: "{mono}";
     font-size: {sized('font_size_small', scale)};
 }}
+/* 中栏脚本视图：**可编辑**了，但底色仍留在"只读档"（bg_under）——
+   它是代码面，与同一页签里的「对比上一轮」、确认框里的脚本、输出视图保持同一种底；
+   跟着输入框变亮（bg_input）会让这一栏与旁边的差异视图一深一浅地"闪"。
+   注意：`:read-only` 那条通用规则不再命中它（不再是只读），所以这里必须写死。 */
+QPlainTextEdit#scriptView {{
+    background-color: {_color('bg_under', colors)};
+}}
 /* Markdown 视图（方案预览 / 报告视图）：比例字体 + 稍大的行距 —— 文档要读得下去。
    底色跟**其它只读视图一致**（`bg_under`，深一档）：这一路的约定是"只读更深、可编辑更浅"
    （脚本视图 / 输出视图 / 对话记录区都是 bg_under），Markdown 视图没有理由例外 ——
@@ -975,6 +982,13 @@ QPushButton#chatModeButton:hover {{ background-color: {_color('bg_button_hover',
    ＋ 自己就是那个图标，再叠一个三角会挤在一起（实测 150% 下＋被压成 "+ ·"）。 */
 QPushButton#chatModeButton::menu-indicator,
 QPushButton#chatPlusButton::menu-indicator {{ image: none; width: 0; }}
+/* 中栏页签右上角的「格式化」：紧凑一档，别把页签条顶高 */
+QPushButton#formatScriptButton {{
+    padding: 1px 10px;
+    min-height: 18px;
+    margin: 2px 4px 0 0;
+    font-size: {sized('font_size_small', scale)};
+}}
 /* 模型下拉也是一颗胶囊：藏在输入框里时不该再画成输入框的样子 */
 QFrame#chatComposer QComboBox#chatModelCombo {{
     background-color: transparent;

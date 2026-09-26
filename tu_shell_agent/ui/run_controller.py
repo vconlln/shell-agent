@@ -45,6 +45,7 @@ from ..types import (
     RunConfig,
     RunEvent,
 )
+from ..shell_toolchain.format import format_script
 from ..run_store.sessions import (
     append_chat,
     read_chat,
@@ -374,6 +375,15 @@ class RunController(QObject):
         if not script.strip():
             self._status("没有可校验的脚本")
             return
+        # 送进 shellcheck / bash 之前先整理一遍（用户要求"自动格式化代码"）：
+        # 手改或粘贴进来的文本可能带 CRLF、行尾空格、乱掉的缩进 —— 那些都会在
+        # shellcheck 与 bash 那边变成"看着一样却报错"的行。整理结果**写回界面**，
+        # 保证"屏幕上看到的"与"即将被执行的"是同一份（自动改动不许发生在看不见的地方）。
+        outcome = format_script(script)
+        if outcome.changed:
+            script = outcome.text
+            self.window.center_pane.script_view.set_text(script)
+            self._status("已先格式化脚本：" + "；".join(outcome.notes))
 
         config = self._config_from_ui()
         run_dir = self._run_dir or run_dir_for(config.run_root, make_run_id())

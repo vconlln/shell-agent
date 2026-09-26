@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QListWidget, QListWidgetItem, QSplitter, QTabWidget, QTextBrowser, QTextEdit,
-    QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget, QTextBrowser,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..widgets.diff_view import diff_counts, render_diff_html
@@ -26,6 +26,8 @@ class CenterPane(QWidget):
 
     # 「就选中的代码提问」：中栏任何一处选中的内容都可以带进对话问（用户要求"询问代码"）
     ask_about_selection = Signal(str, str)
+    # 自动整理的说明（粘贴时换了换行符、格式化了哪些行）：转给状态栏，用户得看得见
+    notice = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -59,6 +61,17 @@ class CenterPane(QWidget):
         self.tabs.addTab(self.script_view, "本轮")
         self.tabs.addTab(self.compare_view, "对比上一轮")
 
+        # 「格式化」放在**页签右上角**：不额外占一行高度（中栏本来就矮），
+        # 但它是"手改脚本"这条路上最常用的动作，不该藏进菜单。
+        self.format_button = QPushButton("格式化")
+        self.format_button.setObjectName("formatScriptButton")
+        self.format_button.setToolTip(
+            "按结构整理脚本缩进、去掉行尾空白、换行符统一成 LF（Ctrl+Shift+F）。\n"
+            "只动行首与行尾空白，不改任何语句；heredoc 正文与跨行字符串原样保留。"
+        )
+        self.format_button.clicked.connect(lambda _checked=False: self.script_view.format_now())
+        self.tabs.setCornerWidget(self.format_button, Qt.Corner.TopRightCorner)
+
         self.timeline = QListWidget()
         self.timeline.setObjectName("timeline")
         self.timeline.setMinimumHeight(80)
@@ -82,6 +95,8 @@ class CenterPane(QWidget):
 
         # 脚本页的选中提问直接转出去（来源说明由 ScriptView 自己算，它管着行号）
         self.script_view.ask_about_selection.connect(self.ask_about_selection)
+        # 自动整理（粘贴换行符 / 格式化）的结果说明转给状态栏
+        self.script_view.notice.connect(self.notice)
 
     # ── 选中提问 ──────────────────────────────────────────────────
     def selected_code(self) -> str:
