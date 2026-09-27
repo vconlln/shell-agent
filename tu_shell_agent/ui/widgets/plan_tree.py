@@ -131,8 +131,13 @@ class PlanTree(QWidget):
         self._pending_reveal = ""     # 等目录读完再选中的目标（见 _on_directory_loaded）
 
     # ── 对外 ──────────────────────────────────────────────────────────
-    def set_root(self, path: str) -> bool:
-        """换根目录；目录不存在就返回 False（调用方可以退回默认值）。"""
+    def set_root(self, path: str, notify: bool = True) -> bool:
+        """换根目录；目录不存在就返回 False（调用方可以退回默认值）。
+
+        `notify=False` 用于"程序自己定的根目录"（设置里存的那份、或按运行根目录推出来的
+        默认值）：那不是用户的选择，不该被记进设置 —— 否则光是启动一次程序就会把推断出来的
+        路径写成永久设置，之后用户改了运行根目录，树还指着老地方。
+        """
         text = str(path or "").strip()
         if not text or not Path(text).is_dir():
             return False
@@ -146,7 +151,8 @@ class PlanTree(QWidget):
         self.view.expand(index)
         self.root_label.setText(f"目录：{self._root}")
         self.root_label.setToolTip(self._root)
-        self.root_changed.emit(self._root)
+        if notify:
+            self.root_changed.emit(self._root)
         return True
 
     def root(self) -> str:

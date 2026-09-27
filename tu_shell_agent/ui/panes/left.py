@@ -167,9 +167,13 @@ class LeftPane(QWidget):
 
     # ---- 文件树 ---------------------------------------------------------------
 
-    def set_plan_tree_root(self, path: str) -> bool:
-        """换文件树的根目录（主窗口从设置里读出来交给它）。"""
-        return self.plan_tree.set_root(path)
+    def set_plan_tree_root(self, path: str, notify: bool = True) -> bool:
+        """换文件树的根目录（主窗口从设置里读出来交给它）。
+
+        `notify=False` = "这是程序定的，不是用户选的"：不发出 `plan_tree_root_changed`，
+        于是主窗口不会把它写进设置（见 `PlanTree.set_root`）。
+        """
+        return self.plan_tree.set_root(path, notify=notify)
 
     def plan_tree_root(self) -> str:
         return self.plan_tree.root()

@@ -466,3 +466,47 @@ def test_saving_settings_keeps_fields_the_page_does_not_show(qtbot, tmp_path):
     assert again.plan_tree_root == str(tmp_path / "方案夹")
     assert again.loaded_from == settings_file
 
+
+def test_vanished_saved_tree_root_falls_back_to_the_default(qtbot, tmp_path):
+    """设置里记的目录已经没了（被删/被改名/换了机器）时必须退回默认值。
+
+    不退的话用户看到的是一棵**空树**，而且界面上没有任何提示 —— 看起来就像"文件树坏了"。
+    """
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    plans = tmp_path / "runs" / "plans"
+    plans.mkdir(parents=True)
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(
+            run_root=str(tmp_path / "runs"),
+            plan_tree_root=str(tmp_path / "早就被删掉的目录"),
+        ),
+    )
+    qtbot.addWidget(window)
+
+    assert window.left_pane.plan_tree_root() == str(plans)
+
+
+def test_program_chosen_tree_root_does_not_emit(qtbot, tmp_path):
+    """`notify=False` = "程序定的，不是用户选的"：不发信号，于是不会被记进设置。
+
+    只有用户自己点「选择文件夹…」才算选择（那一路走默认的 `notify=True`，
+    由 `test_changing_the_tree_root_is_remembered_and_saved` 守着）。
+    """
+    from tu_shell_agent.ui.panes.left import LeftPane
+
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+    first, second = tmp_path / "一", tmp_path / "二"
+    first.mkdir()
+    second.mkdir()
+    seen: list[str] = []
+    pane.plan_tree_root_changed.connect(seen.append)
+
+    assert pane.set_plan_tree_root(str(first), notify=False) is True
+    assert pane.set_plan_tree_root(str(second)) is True
+
+    assert seen == [str(second)], "quiet 的那一次不该发信号，默认那次必须发"
+    assert pane.plan_tree_root() == str(second)
+

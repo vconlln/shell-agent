@@ -627,17 +627,21 @@ class MainWindow(QMainWindow):
         文件树的根目录）。
         """
         self.right_pane.blocking_level = self.settings.blocking_level
+        # 这里是"程序把设置铺到界面上"，一律 notify=False：只有用户自己点「选择文件夹…」
+        # 才算选择，才值得写进设置（否则光启动一次就会把推断出来的路径写成永久设置）
         root = str(getattr(self.settings, "plan_tree_root", "") or "")
-        if root:
-            self.left_pane.set_plan_tree_root(root)
-        elif not self.left_pane.plan_tree_root():
-            # 设置里还没有：默认落在"运行根目录下的 plans/"，那里通常正放着方案文档；
-            # 没有就退回运行根目录本身
+        applied = bool(root) and self.left_pane.set_plan_tree_root(root, notify=False)
+        if not applied and not self.left_pane.plan_tree_root():
+            # 设置里没记过、或者记的那个目录已经没了（被删/被改名/换了机器）：
+            # 默认落在"运行根目录下的 plans/"，那里通常正放着方案文档；再不行退回运行根目录
+            # 本身。**不给这条退路的话**，用户看到的就是一棵空树，而且界面上没有任何提示。
             from pathlib import Path
 
             run_root = str(getattr(self.settings, "run_root", "") or "")
             for candidate in (Path(run_root) / "plans", Path(run_root), Path.home()):
-                if candidate.is_dir() and self.left_pane.set_plan_tree_root(str(candidate)):
+                if candidate.is_dir() and self.left_pane.set_plan_tree_root(
+                    str(candidate), notify=False
+                ):
                     break
 
     def _on_plan_tree_root_changed(self, path: str) -> None:
