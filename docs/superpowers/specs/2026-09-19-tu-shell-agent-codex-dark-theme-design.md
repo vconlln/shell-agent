@@ -1882,3 +1882,63 @@ C 栈落在 libQt6Widgets，Python 栈每次不同（有时在别的用例的夹
 
 副产物：整套用例 **17 分 30 秒 → 8 分 19 秒**（100%）/ **20 分 07 秒 → 8 分 24 秒**（150%），
 两档都能跑完，691 passed / 4 skipped（含本轮新增的 8 条）。
+
+## 修订四十三（2026-09-20）：中栏脚本可撤销 + 左栏换成"文件树"，以及四个真 bug
+
+用户睡前交代的三件事：
+
+> 中间的脚本，我无法使用 ctrl+z 和 ctrl+shift+z 进行撤销操作，请添加上；请把左下角的运行参数
+> 放到设置里面，其实设置已经有了，所以这里没有必要出现；把这部分替换成那种选择了哪个文件夹的
+> 那种，类似于 vscode 的左侧文件树的那种效果。
+
+### 一、撤销/重做
+
+`ScriptView` 原来用 `setPlainText()` 换正文，而**它会清空撤销栈** —— 只要发生过一次格式化、
+或者换过一轮脚本，之后按 Ctrl+Z 就永远没有反应（实测 `document().isUndoAvailable()` 直接变
+False）。换成一次 `beginEditBlock` + 全选替换（`replace_all()`），整篇替换在撤销栈里只算**一步**。
+
+重做键按平台给两个：`Ctrl+Shift+Z`（Linux/GTK）与 `Ctrl+Y`（Windows）—— Qt 默认只绑其中一个，
+用户按的正是没绑上的那个，体感就是"重做也没反应"。
+
+### 二、左栏：运行参数搬走，换成文件树
+
+`RunConfig` 的五个参数（运行根、阻断级别、轮次上限、生成/执行超时）本来就都在设置页，左栏
+那份是重复的第二来源：改哪一处生效取决于代码读的是设置还是控件。删掉左栏表单后，
+`RunController._config_from_ui()` 成为**唯一**出口（并顺手补上一个真问题：只传 `window`
+构造控制器时 `settings=None`，会让五个参数全部悄悄退回引擎默认值 —— 现在退回窗口的设置）。
+
+空出来的位置放 `PlanTree`（`QFileSystemModel` + `QTreeView`）：点文件夹展开、点 `.md/.txt`
+即设为方案、双击任何文件也当选中、以 `.` 开头的条目不列、根目录记进设置下次还在原处。
+
+### 三、四个真 bug（都是这次改出来的或这次才暴露的）
+
+1. **`QFileSystemModel` 必须 `setRootPath()`**（真 bug，树一直空白）：只 `setRootIndex()`
+   （视图的根）不够 —— 没有 `setRootPath()` 时它的目录读取线程根本不会启动，
+   `directoryLoaded` 永不触发、`rowCount()` 永远是 0，界面上就是一棵空树。
+   附带一个测试陷阱：目录内容是**异步**读进来的，`processEvents()` 转得再快也不给后台线程
+   留读盘时间，断言前必须等 `directoryLoaded`。
+2. **`changeEvent` 里塞了整个控件搭建过程**（真 bug，提交 f9f9c20 带进去的）：上一轮加"字体变化
+   重算制表位"时，把 `changeEvent` 插到了 `__init__` 中间，于是行号区、`ShellHighlighter`、
+   快捷键的创建全被缩进到 `changeEvent` 里面 —— 每触发一次字体变化就**多造一份**（同一个文档
+   挂上第二个高亮器、快捷键重复绑、行号区被换成新对象）。修法：搭建回 `__init__`，
+   `changeEvent` 只留"重算制表位"这一件事，并加一条用例数对象身份。
+3. **文件树的底色写在视图上不生效**（真 bug）：`QTreeView` 的像素属于它的 viewport，
+   写在视图上的 `background-color` 到不了那里（实测视图内部取到的是外层卡片的颜色）。改成
+   外层 `#planTreeBox` 上色（自定义 `QWidget` 子类需要 `WA_StyledBackground`），视图透明。
+4. **控制器只传 window 时丢掉全部设置**（真 bug）：见上文第一节末尾。
+
+另外把三条**因为左栏改造而变成空跑**的旧用例改成扫整窗，而不是放宽断言：
+`test_signal_wiring` 现在区分 `QAbstractButton.clicked`（带 `checked`，槽不能有位置参数）与
+`QAbstractItemView.clicked`（带 `QModelIndex`，必须有一个位置参数），并**数一下豁免发生了几次**
+（判据与代码脱节时立刻失败）；圆角用例与表单标签用例的"检查到几个"门槛按新界面据实调整，
+每条都写明数字为什么降到这个值。
+
+本轮新增 46 条用例（文件树 24、撤销/重做 9、设置项 6+1、左栏契约 6），
+整套从 695 涨到 741 条。
+
+变异验证（逐条改坏再看用例是否红，共 15 处）：`setRootPath` 去掉 → 8 条红；刷新不清空 → 1 条红；
+`reveal` 不换根 → 1 条红；`set_text` 退回 `setPlainText` → 1 条红；`format_now` 退回
+`setPlainText` → 1 条红；`changeEvent` 里重建控件 → 1 条红；去掉 `Ctrl+Shift+Z` 绑定 → 1 条红；
+树根不落盘 → 1 条红；默认根不找 `plans/` → 1 条红；控制器不回退窗口设置 → 3 条红；`collect()` 不再写回绑定对象 → 1 条红；
+`QAbstractButton.clicked` 与 `QAbstractItemView.clicked` 的判据脱节 → 1 条红。
+

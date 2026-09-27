@@ -79,6 +79,7 @@ class AppSettings:
     # 技能目录（每个子目录一个 SKILL.md，见 agent_backends/skills.py）。
     # 留空 = 用仓库自带的 `skills/`（与模板库同一套"随代码版本化"的思路）。
     skills_dir: str = ""
+    plan_tree_root: str = ""       # 左栏文件树的根目录（用户上次浏览的位置）
     # 启用哪些技能（逗号分隔的名字）；留空 = 该目录里的全部。
     enabled_skills: str = ""
     # 界面布局（四个分割器的尺寸，JSON 字符串）。放这里而不是 QSettings：

@@ -73,7 +73,7 @@ def test_start_runs_engine_and_updates_panes(qtbot, tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text("打印 ok", encoding="utf-8")
     controller.window.left_pane.set_plan(str(plan))
-    controller.window.left_pane.run_root_edit.setText(str(tmp_path / "runs"))
+    # 运行根来自设置（`_window` 已经把 run_root 指到 tmp_path/runs），左栏不再有那个输入框
 
     with qtbot.waitSignal(controller.finished, timeout=15_000) as blocker:
         controller.start()
@@ -246,7 +246,7 @@ def test_engine_layer_failure_emits_failed_not_finished(qtbot, tmp_path):
 
     controller._worker = None
     with qtbot.waitSignal(controller.failed, timeout=15_000) as blocker:
-        controller._run(explode, str(tmp_path / "run"), controller.window.left_pane.to_run_config())
+        controller._run(explode, str(tmp_path / "run"), controller._config_from_ui())
 
     assert "线程里的意外异常" in blocker.args[0]
     assert controller.window.start_button.isEnabled()
@@ -323,6 +323,36 @@ def test_replay_without_a_report_does_not_claim_zero_findings(qtbot, tmp_path):
         assert "0 处" not in window.right_pane.findings_summary.text()
 
 
+def test_controller_without_explicit_settings_uses_the_window_settings(qtbot, tmp_path):
+    """只给了 window 的控制器，也必须用**窗口上那份设置**，而不是引擎默认值。
+
+    `settings=None` 时逐个参数取默认的后果很隐蔽：运行根变空、阻断级别回到 info、
+    轮次回到 3 —— 界面照常跑，只是用户设的那些一个都没生效（用户会以为"改了没用"）。
+    生产装配两个都会给（见 MainWindow），这条挡的是"以后有人只传 window"。
+    """
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(
+            run_root=str(tmp_path / "runs"),
+            templates_dir=str(tmp_path / "templates"),
+            blocking_level="style",
+            max_rounds=7,
+            generate_timeout_ms=11_000,
+            execute_timeout_ms=22_000,
+        ),
+    )
+    qtbot.addWidget(window)
+    controller = RunController(
+        opencode=_FakeOpencode(), toolchain=_FakeToolchain(), window=window,
+    )
+
+    config = controller._config_from_ui()
+
+    assert config.run_root == str(tmp_path / "runs")
+    assert (config.blocking_level, config.max_rounds) == ("style", 7)
+    assert (config.generate_timeout_ms, config.execute_timeout_ms) == (11_000, 22_000)
+
+
 def test_blocking_level_shown_follows_the_run_config(qtbot, tmp_path):
     """右栏标注用的阻断级别必须是**本次运行生效**的那一个（引擎读同一份 config）。"""
     from tu_shell_agent.ui.run_controller import RunController
@@ -335,7 +365,8 @@ def test_blocking_level_shown_follows_the_run_config(qtbot, tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text("打印 ok", encoding="utf-8")
     window.left_pane.set_plan(str(plan))
-    window.left_pane.blocking_combo.setCurrentText("error")
+    # 阻断级别现在只有设置页一处能改：改设置（而不是某个控件）才是"本次运行生效"的那份
+    window.settings.blocking_level = "error"
 
     with qtbot.waitSignal(controller.finished, timeout=15_000):
         controller.start()
@@ -371,6 +402,9 @@ def test_settings_values_reach_the_engine_config_and_the_right_pane(qtbot, tmp_p
     原实现里左栏把这四个值写死成引擎默认值、没有任何代码读 AppSettings，而右栏的级别
     只从设置读 —— 同一个旋钮两个来源：引擎按 info 阻断、报告按设置的 error 标注，
     用户会看到"这条只展示不触发修复"，而它恰恰就是把这次运行打进 needs_human 的那条。
+
+    现在左栏那份重复表单已经删掉（用户要求），设置是**唯一**来源，这条用例也因此变成
+    "设置里写的值确实一路走到了引擎与右栏"。
     """
     window = MainWindow(
         wire_controller=False,
@@ -392,7 +426,8 @@ def test_settings_values_reach_the_engine_config_and_the_right_pane(qtbot, tmp_p
     plan.write_text("打印 ok", encoding="utf-8")
     window.left_pane.set_plan(str(plan))
 
-    config = window.left_pane.to_run_config()
+    # 这次运行真正用的配置由控制器算（左栏那份重复表单已经删掉，见 ui/panes/left.py）
+    config = controller._config_from_ui()
     assert (config.blocking_level, config.max_rounds) == ("error", 5)
     assert (config.generate_timeout_ms, config.execute_timeout_ms) == (77_000, 33_000)
 
@@ -674,7 +709,6 @@ def test_continue_repair_shows_the_script_being_repaired(qtbot, tmp_path):
         '{"outcome": "needs_human", "rounds": 2, "sessionId": "ses_x"}', encoding="utf-8"
     )
     controller._run_dir = str(run_dir)
-    controller.window.left_pane.run_root_edit.setText(str(tmp_path / "runs"))
 
     # 在**第一个事件到达时**取样：那时已经过了"开跑前摆好脚本"，而引擎的 script 事件
     # 还没来（它要等生成完成）。看最终状态是测不出来的 —— 新版本会把它覆盖掉。

@@ -57,6 +57,9 @@ from ..run_store.sessions import (
 from .engine_worker import ChatWorker, DetectWorker, EngineWorker
 from .widgets.confirm_dialog import ConfirmDialog
 
+# 阻断级别的合法取值（与设置页下拉里的那一份一致；引擎侧会再收敛一次）
+BLOCKING_LEVELS = ("error", "warning", "info", "style")
+
 # 引擎写 notes.md 时用的分隔（见 orchestrator.loop 的 _check_script 调用点）。
 _NOTES_SEPARATOR = "\n\n## 假设\n"
 
@@ -134,7 +137,11 @@ class RunController(QObject):
 
             window = MainWindow()
         self.window = window
-        self.settings = settings
+        # 设置没显式传就用窗口上那份：生产装配两者都给（见 MainWindow），但只要有人只传了
+        # window，缺省 `None` 就会让**每一个运行参数**悄悄变成引擎默认值（运行根、阻断级别、
+        # 轮次上限全都不再是用户设的那份），而界面上不会有任何提示 —— 用户只会觉得
+        # "我改了怎么没用"。这里退回窗口的设置，保证"窗口在，设置就在"。
+        self.settings = settings if settings is not None else getattr(window, "settings", None)
         self.auto_confirm = auto_confirm
         self.confirm_answer = confirm_answer
         self._run_root = run_root
@@ -1107,10 +1114,23 @@ class RunController(QObject):
 
     # ── 输入装配 ──────────────────────────────────────────────────
     def _config_from_ui(self) -> RunConfig:
-        config = self.window.left_pane.to_run_config()
+        """本次运行的参数：**一律来自设置**（用户要求把左栏那份重复的表单去掉）。
+
+        运行根目录 / 阻断级别 / 轮次上限 / 生成与执行超时这五项在设置页里各有一份，
+        左栏原来又摆了一份同样的表单 —— 两处改同一件事，用户明确要求删掉左栏那份
+        （"其实设置已经有了，所以这里没有必要出现"）。
+        """
+        settings = self.settings
+        level = str(getattr(settings, "blocking_level", "") or "")
+        config = RunConfig(
+            run_root=str(getattr(settings, "run_root", "") or ""),
+            max_rounds=int(getattr(settings, "max_rounds", 3) or 3),
+            generate_timeout_ms=int(getattr(settings, "generate_timeout_ms", 300_000) or 300_000),
+            execute_timeout_ms=int(getattr(settings, "execute_timeout_ms", 120_000) or 120_000),
+            blocking_level=level if level in BLOCKING_LEVELS else "info",
+        )
         if not config.run_root:
-            # 左栏没填就退到构造参数给的运行根（"改后重跑"常常没走左栏的校验）。
-            # 用 replace 而不是 `RunConfig(**config.__dict__)`：RunConfig 是 slots 数据类，没有 __dict__。
+            # 设置里也没填就退到构造参数给的运行根（CLI/测试会把 run_root 直接传进来）
             config = replace(config, run_root=self._run_root)
         # 模型来自设置页（provider/model）。**不能省**：留空时 opencode 若没配默认模型，
         # 会落到它自己的免费档，而免费档只允许官方客户端调用 —— 经 serve 的 API 调用会得到
@@ -1119,14 +1139,7 @@ class RunController(QObject):
         return replace(config, model=model or None)
 
     def _prefill_inputs(self) -> None:
-        """把设置里的运行根填进左栏（只在用户还没填时），再交给 `validate()` 判。
-
-        不预填的话，"选了方案、运行根靠设置"这种最常见的用法会被判成"运行根没填"，
-        而用户其实早就配好了。
-        """
-        pane = self.window.left_pane
-        if self._run_root and not pane.run_root_edit.text().strip():
-            pane.run_root_edit.setText(self._run_root)
+        """运行根已经只在设置里；这里不再往左栏填任何东西（那块表单已移除）。"""
 
     def _template_spec(self) -> TemplateSpec:
         pane = getattr(self.window, "templates_pane", None)

@@ -331,7 +331,7 @@ def test_injected_doubles_are_still_used_whatever_the_backend_is(qtbot, tmp_path
         settings=settings, run_root=str(tmp_path / "runs"),
     )
 
-    assert controller._ensure_deps(controller.window.left_pane.to_run_config()) == (
+    assert controller._ensure_deps(controller._config_from_ui()) == (
         opencode,
         toolchain,
     )
@@ -384,7 +384,7 @@ def test_controller_builds_the_cli_adapter_and_keeps_bash_and_shellcheck(
         window=_window(qtbot, settings), settings=settings, run_root=str(tmp_path / "runs")
     )
 
-    adapter, toolchain = controller._ensure_deps(controller.window.left_pane.to_run_config())
+    adapter, toolchain = controller._ensure_deps(controller._config_from_ui())
 
     assert type(adapter).__name__ == "CliAgentAdapter"
     assert adapter._command == str(FIXTURE)

@@ -1,4 +1,8 @@
-"""左栏：方案选择与预览 + 本次运行参数。
+"""左栏：方案选择与预览 + 方案文件夹文件树。
+
+**运行参数不在这一栏**（用户 2026-09-20）：运行根目录、阻断级别、轮次上限、生成/执行
+超时与设置页的「运行」一节完全重复，留着等于同一件事有两处能改。现在只在设置页改，
+这一栏空出来的位置放文件树（选文件夹 → 看里面的文件 → 点一个当方案）。
 
 只收集输入并做廉价校验，**不发起运行**（运行由任务 9 的 RunController 负责），
 因此这里不碰网络、子进程，也不做建目录之类的磁盘写操作：写盘的失败信息
@@ -12,13 +16,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from ..markdown import MarkdownBrowser
+from ..widgets.plan_tree import PlanTree
 from ..widgets.scroll import form_container, scrollable
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
-from ...types import RunConfig, Severity
+from ...types import Severity
 
 # 与 types.SEVERITY_RANK 同源的四个级别；顺序即下拉框顺序（由重到轻）
 BLOCKING_LEVELS: tuple[Severity, ...] = ("error", "warning", "info", "style")
@@ -34,23 +39,12 @@ def _section(text: str) -> QLabel:
     return label
 
 
-def _absolute_run_root(text: str) -> str:
-    """运行根一律展开 `~` 并绝对化。
-
-    不处理的话 `~/runs` 会被引擎当成**相对**路径（`Path("~/runs")` 不是家目录），
-    于是在进程 CWD 下建一个名字就叫 `~` 的目录、整次运行都落在那里，界面毫无提示。
-    相对路径同理（`runs` → CWD/runs）。
-    """
-    stripped = text.strip()
-    if not stripped:
-        return ""
-    return str(Path(stripped).expanduser().absolute())
-
-
 class LeftPane(QWidget):
     """方案 + 本次运行参数的输入区。"""
 
-    plan_changed = Signal(str)          # 选择方案后发出（绝对路径）
+    plan_changed = Signal(str)
+    # 文件树的根目录换了（由主窗口记进设置，下次打开还在原处）
+    plan_tree_root_changed = Signal(str)          # 选择方案后发出（绝对路径）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -81,48 +75,6 @@ class LeftPane(QWidget):
         self.plan_preview.setMinimumHeight(90)
         self.plan_preview.set_plain(_PREVIEW_IDLE)
 
-        self.run_root_edit = QLineEdit()
-        self.run_root_edit.setObjectName("runRootEdit")
-
-        self.blocking_combo = QComboBox()
-        self.blocking_combo.setObjectName("blockingCombo")
-        self.blocking_combo.addItems(list(BLOCKING_LEVELS))
-        # 默认 info 而非 warning：实测 SC2086（变量未加引号）是 info 级，
-        # 以 warning 为默认会让这类真实隐患「只展示、不修」（规格 §11）。
-        self.blocking_combo.setCurrentText("info")
-
-        self.max_rounds_spin = QSpinBox()
-        self.max_rounds_spin.setObjectName("maxRoundsSpin")
-        self.max_rounds_spin.setRange(1, 10)      # 允许比规格的 3 轮更宽，但下限 1：0 轮等于不生成脚本
-        self.max_rounds_spin.setValue(3)
-        # 说清 1 意味着什么：真实全链路冒烟里，用户保存的 1 轮把"模型偶尔把契约标记写缺"
-        # 从"引擎自己回灌重试就能修"变成了直接 needs_human —— 而界面上当时没有任何提示。
-        self.max_rounds_spin.setToolTip(
-            "最多生成几轮。大于 1 时，契约不完整或 shellcheck 没过会把失败原因回灌给模型重试；\n"
-            "填 1 表示**一次不成即停**（没有重试机会），建议留在默认的 3。"
-        )
-
-        self.generate_timeout_spin = QSpinBox()
-        self.generate_timeout_spin.setObjectName("generateTimeoutSpin")
-        self.generate_timeout_spin.setRange(1_000, 3_600_000)
-        self.generate_timeout_spin.setSingleStep(10_000)
-        self.generate_timeout_spin.setSuffix(" ms")
-        self.generate_timeout_spin.setValue(300_000)
-
-        self.execute_timeout_spin = QSpinBox()
-        self.execute_timeout_spin.setObjectName("executeTimeoutSpin")
-        self.execute_timeout_spin.setRange(1_000, 3_600_000)
-        self.execute_timeout_spin.setSingleStep(10_000)
-        self.execute_timeout_spin.setSuffix(" ms")
-        self.execute_timeout_spin.setValue(120_000)
-
-        run_form = QFormLayout()
-        run_form.addRow("运行根目录", self.run_root_edit)
-        run_form.addRow("阻断级别", self.blocking_combo)
-        run_form.addRow("轮次上限", self.max_rounds_spin)
-        run_form.addRow("生成超时", self.generate_timeout_spin)
-        run_form.addRow("执行超时", self.execute_timeout_spin)
-
         # 表单进滚动区：左栏内容需要 576px，靠"压缩控件"适应高度会把输入框压到 13px
         # （见 widgets/scroll.py 的说明）。现在按需要出滚动条，控件保持正常高度。
         content, layout = form_container()
@@ -142,9 +94,14 @@ class LeftPane(QWidget):
         self.extra_edit.setFixedHeight(64)
         layout.addWidget(self.extra_edit)
 
-        layout.addWidget(_section("运行参数（仅本次）"))
-        layout.addLayout(run_form)
-        # 组件路径（opencode / Git Bash / shellcheck）只在设置页改，这里只读不自检
+        # 运行参数（运行根目录 / 阻断级别 / 轮次上限 / 生成与执行超时）**只在设置页**改：
+        # 这里原来是同样的一份表单，两处能改同一件事，用户要求把这块换掉
+        # （"其实设置已经有了，所以这里没有必要出现"）。
+        layout.addWidget(_section("文件夹（点选方案文档）"))
+        self.plan_tree = PlanTree()
+        self.plan_tree.plan_chosen.connect(self.set_plan)
+        self.plan_tree.root_changed.connect(self.plan_tree_root_changed)
+        layout.addWidget(self.plan_tree)
 
     # ---- 方案 -----------------------------------------------------------------
 
@@ -152,6 +109,9 @@ class LeftPane(QWidget):
         """选定方案：读文件填预览；读不了就在预览里如实写错误，路径照样记下。"""
         self._plan_path = str(path)
         self.plan_edit.setText(self._plan_path)
+        self.plan_tree.set_plan_path(self._plan_path)
+        if self._plan_path:
+            self.plan_tree.reveal(self._plan_path)
         if not self._plan_path:
             self._plan_error = ""
             self._plan_text = ""
@@ -205,25 +165,19 @@ class LeftPane(QWidget):
         """用户临时追加的要求（可为空）。空串时提示词里不会多出一个空段落。"""
         return self.extra_edit.toPlainText()
 
-    # ---- 运行参数 -------------------------------------------------------------
+    # ---- 文件树 ---------------------------------------------------------------
 
-    def to_run_config(self) -> RunConfig:
-        """本次运行参数。组件路径由设置页与 selfcheck 决定，这里一律留空。
+    def set_plan_tree_root(self, path: str) -> bool:
+        """换文件树的根目录（主窗口从设置里读出来交给它）。"""
+        return self.plan_tree.set_root(path)
 
-        所以不传 path 覆盖：传了就等于给了引擎一个「界面上没显示过的路径」，
-        与规格 §12「组件路径只出现在设置页，避免两处可改」冲突。
-        """
-        level = self.blocking_combo.currentText()
-        return RunConfig(
-            run_root=_absolute_run_root(self.run_root_edit.text()),
-            max_rounds=self.max_rounds_spin.value(),
-            generate_timeout_ms=self.generate_timeout_spin.value(),
-            execute_timeout_ms=self.execute_timeout_spin.value(),
-            blocking_level=level if level in BLOCKING_LEVELS else "info",
-        )
+    def plan_tree_root(self) -> str:
+        return self.plan_tree.root()
 
     def validate(self) -> list[str]:
-        """返回全部问题；文案带上「方案」「运行根」，用户才能一眼定位到是哪一格。
+        """返回全部问题；文案带上「方案」二字，用户才能一眼定位到是哪一格。
+
+        运行根目录**不在这里查**：它归设置页管，运行前由引擎在建目录时给出结论。
 
         只查存在性、可读性与「是不是文件」这类廉价事实：真正的可写性要等引擎建运行目录时
         才有结论，界面里先试一遍会在用户敲路径的过程中反复误报。
@@ -244,10 +198,4 @@ class LeftPane(QWidget):
             # 运行被记成成功。运行前就拦在这里。
             problems.append(f"方案文档是空的：{path}")
 
-        run_root = _absolute_run_root(self.run_root_edit.text())
-        if not run_root:
-            problems.append("运行根目录未填写")
-        elif Path(run_root).is_file():
-            # 目录不存在是正常的（引擎会新建），但指向一个文件时一定跑不起来
-            problems.append(f"运行根目录是一个文件，不是目录：{run_root}")
         return problems

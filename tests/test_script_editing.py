@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeyEvent, QTextCursor
+from PySide6.QtGui import QKeyEvent, QShortcut, QTextCursor
 from PySide6.QtWidgets import QApplication
 
 from tu_shell_agent.ui.widgets.script_view import ScriptView
@@ -272,3 +272,142 @@ def test_script_view_tab_stop_is_four_spaces(view):
     assert abs(view.tabStopDistance() - expected) < 0.5, (
         f"制表位 {view.tabStopDistance()}px，4 个空格应当是 {expected}px"
     )
+
+
+# ── 撤销 / 重做 ───────────────────────────────────────────────────────
+#
+# 用户原话（2026-09-20 睡前）："中间的脚本，我无法使用 ctrl+z 和 ctrl+shift+z 进行撤销操作，
+# 请添加上"。这一节钉住的就是这件事，以及它当初为什么会坏。
+
+
+def _type(view: ScriptView, text: str) -> None:
+    """按键盘输入（走 keyPressEvent，是真人在打字会走的那条路）。"""
+    for char in text:
+        QApplication.sendEvent(
+            view,
+            QKeyEvent(QKeyEvent.Type.KeyPress, 0, Qt.KeyboardModifier.NoModifier, char),
+        )
+
+
+def _shortcut(view: ScriptView, key, modifiers) -> None:
+    """按一个快捷键：先试 QShortcut（真窗口里 Ctrl+Z 是被它接走的）。
+
+    用 `QTest.keyClick` 需要窗口真的被激活、有焦点，无头环境下不可靠；这里直接触发
+    挂在控件上的 QShortcut —— 快捷键**有没有绑上**正是要测的东西（绑没绑是用户能感觉到的
+    差别：没绑上时按了完全没反应）。
+    """
+    from PySide6.QtGui import QKeySequence
+
+    wanted = QKeySequence(int(key) | int(modifiers)).toString()
+    for shortcut in view.findChildren(QShortcut):
+        if shortcut.key().toString() == wanted and shortcut.isEnabled():
+            shortcut.activated.emit()
+            return
+    raise AssertionError(f"没有绑定 {wanted} 这个快捷键")
+
+
+def test_undo_shortcut_is_bound(view):
+    """Ctrl+Z 必须绑在控件上（Qt 自带一份，但用户反馈"按了没反应"，所以显式绑）。"""
+    from PySide6.QtGui import QKeySequence
+
+    keys = {shortcut.key().toString() for shortcut in view.findChildren(QShortcut)}
+    assert QKeySequence(QKeySequence.StandardKey.Undo).toString() in keys
+
+
+@pytest.mark.parametrize("sequence", ["Ctrl+Shift+Z", "Ctrl+Y"])
+def test_redo_shortcuts_are_bound(view, sequence):
+    """重做两个键都要认：Windows 习惯 Ctrl+Y，Linux/GTK 习惯 Ctrl+Shift+Z。
+
+    用户按的是 Ctrl+Shift+Z，而 Qt 默认只给了一个平台的键 —— 这正是"重做没反应"的来源。
+    """
+    keys = {shortcut.key().toString() for shortcut in view.findChildren(QShortcut)}
+    assert sequence in keys
+
+
+def test_undo_undoes_typing(view):
+    """最基本的：打字 → Ctrl+Z 退回去。"""
+    _type(view, "echo hi")
+    assert view.toPlainText() == "echo hi"
+
+    view.undo()
+
+    assert view.toPlainText() == ""
+
+
+def test_redo_restores_after_undo(view):
+    """Ctrl+Z 之后要能重做回来（Ctrl+Y 与 Ctrl+Shift+Z 都试一遍）。"""
+    _type(view, "echo hi")
+    view.undo()
+    assert view.toPlainText() == ""
+
+    view.redo()
+
+    assert view.toPlainText() == "echo hi"
+
+
+def test_set_text_is_undoable(view):
+    """换一轮脚本（`set_text`）也要能撤销回来。
+
+    **这就是用户踩的那条**：原来 `set_text` 用 `setPlainText()`，它会把撤销栈整个清空 ——
+    只要脚本被换过一轮或格式化过一次，之后按 Ctrl+Z 就再也不会发生任何事情
+    （实测 `isUndoAvailable()` 直接变 False）。
+    """
+    view.set_text("echo 第一轮")
+    view.set_text("echo 第二轮")
+    assert view.toPlainText() == "echo 第二轮"
+
+    # `QPlainTextEdit` 没有 isUndoAvailable()（那是 QTextEdit 的方法），得问文档要
+    assert view.document().isUndoAvailable() is True, (
+        "换过脚本之后撤销栈是空的 —— 用户按 Ctrl+Z 不会有反应"
+    )
+    view.undo()
+
+    assert view.toPlainText() == "echo 第一轮"
+
+
+def test_format_now_is_undoable(view):
+    """格式化改错了，Ctrl+Z 要能整篇退回去（否则用户的文本被"自动"改掉且无法挽回）。"""
+    view.set_text("if true; then\necho hi\nfi\n")
+    assert view.format_now() is True
+    formatted = view.toPlainText()
+
+    view.undo()
+
+    assert view.toPlainText() != formatted
+    assert "if true; then" in view.toPlainText()
+
+
+def test_replace_all_does_not_touch_undo_stack_when_text_is_identical(view):
+    """正文没变时不产生编辑记录：否则 Ctrl+Z 会退到"什么都没发生"的一步，看着像失灵。"""
+    view.set_text("echo hi")
+    before = view.document().availableUndoSteps()
+
+    view.replace_all("echo hi")
+
+    assert view.document().availableUndoSteps() == before
+
+
+def test_repeated_font_change_does_not_rebuild_the_widget(view):
+    """字体变化（QSS 生效、换缩放）不许把行号区/高亮器/快捷键重造一遍。
+
+    **这条是真出过事故的**：控件自身的搭建代码曾经被缩进到 `changeEvent` 里面，
+    于是每次字体变化都会 `_LineNumberArea(self)` 新建一个行号区、再挂一个
+    `ShellHighlighter` 到同一个文档、快捷键也重复绑一份 —— 旧的还连着信号。
+    这里直接数一遍：触发两次 FontChange 之后，这些对象必须还是原来那几个。
+    """
+    from PySide6.QtCore import QEvent
+
+    from tu_shell_agent.ui.widgets.shell_highlight import ShellHighlighter
+
+    area = view._area
+    highlighter = view.highlighter
+    shortcut_count = len(view.findChildren(QShortcut))
+
+    for _ in range(2):
+        QApplication.sendEvent(view, QEvent(QEvent.Type.FontChange))
+
+    assert view._area is area, "行号区被换成了新对象"
+    assert view.highlighter is highlighter, "同一个文档上被挂了第二个高亮器"
+    assert len(view.findChildren(QShortcut)) == shortcut_count
+    # 高亮器与文档是一对一：多挂的那份还会继续格式化文本（两套规则互相打架）
+    assert len(view.document().findChildren(ShellHighlighter)) == 1

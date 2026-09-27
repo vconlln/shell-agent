@@ -707,6 +707,35 @@ QHeaderView::section {{
     padding: 4px 6px;
 }}
 
+/* ── 方案文件树（左栏）：长得像列表，但它是 QTreeView ─────────────────
+   为什么单独写一条：上面那条列表规则只覆盖 `QListWidget / QTreeWidget /
+   QTableWidget`，而文件树用的是 `QFileSystemModel` + `QTreeView` —— 不在那条规则里，
+   不补的话它就是一块**原生浅色**的方框，在这套深色界面上格外扎眼。
+
+   底色写在**外层 `#planTreeBox` 上**，不写在视图上：视图的像素真正属于它的
+   viewport，而 `QTreeView` 的 `background-color` 到不了 viewport（实测：把底色写在视图上，
+   视图内部取到的是外面那层卡片的颜色，等于这条声明没生效）。外层是普通 `QWidget`，
+   给它上色需要 `WA_StyledBackground`（见 widgets/plan_tree.py）。 */
+QWidget#planTreeBox {{
+    background-color: {_color('bg_elevated', colors)};
+    border: 1px solid {_color('border_light', colors)};
+    border-radius: {sized('radius', scale)};
+}}
+QTreeView#planTree {{
+    background: transparent;      /* 底色由上面的面板画，避免两层叠成更深的一块 */
+    border: none;
+    outline: none;
+    padding: 2px;
+}}
+QTreeView#planTree::item {{ min-height: {sized('row_height', scale)}; padding: 2px 6px; }}
+QTreeView#planTree::item:hover {{ background-color: {_color('bg_hover', colors)}; }}
+QTreeView#planTree::item:selected {{
+    background-color: {_color('bg_selected', colors)};
+    color: {_color('fg', colors)};
+}}
+/* 分支箭头**不自己画**（没有箭头图片可贴）：不写 `::branch` 规则时 Qt 会用底层的
+   指示器绘制，展开/收起的三角还在；一旦写上 `::branch {{ ... }}` 反而会把它盖成空白。 */
+
 /* ── 页签：Codex 的胶囊式，去掉原生边框与底部横线 ─────────────── */
 {containers_transparent_rule}
 QTabWidget::pane {{ border: 1px solid {_color('border_light', colors)}; border-radius: {sized('radius_lg', scale)}; top: -1px; }}

@@ -1,13 +1,32 @@
-"""左栏的测试契约：选方案 + 填参数 + 预览，不发起运行。
+"""左栏的测试契约：选方案 + 预览 + 方案文件夹文件树，不发起运行。
 
-objectName（planEdit / planPreview / runRootEdit / blockingCombo / maxRoundsSpin /
-generateTimeoutSpin / executeTimeoutSpin）与默认值（阻断级别 info、3 轮、
-300s/120s 超时）是任务 9 的 RunController 与后续审查者共同依赖的契约，不要改名改默认。
+**运行参数已经不在左栏**（用户 2026-09-20 睡前："请把左下角的运行参数放到设置里面，
+其实设置已经有了，所以这里没有必要出现，把这部分替换成……类似于 vscode 的左侧文件树"）。
+所以本文件里有两类用例：
+
+1. 方案选择/预览/校验的行为（原来就有）；
+2. "运行参数不许回来" —— 直接断言那几个控件在左栏里根本不存在。这类断言看着像在
+   测"没有东西"，但它是这次改动的**唯一**契约：只要有人把表单加回来，两处能改同一件事
+   的老问题就复活了，而且界面上不会有任何报错。
+
+objectName（planEdit / planPreview / planTree / planTreeBox）是 RunController 与后续
+审查者共同依赖的契约，不要改名。
 """
 
 from pathlib import Path
 
+import pytest
+
 from tu_shell_agent.ui.panes.left import LeftPane
+
+# 曾经出现在左栏「运行参数（仅本次）」里的控件名：现在只允许出现在设置页
+RUN_PARAMETER_NAMES = (
+    "runRootEdit",
+    "blockingCombo",
+    "maxRoundsSpin",
+    "generateTimeoutSpin",
+    "executeTimeoutSpin",
+)
 
 
 def test_plan_picker_loads_preview(qtbot, tmp_path: Path):
@@ -22,26 +41,89 @@ def test_plan_picker_loads_preview(qtbot, tmp_path: Path):
     assert pane.plan_path() == str(plan)
 
 
-def test_to_run_config_reflects_widgets(qtbot, tmp_path: Path):
+def test_run_parameters_are_gone_from_left_pane(qtbot):
+    """运行参数不许在左栏出现：它们与设置页的「运行」一节重复。
+
+    **为什么值得一条用例**：删掉表单本身很容易，难的是防止它被"顺手加回来"。
+    左栏多一个 runRootEdit，用户就会有两处能改运行根目录，而且改哪一处生效取决于
+    读的是设置还是控件 —— 这种分歧不会报错，只会让人怀疑"我改了怎么没用"。
+    """
     pane = LeftPane()
     qtbot.addWidget(pane)
-    pane.run_root_edit.setText(str(tmp_path / "runs"))
-    pane.blocking_combo.setCurrentText("warning")
-    pane.max_rounds_spin.setValue(5)
 
-    config = pane.to_run_config()
+    from PySide6.QtWidgets import QWidget
 
-    assert config.run_root == str(tmp_path / "runs")
-    assert config.blocking_level == "warning"
-    assert config.max_rounds == 5
+    existing = {child.objectName() for child in pane.findChildren(QWidget)}
+    still_here = [name for name in RUN_PARAMETER_NAMES if name in existing]
+    assert still_here == [], f"左栏又出现了运行参数控件：{still_here}"
+
+    # 方法层面也不许留：`to_run_config()` 曾经是左栏的第二套配置来源
+    assert not hasattr(pane, "to_run_config"), "左栏不该再有 to_run_config()"
 
 
-def test_validate_reports_missing_inputs(qtbot, tmp_path: Path):
+def test_left_pane_has_the_file_tree_instead(qtbot, tmp_path: Path):
+    """空出来的位置换成文件树（用户要的"vscode 左侧文件树那种效果"）。"""
     pane = LeftPane()
     qtbot.addWidget(pane)
+
+    assert pane.plan_tree.objectName() == "planTreeBox"
+    assert pane.plan_tree.view.objectName() == "planTree"
+    # 树是左栏的子控件（挂在滚动区里），不是凭空建的一个独立窗口
+    assert pane.plan_tree.parent() is not None
+
+    plan = tmp_path / "方案.md"
+    plan.write_text("# 方案", encoding="utf-8")
+    pane.set_plan(str(plan))
+    # 选方案后树里要跟着记住它：否则点「回到方案目录」时不知道回到哪
+    assert pane.plan_tree.plan_path() == str(plan)
+
+
+def test_choose_in_tree_sets_the_plan(qtbot, tmp_path: Path):
+    """在树里点一个 .md → 就是选它当方案（路径、预览、信号一起动）。"""
+    plan = tmp_path / "树里选的.md"
+    plan.write_text("# 树里选的\n\n正文", encoding="utf-8")
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+
+    with qtbot.waitSignal(pane.plan_changed, timeout=2_000) as blocker:
+        pane.plan_tree.plan_chosen.emit(str(plan))
+
+    assert blocker.args[0] == str(plan)
+    assert pane.plan_path() == str(plan)
+    assert "树里选的" in pane.plan_preview.toPlainText()
+
+
+def test_tree_root_change_is_forwarded_for_persistence(qtbot, tmp_path: Path):
+    """树根目录换了要发出去（主窗口记进设置，下次打开还在原处）。"""
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+    target = tmp_path / "方案夹"
+    target.mkdir()
+
+    with qtbot.waitSignal(pane.plan_tree_root_changed, timeout=2_000) as blocker:
+        assert pane.set_plan_tree_root(str(target)) is True
+
+    assert blocker.args[0] == str(target)
+    assert pane.plan_tree_root() == str(target)
+
+
+def test_tree_root_rejects_a_missing_directory(qtbot, tmp_path: Path):
+    """根目录不存在时返回 False，调用方可以退回默认值（静默换成空树最糟）。"""
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+
+    assert pane.set_plan_tree_root(str(tmp_path / "根本没有这个目录")) is False
+
+
+def test_validate_reports_missing_inputs(qtbot):
+    """没选方案必须拦下；**运行根不在这里报**（它归设置页管）。"""
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+
     problems = pane.validate()
+
     assert any("方案" in problem for problem in problems)
-    assert any("运行根" in problem for problem in problems)
+    assert not any("运行根" in problem for problem in problems), problems
 
 
 def test_validate_passes_for_ready_inputs(qtbot, tmp_path: Path):
@@ -50,48 +132,21 @@ def test_validate_passes_for_ready_inputs(qtbot, tmp_path: Path):
     pane = LeftPane()
     qtbot.addWidget(pane)
     pane.set_plan(str(plan))
-    pane.run_root_edit.setText(str(tmp_path / "runs"))
+
     assert pane.validate() == []
 
 
 def test_widget_names_and_defaults_are_contract(qtbot):
-    """控件名与默认值即契约：RunController 按名字取控件，放错默认值会静默改变引擎行为。"""
+    """控件名即契约：RunController 与主窗口按名字取控件，改名字会静默失效。"""
     pane = LeftPane()
     qtbot.addWidget(pane)
 
     assert pane.objectName() == "leftPane"
     assert pane.plan_edit.objectName() == "planEdit"
     assert pane.plan_preview.objectName() == "planPreview"
-    assert pane.run_root_edit.objectName() == "runRootEdit"
-    assert pane.blocking_combo.objectName() == "blockingCombo"
-    assert pane.max_rounds_spin.objectName() == "maxRoundsSpin"
-    assert pane.generate_timeout_spin.objectName() == "generateTimeoutSpin"
-    assert pane.execute_timeout_spin.objectName() == "executeTimeoutSpin"
-
     assert pane.plan_edit.isReadOnly() is True
     assert pane.plan_preview.isReadOnly() is True
     assert pane.plan_path() == "" and pane.plan_text() == ""
-    assert [pane.blocking_combo.itemText(i) for i in range(pane.blocking_combo.count())] == [
-        "error", "warning", "info", "style",
-    ]
-    assert pane.blocking_combo.currentText() == "info"   # 与 RunConfig 默认一致（SC2086 就是 info 级）
-    assert pane.max_rounds_spin.value() == 3
-    assert (pane.max_rounds_spin.minimum(), pane.max_rounds_spin.maximum()) == (1, 10)
-    assert pane.generate_timeout_spin.value() == 300_000
-    assert pane.execute_timeout_spin.value() == 120_000
-
-
-def test_to_run_config_leaves_component_paths_to_settings(qtbot, tmp_path: Path):
-    """组件路径只出现在设置页；左栏填了就等于两处可改，所以这里必须留空。"""
-    pane = LeftPane()
-    qtbot.addWidget(pane)
-    pane.run_root_edit.setText(str(tmp_path / "runs"))
-    pane.generate_timeout_spin.setValue(60_000)
-
-    config = pane.to_run_config()
-
-    assert config.generate_timeout_ms == 60_000
-    assert (config.bash_path, config.shellcheck_path, config.opencode_path) == (None, None, None)
 
 
 def test_set_plan_emits_signal_and_reports_unreadable_file(qtbot, tmp_path: Path):
@@ -120,28 +175,9 @@ def test_empty_plan_is_rejected(qtbot, tmp_path):
         pane = LeftPane()
         qtbot.addWidget(pane)
         pane.set_plan(str(plan))
-        pane.run_root_edit.setText(str(tmp_path / "runs"))
 
         problems = pane.validate()
         assert any("方案" in problem and "空" in problem for problem in problems), problems
-
-
-def test_run_root_is_expanded_and_absolute(qtbot, tmp_path, monkeypatch):
-    """`~/runs` 与相对路径都必须落成绝对路径。
-
-    不处理的话引擎会把 "~/runs" 当成**相对**路径，在进程 CWD 下建一个名字就叫 `~`
-    的目录，整次运行都落在那里，而界面毫无提示。
-    """
-    pane = LeftPane()
-    qtbot.addWidget(pane)
-    pane.run_root_edit.setText("~/tu-runs-review")
-
-    assert pane.to_run_config().run_root == str(Path.home() / "tu-runs-review")
-
-    pane.run_root_edit.setText("relative-runs")
-    configured = pane.to_run_config().run_root
-    assert Path(configured).is_absolute()
-    assert configured == str(Path.cwd() / "relative-runs")
 
 
 def test_non_utf8_plan_says_what_to_do(qtbot, tmp_path):
@@ -158,3 +194,24 @@ def test_non_utf8_plan_says_what_to_do(qtbot, tmp_path):
 
     problems = pane.validate()
     assert any("UTF-8" in problem for problem in problems), problems
+
+
+def test_extra_instruction_is_empty_by_default_and_passed_through(qtbot):
+    """追加要求默认留空（空串时提示词里不该多出一个空段落）。"""
+    pane = LeftPane()
+    qtbot.addWidget(pane)
+
+    assert pane.extra_instruction() == ""
+    pane.extra_edit.setPlainText("只改日志轮转那一段")
+    assert pane.extra_instruction() == "只改日志轮转那一段"
+
+
+@pytest.mark.parametrize("suffix", [".md", ".markdown", ".txt"])
+def test_plan_suffixes_are_the_ones_the_picker_offers(qtbot, suffix):
+    """文件树里"点一下就当选方案"的后缀，必须与「选择方案…」对话框一致。
+
+    两处不一致的后果是：对话框里能选的 .markdown，在树里点了却没反应。
+    """
+    from tu_shell_agent.ui.widgets.plan_tree import PLAN_SUFFIXES
+
+    assert suffix in PLAN_SUFFIXES

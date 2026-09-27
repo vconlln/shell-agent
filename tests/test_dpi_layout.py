@@ -134,7 +134,10 @@ def test_form_labels_fit_after_every_scale(qtbot):
         window.apply_appearance()
 
         checked = 0
-        for form in window.left_pane.findChildren(QFormLayout):
+        # 扫**整窗**的表单，而不是只看左栏：左栏那份「运行参数（仅本次）」表单已经按用户
+        # 要求删掉（换成文件树，见 ui/panes/left.py），只盯左栏这条用例就变成空跑了 ——
+        # 而它守的那个坑（`QLabel.sizeHint()` 不含 QSS padding）在设置页那几张表单上照样在。
+        for form in window.findChildren(QFormLayout):
             for row in range(form.rowCount()):
                 item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
                 label = item.widget() if item is not None else None
@@ -145,7 +148,7 @@ def test_form_labels_fit_after_every_scale(qtbot):
                     f"scale={scale} 时标签「{label.text()}」需要 {need}px，实得 {label.width()}px"
                 )
                 checked += 1
-        assert checked > 0, "没有检查到任何表单标签（用例失效了）"
+        assert checked > 0, f"没有检查到任何表单标签（用例失效了）：scale={scale}"
         window.close()
 
 

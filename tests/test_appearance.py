@@ -923,7 +923,11 @@ def test_every_input_in_the_window_stays_rounded_at_the_default_scale(restore_ap
                 f"{widget.objectName() or kind.__name__} 高 {widget.height()}px、"
                 f"半径 {radius}px —— 余量不足，Qt 在 半径>=半高 时会画直角"
             )
-    assert checked >= 4, f"没有检查到输入控件（用例失效了）：{checked}"
+    # 门槛的意义是"别空跑"。左栏那份「运行参数（仅本次）」表单按用户要求删掉之后
+    # （换成文件树，见 ui/panes/left.py），窗口里剩下的可见单行输入是三个：
+    # planEdit（方案路径）、chatSessionCombo / chatModelCombo（对话面板的下拉）。
+    # 以后新增输入控件可以把这个数字往上抬，但不该为了好看而虚报。
+    assert checked >= 3, f"没有检查到输入控件（用例失效了）：{checked}"
 
 
 def test_inputs_are_a_lighter_field_not_a_black_hole(restore_app, qtbot, tmp_path):

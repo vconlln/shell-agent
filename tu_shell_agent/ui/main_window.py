@@ -279,9 +279,10 @@ class MainWindow(QMainWindow):
             splitter.splitterMoved.connect(lambda *_args: self._save_layout())
         # 折叠状态也记进设置（默认展开，用户收起哪块就记哪块）
         self._apply_settings_to_inputs()
-        # 右栏那句"会不会阻断"必须跟着**生效**的级别走：引擎读的是左栏那个下拉框，
-        # 用户一改就该立刻反映，不能等到下次运行。
-        self.left_pane.blocking_combo.currentTextChanged.connect(self._on_blocking_level_changed)
+        # 文件树的根目录换了就记进设置（下次打开还在原处）。
+        # 阻断级别不再有"控件改动"这条路：它只在设置页里改，由 `_apply_settings_to_inputs()`
+        # 在装配时和每次保存后同步给右栏（报告要高亮到哪一级由它决定）。
+        self.left_pane.plan_tree_root_changed.connect(self._on_plan_tree_root_changed)
         self.settings_page.saved.connect(self._on_settings_saved)
         # 外观控件改动 → 立即应用（只改内存，不落盘；落盘仍由"保存"负责）。
         # 没有这一步，用户改完缩放要先去点"保存"才看得到效果，体感就是"改了不管用"。
@@ -619,18 +620,36 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_settings_to_inputs(self) -> None:
-        """把设置里的值铺到界面上（设置是"默认值"，左栏仍是本次运行可改的地方）。"""
-        pane = self.left_pane
-        # 运行根只在左栏为空时预填：别覆盖用户刚敲进去的
-        if self.settings.run_root and not pane.run_root_edit.text().strip():
-            pane.run_root_edit.setText(self.settings.run_root)
-        pane.blocking_combo.setCurrentText(self.settings.blocking_level)
-        pane.max_rounds_spin.setValue(self.settings.max_rounds)
-        pane.generate_timeout_spin.setValue(self.settings.generate_timeout_ms)
-        pane.execute_timeout_spin.setValue(self.settings.execute_timeout_ms)
+        """把设置里的值铺到界面上。
 
-    def _on_blocking_level_changed(self, level: str) -> None:
-        self.right_pane.blocking_level = level
+        运行参数（运行根 / 阻断级别 / 轮次 / 超时）现在**只在设置里**，左栏那块表单已经
+        按用户要求换成文件树；这里只负责把它们同步到需要显示的地方（右栏的高亮级别、
+        文件树的根目录）。
+        """
+        self.right_pane.blocking_level = self.settings.blocking_level
+        root = str(getattr(self.settings, "plan_tree_root", "") or "")
+        if root:
+            self.left_pane.set_plan_tree_root(root)
+        elif not self.left_pane.plan_tree_root():
+            # 设置里还没有：默认落在"运行根目录下的 plans/"，那里通常正放着方案文档；
+            # 没有就退回运行根目录本身
+            from pathlib import Path
+
+            run_root = str(getattr(self.settings, "run_root", "") or "")
+            for candidate in (Path(run_root) / "plans", Path(run_root), Path.home()):
+                if candidate.is_dir() and self.left_pane.set_plan_tree_root(str(candidate)):
+                    break
+
+    def _on_plan_tree_root_changed(self, path: str) -> None:
+        """文件树换了根目录：记进设置（下次打开还在原处），并落盘。"""
+        if not path or path == getattr(self.settings, "plan_tree_root", ""):
+            return
+        self.settings.plan_tree_root = path
+        try:
+            self.settings.save()
+        except (OSError, ValueError):
+            # 写盘失败不该影响正在做的事；下次保存会再试一次
+            pass
 
     def _on_settings_saved(self, _path: str) -> None:
         """设置保存后重新装载：只影响**之后**的运行，不打断正在跑的。"""

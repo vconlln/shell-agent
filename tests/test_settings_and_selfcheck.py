@@ -358,3 +358,111 @@ def test_loaded_settings_can_be_saved_back_without_a_path():
             path.unlink(missing_ok=True)
         else:
             path.write_text(original, encoding="utf-8")
+
+
+# ── 方案文件夹根目录：设置 ↔ 左栏文件树 ────────────────────────────────
+#
+# 用户 2026-09-20 要求把左栏那块与设置重复的「运行参数」换成 VS Code 那样的文件树。
+# 树自己不管持久化：根目录放在设置里，关掉再打开还在原处 —— 不然每次开程序都要重新
+# 点一遍「选择文件夹…」。
+
+
+def test_plan_tree_root_round_trips_through_the_settings_file(tmp_path):
+    """根目录要真的落盘（`asdict` 会带上所有字段，这里钉的是"它确实是字段"）。"""
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path)
+    assert settings.plan_tree_root == ""          # 默认留空 = 还没选过
+
+    settings.plan_tree_root = str(tmp_path / "方案夹")
+    settings.save()
+
+    assert AppSettings.load(path).plan_tree_root == str(tmp_path / "方案夹")
+    assert json.loads(path.read_text(encoding="utf-8"))["plan_tree_root"] == str(tmp_path / "方案夹")
+
+
+def test_window_uses_the_saved_tree_root(qtbot, tmp_path):
+    """设置里有根目录就用它（不是每次都回到运行根目录）。"""
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    chosen = tmp_path / "我的方案"
+    chosen.mkdir()
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path / "runs"), plan_tree_root=str(chosen)),
+    )
+    qtbot.addWidget(window)
+
+    assert window.left_pane.plan_tree_root() == str(chosen)
+
+
+def test_window_defaults_the_tree_root_to_plans_under_the_run_root(qtbot, tmp_path):
+    """设置里还没选过：默认落在「运行根目录 / plans」，那里通常正放着方案文档。"""
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    plans = tmp_path / "runs" / "plans"
+    plans.mkdir(parents=True)
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path / "runs")),
+    )
+    qtbot.addWidget(window)
+
+    assert window.left_pane.plan_tree_root() == str(plans)
+
+
+def test_window_defaults_the_tree_root_to_the_run_root_without_plans(qtbot, tmp_path):
+    """没有 plans/ 就退回运行根目录本身（总比给一棵空树强）。"""
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    window = MainWindow(wire_controller=False, settings=AppSettings(run_root=str(runs)))
+    qtbot.addWidget(window)
+
+    assert window.left_pane.plan_tree_root() == str(runs)
+
+
+def test_changing_the_tree_root_is_remembered_and_saved(qtbot, tmp_path):
+    """用户点「选择文件夹…」换了根 → 记进设置并落盘（下次打开还在原处）。
+
+    设置从 `AppSettings.load(文件)` 来（不是直接构造），这样 `save()` 有路径可写，
+    断言才能压到"真的写进文件了"；否则 save() 会因为"未指定保存路径"抛错并被吞掉，
+    测试看着绿、用户下次打开却发现没记住。
+    """
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    settings_file = tmp_path / "settings.json"
+    settings = AppSettings.load(settings_file)
+    settings.run_root = str(tmp_path / "runs")
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+    target = tmp_path / "换个地方看"
+    target.mkdir()
+
+    assert window.left_pane.set_plan_tree_root(str(target)) is True
+
+    assert settings.plan_tree_root == str(target)
+    assert AppSettings.load(settings_file).plan_tree_root == str(target)
+
+
+def test_saving_settings_keeps_fields_the_page_does_not_show(qtbot, tmp_path):
+    """设置页里没有控件的字段（文件树根目录、load() 记住的路径）不许被"保存"抹掉。
+
+    `collect()` 是**写回绑定对象**而不是新建一个 `AppSettings` 再填（它的文档里写了理由）。
+    一旦有人改成新建，用户在设置页点一次「保存」，树根目录就悄悄没了 ——
+    下次打开又回到默认目录，而界面上不会有任何提示。
+    """
+    from tu_shell_agent.ui.main_window import MainWindow
+
+    settings_file = tmp_path / "settings.json"
+    settings = AppSettings.load(settings_file)
+    settings.plan_tree_root = str(tmp_path / "方案夹")
+    window = MainWindow(wire_controller=False, settings=settings)
+    qtbot.addWidget(window)
+
+    assert window.settings_page.save() is not None
+
+    again = AppSettings.load(settings_file)
+    assert again.plan_tree_root == str(tmp_path / "方案夹")
+    assert again.loaded_from == settings_file
+

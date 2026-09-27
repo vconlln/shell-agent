@@ -52,16 +52,6 @@ class ScriptView(QPlainTextEdit):
         self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         apply_shell_tab_stop(self, _TAB_WIDTH)
 
-    def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        """字体变了（QSS 生效、换缩放）就按新字体重算制表位。
-
-        **延到事件循环下一拍**：`changeEvent` 期间 Qt 可能正在遍历控件树
-        （例如整树重抛光），这时候改文档排版会踩到它的内部状态。
-        """
-        super().changeEvent(event)
-        if event.type() == QEvent.Type.FontChange:
-            schedule_after_event_loop(self, lambda: apply_shell_tab_stop(self, _TAB_WIDTH))
-
         self._area = _LineNumberArea(self)
         # 行数一变宽度就可能要变，滚动时行号区也必须跟着重画，否则会错位或留残影
         self.blockCountChanged.connect(lambda _count: self._update_area_width())
@@ -72,7 +62,8 @@ class ScriptView(QPlainTextEdit):
         # 由控件自己算行号来源：它本来就在管行号区，别让外面再数一遍。
         install_ask_action(self, self._ask_about_selection)
         self.setToolTip(
-            "选中代码后右键可「就选中的代码提问」；正文可以直接改，\n"
+            "选中代码后右键可「就选中的代码提问」；正文可以直接改。\n"
+            "Ctrl+Z 撤销 / Ctrl+Shift+Z（或 Ctrl+Y）重做；\n"
             "Ctrl+Shift+F 按结构格式化（粘贴时会自动把 CRLF 换成 LF）。"
         )
 
@@ -80,6 +71,17 @@ class ScriptView(QPlainTextEdit):
         self.highlighter = ShellHighlighter(self.document())
         self.format_shortcut = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
         self.format_shortcut.activated.connect(self.format_now)
+        # 撤销 / 重做：Qt 自带 Ctrl+Z，但**重做的快捷键各平台不一样**
+        # （Windows 习惯 Ctrl+Y，Linux/GTK 习惯 Ctrl+Shift+Z），两个都显式绑上，
+        # 用户按哪个都该有效（用户就是按了 Ctrl+Shift+Z 发现没反应）。
+        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut.activated.connect(self.undo)
+        self.redo_shortcuts = [
+            QShortcut(QKeySequence("Ctrl+Shift+Z"), self),
+            QShortcut(QKeySequence("Ctrl+Y"), self),
+        ]
+        for shortcut in self.redo_shortcuts:
+            shortcut.activated.connect(self.redo)
 
     # ── 对外接口 ──────────────────────────────────────────────────
     def selected_code(self) -> str:
@@ -111,8 +113,25 @@ class ScriptView(QPlainTextEdit):
         fixed, count = normalize_newlines(text)
         if count:
             self.notice.emit(f"已把 {count} 处 CRLF/CR 换行符换成 LF")
-        self.setPlainText(fixed)
+        self.replace_all(fixed)
         self.jump_to_line(1)
+
+    def replace_all(self, text: str) -> None:
+        """用**一次可撤销的编辑**替换整篇正文。
+
+        不能用 `setPlainText()`：它会把撤销栈整个清空 —— 之后按 Ctrl+Z 什么都不会发生。
+        用户报的"中间脚本无法撤销"就是这条：只要发生过一次格式化、或者换过一轮脚本，
+        撤销就彻底失效（实测：`isUndoAvailable()` 直接变 False）。
+        走一次 `beginEditBlock` + 全选替换，撤销栈里就是**一步**，Ctrl+Z 能干净地退回来。
+        """
+        if text == self.toPlainText():
+            return
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
 
     def format_now(self) -> bool:
         """按结构格式化整篇；返回是否真的改了东西。
@@ -125,7 +144,7 @@ class ScriptView(QPlainTextEdit):
             self.notice.emit("脚本已经是整理过的样子，没有改动")
             return False
         cursor_line = self.textCursor().blockNumber()
-        self.setPlainText(outcome.text)
+        self.replace_all(outcome.text)          # 可撤销：格式化错了按 Ctrl+Z 就回来了
         self.jump_to_line(cursor_line + 1)      # 尽量停在原来那一行，别把人甩到文件头
         self.notice.emit("已格式化脚本：" + "；".join(outcome.notes))
         return True
@@ -220,6 +239,22 @@ class ScriptView(QPlainTextEdit):
             block_number += 1
 
     # ── Qt 钩子 ───────────────────────────────────────────────────
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """字体变了（QSS 生效、换缩放）就按新字体重算制表位。
+
+        **延到事件循环下一拍**：`changeEvent` 期间 Qt 可能正在遍历控件树
+        （例如整树重抛光），这时候改文档排版会踩到它的内部状态。
+
+        **这里只做"重算制表位"这一件事**：`changeEvent` 会因为换字体、换样式、
+        换缩放被反复触发，任何"建控件 / 建快捷键 / 挂高亮器"的活都不能放进来 ——
+        放进来就会每触发一次多造一份（同一个文档挂上多个高亮器、快捷键重复绑、
+        行号区被换成新的），而且旧的那份还留着信号连着，行为会越来越怪。
+        控件自身的搭建一律在 `__init__` 里做一次。
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            schedule_after_event_loop(self, lambda: apply_shell_tab_stop(self, _TAB_WIDTH))
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt 命名
         super().resizeEvent(event)
         self._update_area_geometry()
