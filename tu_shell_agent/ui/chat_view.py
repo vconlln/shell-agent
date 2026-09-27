@@ -54,6 +54,80 @@ _FENCE = re.compile(r"```([a-zA-Z0-9_+.-]*)[ \t]*\n(.*?)(?:```|\Z)", re.S)
 # 但**发给模型的正文一个字符都不动**（原样在上面那句话里，见 compose_message）。
 _QUOTE_MARK = "关于以下引用内容"
 
+# 题面契约的标记（与引擎那一侧同一个来源，不各写一份字面量）
+from ..orchestrator.cli_contract import (  # noqa: E402 - 见上方说明
+    ASSUMPTIONS_BEGIN,
+    END as CONTRACT_END,
+    NOTES_BEGIN,
+    SCRIPT_BEGIN,
+)
+
+_CONTRACT_MARKERS = (SCRIPT_BEGIN, NOTES_BEGIN, ASSUMPTIONS_BEGIN, CONTRACT_END, "@@TU:BODY@@")
+
+# 像代码的行：注释、赋值、控制关键字、函数定义、明显的 shell 记号
+_CODE_LINE = re.compile(
+    r"^\s*(?:#|export\s|readonly\s|local\s|declare\s|if\s|then\b|elif\s|else\b|fi\b|"
+    r"for\s|while\s|until\s|do\b|done\b|case\s|esac\b|function\s|\}\s*$|\)\s*$|"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)|[A-Za-z_][A-Za-z0-9_]*=)"
+)
+_SHELL_MARKS = ("$(", "${", "&&", "||", "2>&1", ">/dev/null", "fi\n", "; then", " ]", "[[")
+
+
+def looks_like_code(text: str) -> bool:
+    """这段模型输出是"在说话"还是"在写代码/契约"。
+
+    **判错方向的代价不对称**：判成代码最多是显示得朴素（等宽、不渲染），
+    判成 Markdown 会把脚本里的 `# 注释` 变成巨型标题、把相邻的代码行并成一个段落
+    （用户截图里就是这样：满屏加粗大字 + 代码被压成一坨）。
+
+    所以判据宽进严出：**只有明确像代码时才说"是代码"**，
+    但一旦命中契约标记（`===TU-SCRIPT===` 那一套）或 shebang，就直接判定。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    if any(marker in body for marker in _CONTRACT_MARKERS):
+        return True
+    lines = [line for line in body.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if lines[0].startswith("#!"):
+        return True
+    shellish = sum(
+        1
+        for line in lines
+        if _CODE_LINE.match(line) or any(mark in line for mark in _SHELL_MARKS)
+    )
+    # 多数行都像代码，就按代码显示（纯散文很难凑出这个比例）
+    return shellish >= max(2, int(len(lines) * 0.5))
+
+
+def split_contract(text: str) -> list[tuple[str, str]]:
+    """把题面契约拆成 `[("code", 脚本), ("prose", 取舍说明), ("prose", 假设)]`。
+
+    引擎那条流（"第 N 轮 · 模型输出"）发的就是契约本身：脚本是**代码**，
+    取舍说明与假设是**散文**。混在一起渲染的结果用户已经给过截图了 ——
+    脚本的 `#` 注释变成巨型标题。拆开之后：脚本进代码块（等宽 + 复制），
+    说明进正文（按 Markdown 渲染）。
+    """
+    if SCRIPT_BEGIN not in text:
+        return []
+    sections: list[tuple[str, str]] = []
+    script = text.split(SCRIPT_BEGIN, 1)[1]
+    for marker in (NOTES_BEGIN, ASSUMPTIONS_BEGIN, CONTRACT_END):
+        script = script.split(marker, 1)[0]
+    if script.strip():
+        sections.append(("code", script.strip("\n")))
+    for marker, title in ((NOTES_BEGIN, "取舍说明"), (ASSUMPTIONS_BEGIN, "假设")):
+        if marker not in text:
+            continue
+        chunk = text.split(marker, 1)[1].split(CONTRACT_END, 1)[0]
+        for other in (NOTES_BEGIN, ASSUMPTIONS_BEGIN, SCRIPT_BEGIN):
+            chunk = chunk.split(other, 1)[0]
+        if chunk.strip():
+            sections.append(("prose", f"**{title}**\n\n{chunk.strip()}"))
+    return sections
+
 # 思考过程的分节标记：与 `api_client.THINKING_HEADER` 是同一个字符串（那边是唯一来源，
 # 这里 import 过来用，免得两处字面量各写一遍后漂移）
 from ..agent_backends.api_client import THINKING_HEADER  # noqa: E402 - 见上方说明
@@ -236,7 +310,7 @@ class TurnView(QFrame):
         self.thinking_header.setCursor(Qt.CursorShape.PointingHandCursor)
         self.thinking_header.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.thinking_header.clicked.connect(lambda _checked=False: self.toggle_thinking())
-        self.thinking_label = _selectable_label("", "chatThinkingText", markdown=True)
+        self.thinking_label = _selectable_label("", "chatThinkingText")
         self.thinking_label.setVisible(False)
         thinking_layout.addWidget(self.thinking_header)
         thinking_layout.addWidget(self.thinking_label)
@@ -349,7 +423,10 @@ class TurnView(QFrame):
         self.reply_body.setVisible(True)
         self.footer.setVisible(True)
         if self._stream_label is None:
-            self._stream_label = _selectable_label("", "chatReplyText", markdown=True)
+            # 流式期间**按纯文本**显示：这一路可能是脚本契约（引擎那条流），
+            # 边流边按 Markdown 解析会让 `# 注释` 在眼前变成巨型标题又缩回去。
+            # 定稿时再按内容决定"Markdown 还是代码块"（见 finish_reply）。
+            self._stream_label = _selectable_label("", "chatReplyText")
             self._install_ask(self._stream_label)
             self.reply_layout.addWidget(self._stream_label)
 
@@ -386,25 +463,52 @@ class TurnView(QFrame):
             label.deleteLater()
             self._stream_label = None
         if self._thinking_text:
-            self.thinking_label.setText(self._thinking_text)     # 定稿：Markdown 一次渲染
+            # 定稿：思考过程里也常有代码与 `#` 注释 —— 与正文同一套判据，
+            # 像代码就按纯文本显示（否则同样会被 Markdown 变成巨型标题）
+            self.thinking_label.setTextFormat(
+                Qt.TextFormat.PlainText
+                if looks_like_code(self._thinking_text)
+                else Qt.TextFormat.MarkdownText
+            )
+            self.thinking_label.setText(self._thinking_text)
             self._sync_thinking()
         text = self._reply_text.strip("\n")
         if not text:
             return
         self.reply_body.setVisible(True)
         self.footer.setVisible(True)
+        for kind, body in self._sections(text):
+            if kind == "code":
+                self.reply_layout.addWidget(self._code_block(body, ""))
+                continue
+            label = _selectable_label(body, "chatReplyText", markdown=True)
+            self._install_ask(label)
+            self.reply_layout.addWidget(label)
+
+    def _sections(self, text: str) -> list[tuple[str, str]]:
+        """把一段模型输出拆成"该按代码显示"与"该按 Markdown 显示"的若干段。
+
+        三层判据，从严到宽：
+        1. **题面契约**（`===TU-SCRIPT===` …）：脚本进代码块，说明与假设进正文；
+        2. **围栏代码块**：` ```bash ` 那套照旧单独成块；
+        3. **看着像代码的散文段**：没有围栏、但整段就是脚本（模型常这么干）→ 也进代码块，
+           否则 Markdown 会把 `#` 注释变成巨型标题、把代码行并成段落（用户报的那个截图）。
+        """
+        contract = split_contract(text)
+        if contract:
+            return contract
+        sections: list[tuple[str, str]] = []
         language = ""
         for kind, body in split_segments(text):
             if kind == "lang":
                 language = body
                 continue
             if kind == "code":
-                self.reply_layout.addWidget(self._code_block(body, language))
+                sections.append(("code", body))
                 language = ""
                 continue
-            label = _selectable_label(body, "chatReplyText", markdown=True)
-            self._install_ask(label)
-            self.reply_layout.addWidget(label)
+            sections.append(("code" if looks_like_code(body) else "prose", body))
+        return sections
 
     def add_activity(self, kind: str, text: str) -> None:
         """工具/阶段行（"读取 read_file（plan.md）"这类）：单独一行、次级色，像 DSH 的活动列表。"""

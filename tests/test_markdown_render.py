@@ -227,10 +227,12 @@ def test_chat_reply_is_markdown_but_user_text_is_not(qtbot, restore_app):
     panel.begin_stream("模型回复")
     panel.append_delta("答案是 **6**，注意 `a_b_c` 是标识符。")
 
-    # 流式期间那个标签也要是 Markdown（两处都要：流式块与定稿后的分块正文，
-    # 只改一处会出现"流式时显示星号、答完才渲染"的闪变）
+    # 流式期间是**纯文本**：这一路也可能是脚本契约，边流边按 Markdown 解析会让
+    # `# 注释` 在眼前变成巨型标题又缩回去（用户截图里就是满屏错乱的标题）。
+    # 定稿时才按内容决定 Markdown 还是代码块。
     streaming = panel.transcript.last_turn().findChildren(QLabel, "chatReplyText")[0]
-    assert streaming.textFormat().name == "MarkdownText", "流式正文没有按 Markdown 渲染"
+    assert streaming.textFormat().name == "PlainText", "流式期间不该渲染 Markdown"
+    assert streaming.text() == "答案是 **6**，注意 `a_b_c` 是标识符。"
 
     panel.end_stream()
     turn = panel.transcript.last_turn()
@@ -264,7 +266,12 @@ def test_thinking_is_expanded_while_the_model_is_thinking(qtbot, restore_app):
     assert turn.thinking_open() is True
     assert "▾" in header.text() and "思考过程" in header.text()
     assert "思考中" in header.text(), f"没有「还在想」的信号：{header.text()}"
-    assert turn.thinking_label.textFormat().name == "MarkdownText", "思考过程也要渲染 Markdown"
+    # 思考过程也是"流式纯文本、定稿再分流"：它里面同样常有代码与 `#` 注释。
+    # 这一段是散文，所以定稿后应当是 Markdown（换成代码则由
+    # `test_chat_rendering.test_thinking_that_is_code_is_shown_as_plain_text` 守着）。
+    assert turn.thinking_label.textFormat().name == "PlainText", "流式思考不该渲染 Markdown"
+    turn.finish_reply()
+    assert turn.thinking_label.textFormat().name == "MarkdownText", "散文型思考定稿后应当是 Markdown"
 
 
 def test_thinking_collapses_when_the_answer_starts_and_can_be_reopened(qtbot, restore_app):
