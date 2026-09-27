@@ -94,23 +94,66 @@ def test_headings_get_real_sizes_and_bold(view):
     h1_sizes, h1_weight, _, _ = _block_info(document, "运行目录体检报告")
     h2_sizes, h2_weight, _, _ = _block_info(document, "注意：")
 
-    assert h1_sizes and max(h1_sizes) > base * 1.3, f"h1 没有放大：{h1_sizes}（基准 {base}）"
+    assert h1_sizes and max(h1_sizes) > base * 1.2, f"h1 没有放大：{h1_sizes}（基准 {base}）"
+    # 上限也钉住：方案预览那一栏只有 300~500px 宽，1.4 倍以上的标题在窄栏里很"吵"
+    #（第一版就是 1.45，用户看过截图说"太丑"）。这不是审美洁癖，是版面约束。
+    assert max(h1_sizes) <= base * 1.35, f"标题又变大了：{max(h1_sizes)}（基准 {base}）"
     assert h1_weight >= 600, f"标题没有加粗：{h1_weight}"
     # 列表项是普通正文，不该跟着变大
     item_sizes, _, _, _ = _block_info(document, "建一个子目录")
     assert not item_sizes or max(item_sizes) <= base * 1.05
 
 
-def test_inline_code_and_code_blocks_get_a_background(view):
-    """行内代码与围栏代码块都要有自己的底色 —— 深色主题里没底色等于看不出是代码。"""
+def test_inline_code_is_monospace_and_coloured_but_not_a_box(view):
+    """行内代码用"等宽 + 变色"区分，**不给底色**。
+
+    用户看过真实截图后的反馈是"太丑"：Qt 的富文本没有内边距，给它加底色就是一个个
+    紧贴字形的小方块 —— 一份方案里到处是 `代码`，整页就变成"满屏高亮块"。
+    代码**块**仍然有底色（它是独立的块，四周有留白）。
+    """
+    from tu_shell_agent.ui.markdown import INLINE_CODE_COLOR
+
     view.set_markdown(PLAN)
     document = view.document()
 
     _, _, inline_backgrounds, _ = _block_info(document, "统计")
-    assert inline_backgrounds, "行内代码没有底色"
+    assert not inline_backgrounds, "行内代码又带上底色方块了"
 
-    _, _, _, block_background = _block_info(document, "backup=")
+    # 等宽 + 变色两条都要在（否则行内代码与正文就分不出来了）
+    families, colours = _inline_code_styles(document, "统计")
+    assert any("mono" in name.lower() for name in families), f"行内代码不是等宽：{families}"
+    assert INLINE_CODE_COLOR.lower() in {colour.lower() for colour in colours}, colours
+
+
+def test_code_blocks_still_have_a_background(view):
+    """围栏代码块仍然有自己的底色（与行内代码区分开）。"""
+    view.set_markdown(PLAN)
+    _, _, _, block_background = _block_info(view.document(), "backup=")
     assert block_background, "围栏代码块没有底色"
+
+
+def _inline_code_styles(document, needle: str) -> tuple[list[str], list[str]]:
+    """`needle` 所在块里等宽片段的 (字体族, 颜色) 列表。"""
+    for index in range(document.blockCount()):
+        block = document.findBlockByNumber(index)
+        if needle not in block.text():
+            continue
+        families: list[str] = []
+        colours: list[str] = []
+        for fragment in _fragments_of(block):
+            char_format = fragment.charFormat()
+            names = char_format.fontFamilies()
+            if hasattr(names, "toStringList"):          # 某些版本给的是 QStringList
+                listed = [str(name) for name in names.toStringList()]
+            elif isinstance(names, (list, tuple)):      # PySide6 6.11 给的是普通 list
+                listed = [str(name) for name in names]
+            else:
+                listed = []
+            if any("mono" in name.lower() for name in listed):
+                families.extend(listed)
+                colours.append(char_format.foreground().color().name())
+        return families, colours
+    raise AssertionError(f"文档里没有包含 {needle!r} 的块")
 
 
 def test_bold_text_is_actually_bold(view):
@@ -160,6 +203,44 @@ def test_source_is_kept_and_font_change_rerenders(view):
         f"字体变大之后标题没有跟着重排：{after_sizes}"
     )
     assert before == 1, "标题层级丢了"
+
+
+def test_document_surface_is_painted_in_the_read_only_shade(qtbot, restore_app, tmp_path):
+    """**渲染出来看**：文档面铺的是"只读那一档"底色，而不是只剩一圈空心边框。
+
+    用户看的是像素，不是调色板 —— 之前用 QSS 点名视口那条路在方案预览上没生效
+    （它在滚动容器里），屏幕上就是"有边框、里面空着"，所以这里直接比像素。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.settings import AppSettings
+
+    plan = tmp_path / "plan.md"
+    plan.write_text(PLAN, encoding="utf-8")
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path / "runs"), backdrop="off"),
+    )
+    qtbot.addWidget(window)
+    window.resize(1400, 950)
+    window.show()
+    window.apply_appearance()
+    window.left_pane.set_plan(str(plan))
+    qtbot.wait(40)
+
+    shot = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    shot.fill(QColor(255, 0, 255))
+    painter = QPainter(shot)
+    window.render(painter, QPoint(0, 0))
+    painter.end()
+
+    for name, view in (("方案预览", window.left_pane.plan_preview),
+                       ("报告视图", window.right_pane.notes_view)):
+        origin = view.mapTo(window, view.rect().topLeft())
+        inside = shot.pixelColor(origin.x() + 6, origin.y() + view.height() // 2).name()
+        assert inside == "#0b0c0e", f"{name}的文档面没有铺成只读档底色（取到 {inside}）"
 
 
 def test_set_plain_shows_markers_verbatim(view):

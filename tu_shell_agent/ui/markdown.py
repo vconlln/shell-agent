@@ -20,6 +20,7 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QPainter,
     QTextCharFormat,
     QTextDocument,
     QTextTable,
@@ -31,7 +32,19 @@ from . import theme
 
 # 标题层级对应的字号比例（相对正文字号）。Qt 解析 Markdown 时给标题的是 `xx-large`
 # 这类相对关键字，比例不可控、在不同字体上也不同；这里按主题字号自己算，各档一致。
-_HEADING_RATIOS = {1: 1.45, 2: 1.28, 3: 1.14, 4: 1.06, 5: 1.0, 6: 1.0}
+# 标题相对正文字号的比例。刻意收得比常见的 Markdown 预览小一档：
+# 方案预览那一栏只有 300~500px 宽，1.4 倍以上的 h1 会在窄栏里显得很"吵"。
+_HEADING_RATIOS = {1: 1.32, 2: 1.18, 3: 1.08, 4: 1.02, 5: 1.0, 6: 1.0}
+
+# 行内代码的颜色（与中栏高亮器里字符串同色，两处观感一致）
+INLINE_CODE_COLOR = "#ce9178"
+
+# 文档面的底色令牌：与其它只读视图（脚本 / 输出 / 对话记录区）同一档。
+# 写在**视口**上，因为视口才是这块像素真正的主人 —— 写在控件上的底色会被
+# `QTextBrowser:read-only` 那条通用规则抢走；而"靠 QSS 点名视口"这条路
+# 实测在同一个窗口里会一个视图生效、另一个不生效（方案预览在滚动容器里，
+# 解析到的调色板与报告视图不同），所以这里直接按令牌上色，行为确定。
+SURFACE_TOKEN = "bg_under"
 
 
 def base_point_size() -> float:
@@ -137,8 +150,12 @@ def theme_document(document: QTextDocument, base: float = 0.0) -> None:
             block_format.setRightMargin(8)
             block_cursor.setBlockFormat(block_format)
 
+        # 行内代码**不给底色**：Qt 的富文本没有"内边距"，底色会紧贴字形变成一个个小方块
+        # （用户看到的"满屏高亮块"就是它）。改成等宽 + 变色 —— 既能与正文区分开，
+        # 又不会在窄栏里铺满方块。代码**块**仍然有底色与内边距，两者观感不再打架。
         inline_format = QTextCharFormat()
-        inline_format.setBackground(code_bg)
+        inline_format.setFontFamilies(["monospace"])
+        inline_format.setForeground(QColor(INLINE_CODE_COLOR))
         for position, length in inline_code:
             cursor.setPosition(position)
             cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
@@ -190,11 +207,12 @@ class MarkdownBrowser(QTextBrowser):
         self.setOpenExternalLinks(True)      # 方案里的链接点得开
         self.setReadOnly(True)
         self.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
-        # 视口自己别上色：`QAbstractScrollArea` 的视口按调色板 Base 画，
-        # 不关掉它的话主题里给 `#planPreview` 写的那层底色根本露不出来
-        # （实测：窗口里方案预览与旁边的空白一个颜色，看起来像"没有边框的文本框"）。
+        # 文档面的底色**自己画**：视口才是这块像素的主人，而"靠 QSS 点名视口"这条路
+        # 实测在同一个窗口里会一个视图生效、另一个不生效（方案预览在滚动容器里，
+        # 解析到的调色板与报告视图不同，实测一个是 #0b0c0e、另一个是 #000000）。
+        # 用事件过滤器在视口绘制**之前**铺一层底色：确定、跟随主题、与被谁包着无关。
         self.viewport().setObjectName("markdownViewport")
-        self.viewport().setAutoFillBackground(False)
+        self.viewport().installEventFilter(self)
         self._source = ""
 
     def set_markdown(self, text: str) -> None:
@@ -218,8 +236,16 @@ class MarkdownBrowser(QTextBrowser):
         self.setMarkdown(self._source)
         theme_document(self.document())
 
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+        """在视口画内容之前铺一层"文档面"底色（每次重绘都按当前主题令牌取色）。"""
+        if obj is self.viewport() and event.type() == QEvent.Type.Paint:
+            painter = QPainter(obj)
+            painter.fillRect(obj.rect(), QColor(theme.css(SURFACE_TOKEN)))
+            painter.end()
+        return False
+
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        """字体变了（换主题 / 改 ui_scale）就按新字号重渲染。
+        """字体变了就按新字号重渲染（换主题 / 改 ui_scale）。
 
         不重渲染的话标题层级会一直停在旧字号上：用户把缩放从 100% 调到 150%，
         其它控件都变大了，方案预览里的标题还是 100% 那一档。

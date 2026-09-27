@@ -816,7 +816,9 @@ QTextBrowser#planPreview, QTextBrowser#notesView {{
     font-size: {sized('font_size', scale)};
     padding: 2px 4px;
 }}
-QWidget#markdownViewport {{ background: transparent; }}
+/* Markdown 文档面：与其它只读视图同一种"更深的底"（脚本 / 输出 / 记录区都是 bg_under）。
+   视口是这块像素真正的主人 —— 写在控件上的底色会被 `QTextBrowser:read-only` 那条通用规则抢走。 */
+QWidget#markdownViewport {{ background-color: {_color('bg_under', colors)}; }}
 /* 对话记录区（`QScrollArea`，里面是"每轮一张卡片"）与输入框都用等宽：脚本片段要能对齐。
    记录区**显式**给"更深的只读底"：它挂在右列页签里，`QPlainTextEdit:read-only` 那条通用规则
    不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
