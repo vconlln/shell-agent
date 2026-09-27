@@ -22,7 +22,7 @@ from __future__ import annotations
 from PySide6.QtCore import QRegularExpression
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
-from ...shell_toolchain.format import open_quote, split_code_comment
+from ...shell_toolchain.format import comment_start, open_quote, split_code_comment
 
 # 块状态：0 = 普通代码，1 = heredoc 正文，2/3 = 跨行字符串（双引号 / 单引号）
 # 两种引号分开记：双引号里 `$var` 会展开（要继续按变量上色），单引号里不会。
@@ -91,9 +91,16 @@ class ShellHighlighter(QSyntaxHighlighter):
     """shell 语法高亮：按行记账（heredoc、跨行字符串都由块状态带到下一行）。"""
 
     def __init__(self, document, *, enabled: bool = True) -> None:
-        super().__init__(document)
+        # **先把自己的状态准备好，再交给 Qt**：`QSyntaxHighlighter` 的构造函数会
+        # **立刻**对文档里已有的每个块调用 `highlightBlock()`。属性没赋值就进去，
+        # 会在 Qt 的虚函数里抛 AttributeError —— 轻则打印一行
+        # "Error calling Python override of QSyntaxHighlighter::highlightBlock"，
+        # 重则直接把进程 abort 掉（实测：整轮用例随机崩在 `apply_theme` 的 `setStyle`
+        # 里、Python 栈落在别的用例甚至夹具收尾，查了很久才落到这一行）。
         self._styles = _palette()
-        self._enabled = enabled
+        self._enabled = bool(enabled)
+        self._heredoc_marker = ""
+        super().__init__(document)
 
     def set_enabled(self, enabled: bool) -> None:
         """关掉高亮（设置里可以关：有人就是喜欢纯色文本）。关掉后重新解析一遍。"""
@@ -169,18 +176,13 @@ class ShellHighlighter(QSyntaxHighlighter):
 
     # ── 内部的词法处理 ────────────────────────────────────────────────
     def _comment_index(self, text: str) -> int | None:
-        """行内注释起点（引号里的 `#` 不算）；没有注释返回 None。"""
-        if not text.strip().startswith("#"):
-            code = split_code_comment(text)
-            if code == text.rstrip():
-                return None
-            # `split_code_comment` 只给出代码部分，长度差就是注释起点（去掉尾空白后的）
-            index = len(code)
-            while index < len(text) and text[index] in " \t":
-                index += 1
-            return index if index < len(text) else None
-        stripped = text.lstrip(" \t")
-        return len(text) - len(stripped)
+        """行内注释起点（引号里的 `#` 不算）；没有注释返回 None。
+
+        直接用 `format.comment_start`：**它给的是原字符串下标**，高亮才能按原文位置上色。
+        （曾经用 `len(split_code_comment(text))` 去推，那个长度是 lstrip 之后的，
+        行首有空白时会把收尾引号当成注释起点 —— 实测把 `"` 涂成了注释绿。）
+        """
+        return comment_start(text)
 
     def _heredoc_start(self, text: str, limit: int) -> tuple[int, int, str] | None:
         match = QRegularExpression(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1").match(

@@ -805,20 +805,25 @@ QPlainTextEdit#scriptView {{
     background-color: {_color('bg_under', colors)};
 }}
 /* Markdown 视图（方案预览 / 报告视图）：比例字体 + 稍大的行距 —— 文档要读得下去。
-   底色跟**其它只读视图一致**（`bg_under`，深一档）：这一路的约定是"只读更深、可编辑更浅"
-   （脚本视图 / 输出视图 / 对话记录区都是 bg_under），Markdown 视图没有理由例外 ——
-   渲染成输入框那种亮底会让人以为可以在里面打字。 */
+   **底色不铺**（与所在卡片同色）：这里曾经跟其它只读视图一样用 `bg_under`，而那一档接近纯黑，
+   用户看过就说"底不要弄成纯黑的呀，底还原回去" —— 只读的代码面（脚本 / 输出 / diff）
+   用深底是为了暗示"别在这里打字"，而方案与报告这类**文档**跟卡片同色更像在读书。
+   只留一圈淡边框标出"这是一块文档"。 */
 QTextBrowser#planPreview, QTextBrowser#notesView {{
-    background-color: {_color('bg_under', colors)};
+    background-color: transparent;
     border: 1px solid {_color('border_light', colors)};
     border-radius: {sized('radius', scale)};
     font-family: inherit;
     font-size: {sized('font_size', scale)};
     padding: 2px 4px;
 }}
-/* Markdown 文档面：与其它只读视图同一种"更深的底"（脚本 / 输出 / 记录区都是 bg_under）。
-   视口是这块像素真正的主人 —— 写在控件上的底色会被 `QTextBrowser:read-only` 那条通用规则抢走。 */
-QWidget#markdownViewport {{ background-color: {_color('bg_under', colors)}; }}
+/* 视口是这块像素真正的主人（`QAbstractScrollArea` 用调色板底色盖住控件背景），
+   "透明"必须显式写给视口，而且**要带上 `:read-only`** —— 上面那条
+   `QTextBrowser:read-only {{ background-color: bg_under }}` 是"类型 + 伪状态"，
+   Qt 的选择器匹配里它能压过只有 ID 的规则（实测：报告视图一直吃到近黑底）。 */
+QTextBrowser#planPreview:read-only,
+QTextBrowser#notesView:read-only {{ background-color: transparent; }}
+QWidget#markdownViewport {{ background-color: transparent; }}
 /* 对话记录区（`QScrollArea`，里面是"每轮一张卡片"）与输入框都用等宽：脚本片段要能对齐。
    记录区**显式**给"更深的只读底"：它挂在右列页签里，`QPlainTextEdit:read-only` 那条通用规则
    不再稳定命中（实测渲染成了输入框的底色），所以在这里写死 ——
@@ -1011,6 +1016,16 @@ QLabel#statusLabel {{
 }}
 QStatusBar {{ background-color: {_color('bg', colors)}; border-top: 1px solid {_color('border_light', colors)}; }}
 """
+
+
+# 基座样式**每次都装**，不做"装过就跳过"的缓存。
+# 试过缓存（一个模块级布尔），结果在 150% 缩放下整轮用例段错误：
+# `test_theme.py::test_quote_bar_is_themed` → `apply_theme` → `setStyleSheet`，
+# C 栈落在 libQt6Widgets 里。原因是测试的夹具会把样式**恢复**成别的（`restore_app` /
+# `themed_app` 存旧的 `style().objectName()` 再 setStyle 回去），而那个 objectName 在
+# 设过样式表之后是空串 —— 于是应用样式表时底下的样式已经不是 Fusion，Qt 内部直接崩。
+# 也不能靠 `app.style().objectName()` 判断当前是不是 Fusion：设过样式表之后 Qt 返回的是
+# 包装样式，objectName 同样是空串（实测）。结论：这一处不能省，代价（一次 setStyle）认了。
 
 
 def apply_theme(

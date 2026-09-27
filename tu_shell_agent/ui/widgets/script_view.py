@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QFontDatabase, QKeySequence, QPainter, QPaintEvent, QPalette, QResizeEvent, QShortcut,
     QTextCursor,
@@ -26,10 +26,12 @@ from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from ...shell_toolchain.format import format_script, normalize_newlines, tidy_line
 from .selection_menu import install_ask_action, selected_text
+from .defer import schedule_after_event_loop
+from .tabstop import apply_shell_tab_stop
 from .shell_highlight import ShellHighlighter
 
 _RIGHT_PADDING = 8  # 行号与文本之间的呼吸位，贴太紧两位数会挤到正文上
-_TAB_WIDTH = 4      # shell 脚本里 tab 按 4 空格显示才对得上缩进
+_TAB_WIDTH = 4      # shell 脚本里 tab 按 4 空格显示才对得上缩进（见 widgets/tabstop.py）
 
 
 class ScriptView(QPlainTextEdit):
@@ -48,7 +50,17 @@ class ScriptView(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         # 脚本必须等宽显示：缩进与对齐是 shellcheck 报告里「列」的含义所在
         self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self.setTabStopDistance(float(_TAB_WIDTH * self.fontMetrics().horizontalAdvance(" ")))
+        apply_shell_tab_stop(self, _TAB_WIDTH)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """字体变了（QSS 生效、换缩放）就按新字体重算制表位。
+
+        **延到事件循环下一拍**：`changeEvent` 期间 Qt 可能正在遍历控件树
+        （例如整树重抛光），这时候改文档排版会踩到它的内部状态。
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            schedule_after_event_loop(self, lambda: apply_shell_tab_stop(self, _TAB_WIDTH))
 
         self._area = _LineNumberArea(self)
         # 行数一变宽度就可能要变，滚动时行号区也必须跟着重画，否则会错位或留残影

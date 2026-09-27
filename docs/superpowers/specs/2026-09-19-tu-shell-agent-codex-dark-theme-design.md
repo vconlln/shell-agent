@@ -1808,3 +1808,77 @@ heredoc 不上色 / 跨行状态不传递 / 高亮关不掉 / 粘贴与 set_text
 用例：`tests/test_markdown_render.py` 18 条（新增/改写三条：行内代码"等宽+变色且无底色"、
 代码块仍有底色、**像素级**文档面底色，标题比例上限）；**变异验证 4 条全部转红**
 （行内代码给回底色 / 行内代码不变色 / 不自绘底色 / 标题比例放大回去）。
+
+## 修订四十一（2026-09-20）：文档面底色还原、制表位 4 空格、会话代码高亮
+
+用户第三次反馈（连说三遍）："底不要弄成纯黑的呀，底还原回去，我的意思是 Tab 的长度有点长，
+应该是四个空格的长度，还有会话栏的 markdown 渲染也很丑，同样的 Tab 有点长，
+还有会话输出的代码没有渲染"。
+
+### 1. 文档面底色还原（不再近黑）
+
+方案预览 / 报告视图不再铺 `bg_under`，改成与所在卡片同色（方案预览 = 左栏卡片、报告视图 =
+右栏底色）。只读**代码**面（脚本 / 输出 / 差异）仍保持深一档 —— 那是"别在这里打字"的暗示。
+
+**踩到的坑**（值得记住）：报告视图之前一直顽固保持近黑，因为
+`QTextBrowser:read-only { background-color: bg_under }` 会把**调色板 Base** 染上，
+而 `QTextEdit` 正是拿 Base 填视口 —— 内联样式表、`background: transparent` 都盖不住它。
+最终做法：把视口的 `Base`/`Window` 设成**透明**（`_clear_surface()`），并在 `PaletteChange`
+时重设一次（主题重新 polish 会染回来）。
+
+### 2. 制表位 = 4 个空格（新增 `ui/widgets/tabstop.py`）
+
+Qt 的默认制表位是 **8 个字符宽**（≈80px）。四处统一按 4 个空格：Markdown 文档
+（`QTextDocument` 的 `defaultTextOption`）、中栏脚本视图、会话代码块、执行前确认框；
+会话的 Markdown 标签（`QLabel` 没法定制表位）则把 `\\t` 展开成 4 个空格再渲染。
+
+`apply_shell_tab_stop()` 是唯一出处，并且**字体变化时要重算**：字体由 QSS 给、polish 之后
+才生效，只在构造时量一次会得到 24px 而不是 28px（实测）。用两条用例钉住：值等于 4 个空格宽、
+换字体后跟着变。
+
+### 3. 会话输出的代码上高亮 + 一个真 bug
+
+会话里的代码块现在挂 `ShellHighlighter`（与中栏同一套配色）；非 shell 语言标记
+（`json` 等）不上色，免得误导。
+
+顺带修掉因此暴露的 bug：高亮器的注释判定曾经用 `len(split_code_comment(line))` 反推注释起点，
+而那个长度是 **lstrip 之后**的 —— 行首有空白时两个下标对不上，实测
+`\\techo "缩进用 tab"` 的**收尾引号**被涂成注释绿。现在 `format.comment_start()` 返回
+**原字符串下标**，格式化与高亮共用同一套扫描（不再各写一份）。
+
+用例：`tests/test_chat_rendering.py` +5（制表位值、换字体后重算、代码块高亮、非 shell 不上色、
+契约代码）；`tests/test_shell_format.py` +1（`comment_start` 的原字符串下标语义）；
+`tests/test_shell_highlight.py` +1（tab 缩进行里收尾引号仍是字符串色）；
+`tests/test_markdown_render.py` 改 2（文档面不近黑 + 制表位）；`tests/test_script_editing.py` +1；
+`tests/test_appearance.py` 的报告视图底色期望随之更新。
+**变异验证**：制表位回默认 / 文档面铺近黑 / 高亮器回到旧的注释下标推算 / 非 shell 也上色 /
+注释起点用 lstrip 坐标 —— 全部转红（其中"三处调用全部去掉"时两条制表位用例同时红）。
+
+## 修订四十二（2026-09-20）：排查渲染时挖出的一串问题（含两个真 bug）
+
+用户反馈的三件事改完后，整套用例开始**随机段错误**：100% 与 150% 都出现过，约 7 分钟处，
+C 栈落在 libQt6Widgets，Python 栈每次不同（有时在别的用例的夹具收尾、有时在 `apply_theme`）。
+逐段二分（先证明"只排除新加的三个测试文件就全绿"→ 再定位到文件 → 再定位到构造那一行）后，
+落成四处修改，其中两处是**真 bug**：
+
+1. **`ShellHighlighter` 的构造顺序**（真 bug）：`QSyntaxHighlighter.__init__(document)`
+   会**立刻**对文档里已有的块调用 `highlightBlock()`，而 `self._styles` / `self._enabled`
+   是在 `super().__init__()` **之后**才赋值的 → 首次回调抛 `AttributeError`。
+   PySide 对这种"Qt 虚函数里逃逸的异常"有时只打印一行、有时直接 abort —— 这就是
+   "随机崩、栈每次不一样"的来源。修法：状态先备好，再交给 Qt。
+2. **`--self-test` 漏窗口**（真 bug）：每跑一次留 16 个顶层窗口 / 约 650 个控件
+   （三次 → 48 / 2628），它们之后每次装主题都要被重新 polish。
+   修法：`_tear_down_self_test()` 关闭并删除（`deleteLater` + 派发 `DeferredDelete`）。
+3. **测试夹具的无谓重抛光**：`restore_app` 无条件还原样式表/调色板（即使没用例动过），
+   而 `setStyleSheet` 会让所有活控件重新 polish —— 150% 下就是这么崩的。
+   修法：只在真的改过时还原；新用例改为**每模块装一次主题**。
+4. **`apply_theme` 的 `setStyle("Fusion")` 不省**：试过缓存（模块级布尔），
+   反而在 `test_theme.py` 更早崩（夹具会把样式恢复成别的，缓存就骗了自己；
+   且设过样式表之后 `app.style().objectName()` 是空串，没法用它判断）。
+   结论写进注释：这一处保持无条件。
+
+另外把 `CodeView` 里"在 `changeEvent` / `resizeEvent` 期间改几何与文档格式"的动作
+统一挪到事件循环下一拍（`ui/widgets/defer.py`）：在 Qt 遍历控件树的中途改结构同样危险。
+
+副产物：整套用例 **17 分 30 秒 → 8 分 19 秒**（100%）/ **20 分 07 秒 → 8 分 24 秒**（150%），
+两档都能跑完，691 passed / 4 skipped（含本轮新增的 8 条）。

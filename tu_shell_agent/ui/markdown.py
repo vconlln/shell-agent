@@ -20,7 +20,6 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
-    QPainter,
     QTextCharFormat,
     QTextDocument,
     QTextTable,
@@ -29,6 +28,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QLabel, QTextBrowser, QWidget
 
 from . import theme
+from .widgets.defer import schedule_after_event_loop
+from .widgets.tabstop import TAB_SPACES
 
 # 标题层级对应的字号比例（相对正文字号）。Qt 解析 Markdown 时给标题的是 `xx-large`
 # 这类相对关键字，比例不可控、在不同字体上也不同；这里按主题字号自己算，各档一致。
@@ -39,12 +40,8 @@ _HEADING_RATIOS = {1: 1.32, 2: 1.18, 3: 1.08, 4: 1.02, 5: 1.0, 6: 1.0}
 # 行内代码的颜色（与中栏高亮器里字符串同色，两处观感一致）
 INLINE_CODE_COLOR = "#ce9178"
 
-# 文档面的底色令牌：与其它只读视图（脚本 / 输出 / 对话记录区）同一档。
-# 写在**视口**上，因为视口才是这块像素真正的主人 —— 写在控件上的底色会被
-# `QTextBrowser:read-only` 那条通用规则抢走；而"靠 QSS 点名视口"这条路
-# 实测在同一个窗口里会一个视图生效、另一个不生效（方案预览在滚动容器里，
-# 解析到的调色板与报告视图不同），所以这里直接按令牌上色，行为确定。
-SURFACE_TOKEN = "bg_under"
+# 制表位按**4 个空格**算（`ui/widgets/tabstop.py` 是唯一出处；Qt 默认是 8 个字符宽，
+# 一份用 tab 缩进的 Markdown 在预览里会缩出去一大截）。
 
 
 def base_point_size() -> float:
@@ -212,8 +209,9 @@ class MarkdownBrowser(QTextBrowser):
         # 解析到的调色板与报告视图不同，实测一个是 #0b0c0e、另一个是 #000000）。
         # 用事件过滤器在视口绘制**之前**铺一层底色：确定、跟随主题、与被谁包着无关。
         self.viewport().setObjectName("markdownViewport")
-        self.viewport().installEventFilter(self)
         self._source = ""
+        # 上一次渲染用的字体签名：字体没变就不重渲染（见 changeEvent）
+        self._rendered_font: tuple = ()
 
     def set_markdown(self, text: str) -> None:
         """渲染 Markdown；空串就清空。**源文留一份**，字体变了要按新字号重渲染。"""
@@ -232,17 +230,18 @@ class MarkdownBrowser(QTextBrowser):
         self._source = ""
         self.setPlainText(text or "")
 
+    def _font_signature(self) -> tuple:
+        font = self.font()
+        return (round(font.pointSizeF(), 3), font.family(), int(font.weight()))
+
     def _render(self) -> None:
         self.setMarkdown(self._source)
+        self._rendered_font = self._font_signature()
+        # 制表位 4 个空格（Qt 默认 8 个字符宽，tab 缩进的文档会缩出去一大截）
+        option = self.document().defaultTextOption()
+        option.setTabStopDistance(float(TAB_SPACES * self.fontMetrics().horizontalAdvance(" ")))
+        self.document().setDefaultTextOption(option)
         theme_document(self.document())
-
-    def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
-        """在视口画内容之前铺一层"文档面"底色（每次重绘都按当前主题令牌取色）。"""
-        if obj is self.viewport() and event.type() == QEvent.Type.Paint:
-            painter = QPainter(obj)
-            painter.fillRect(obj.rect(), QColor(theme.css(SURFACE_TOKEN)))
-            painter.end()
-        return False
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         """字体变了就按新字号重渲染（换主题 / 改 ui_scale）。
@@ -251,8 +250,15 @@ class MarkdownBrowser(QTextBrowser):
         其它控件都变大了，方案预览里的标题还是 100% 那一档。
         """
         super().changeEvent(event)
-        if event.type() == QEvent.Type.FontChange and self._source:
-            self._render()
+        if event.type() != QEvent.Type.FontChange or not self._source:
+            return
+        # **字体没变就不重渲染**：主题每应用一次就会给所有控件发 FontChange，
+        # 而重渲染 = 重新解析整篇 Markdown + 再上一遍色。不做这道判断的话，
+        # 界面上每个存活的文档视图都要白算一遍（实测整个用例套件明显变慢）。
+        if self._font_signature() != self._rendered_font:
+            # 同样延一拍：重渲染 = 重新解析整篇 Markdown 并改文档格式，
+            # 在 Qt 遍历控件树的中途做这件事不安全（见 CodeView.changeEvent 的说明）。
+            schedule_after_event_loop(self, self._render)
 
 
 def use_markdown_label(label: QLabel) -> QLabel:

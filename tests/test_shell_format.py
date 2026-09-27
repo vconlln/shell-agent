@@ -286,3 +286,27 @@ def test_empty_and_whitespace_only_input():
     assert format_script("\n\n\n").text == ""
     assert format_script("   \n").text == ""
     assert format_script("echo hi\n\n\n").text == "echo hi\n"
+
+
+# ── 注释起点的下标：必须是**原字符串**下标（高亮按它上色）────────────────
+
+
+def test_comment_start_returns_an_index_into_the_original_line():
+    """`comment_start` 给的是原字符串下标 —— 高亮器按它上色。
+
+    这条守的是一个真 bug：高亮器曾经用 `len(split_code_comment(line))` 反推注释起点，
+    而那个长度是 **lstrip 之后**的，行首有空白时两个下标对不上 ——
+    实测 `\\techo "缩进用 tab"` 的**收尾引号**被当成了注释起点，涂成了注释绿。
+    """
+    from tu_shell_agent.shell_toolchain.format import comment_start
+
+    line = '\techo "缩进用 tab"'
+    assert comment_start(line) is None, "这一行没有注释（引号里的都不算）"
+
+    with_comment = '\techo "hi"   # 这才是注释'
+    index = comment_start(with_comment)
+    assert index is not None and with_comment[index] == "#", (index, with_comment[index:])
+
+    assert comment_start('echo "#不是注释"') is None
+    assert comment_start("v=${x#pre}  # 这个才是") == len("v=${x#pre}  ")
+    assert comment_start("# 整行注释") == 0

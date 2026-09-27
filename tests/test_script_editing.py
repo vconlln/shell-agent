@@ -17,11 +17,17 @@ from PySide6.QtWidgets import QApplication
 from tu_shell_agent.ui.widgets.script_view import ScriptView
 
 
-@pytest.fixture
-def view(qtbot, restore_app) -> ScriptView:
+@pytest.fixture(scope="module", autouse=True)
+def _themed(qapp):
+    """主题每个模块只装一次（理由见 `test_chat_rendering.py` 里同名夹具）。"""
     from tu_shell_agent.ui.theme import apply_theme
 
-    apply_theme(restore_app)
+    apply_theme(qapp)
+    yield
+
+
+@pytest.fixture
+def view(qtbot) -> ScriptView:
     widget = ScriptView()
     qtbot.addWidget(widget)
     widget.resize(560, 320)
@@ -255,3 +261,14 @@ def test_verify_edited_refuses_while_a_run_is_in_progress(qtbot, tmp_path):
 
     assert "还没结束" in window.status_label.text(), window.status_label.text()
     assert window.center_pane.current_text().startswith("if true; then\necho"), "忙碌时改了界面"
+
+
+def test_script_view_tab_stop_is_four_spaces(view):
+    """中栏脚本视图的制表位也是 4 个空格（与文档面、会话代码块一致）。"""
+    from PySide6.QtGui import QFontMetricsF
+
+    # 期望值也用浮点度量：实现里是 `QFontMetricsF`（整数版会差零点几像素）
+    expected = 4 * QFontMetricsF(view.document().defaultFont()).horizontalAdvance(" ")
+    assert abs(view.tabStopDistance() - expected) < 0.5, (
+        f"制表位 {view.tabStopDistance()}px，4 个空格应当是 {expected}px"
+    )

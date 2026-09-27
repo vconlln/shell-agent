@@ -39,12 +39,29 @@ esac
 
 
 class _View:
-    """一个装好高亮器的 QPlainTextEdit（离屏，不需要显示也能算格式）。"""
+    """给高亮器用的编辑器包装：**整个会话只用一个 QPlainTextEdit**。
+
+    为什么不每个用例建一个：这些控件都是"没有父控件的顶层控件"，一个用例建一个的话，
+    销毁时机就散落在各个用例的收尾里 —— 实测那种"控件寿命不受控"的组合会让整套用例
+    在某次 Qt 全局重抛光（`apply_theme` → `setStyle`）里随机段错误
+    （Python 栈落在别的用例甚至夹具收尾、C 栈落在 libQt6Widgets）。
+    整轮共用一个、只在用例之间换文本，就不存在这个问题了。
+    """
+
+    _editor = None
+    _highlighter = None
 
     def __init__(self, text: str) -> None:
-        self.editor = QPlainTextEdit()
-        self.editor.setPlainText(text)
-        self.highlighter = ShellHighlighter(self.editor.document())
+        editor = _View._editor
+        if editor is None:
+            editor = QPlainTextEdit()
+            editor.resize(600, 400)
+            _View._editor = editor
+            _View._highlighter = ShellHighlighter(editor.document())
+        self.editor = editor
+        self.highlighter = _View._highlighter
+        self.highlighter.set_enabled(True)
+        editor.setPlainText(text)
         QApplication.processEvents()
 
     def color(self, line_no: int, word: str) -> str:
@@ -68,8 +85,24 @@ class _View:
         ]
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _close_shared_editor():
+    """整轮用完把共用的编辑器拆掉（不让它挂到会话结束）。"""
+    yield
+    editor = _View._editor
+    if editor is not None:
+        editor.close()
+        editor.deleteLater()
+        QApplication.processEvents()
+    _View._editor = None
+    _View._highlighter = None
+
+
 @pytest.fixture
-def view(qtbot) -> _View:
+def view(qapp) -> _View:
+    """`qapp` 是必需的：pytest-qt 只有在某个用例/夹具要它时才会创建 QApplication，
+    而这个文件里的控件都不再交给 qtbot 托管 —— 少了它，第一次建控件就会
+    "QWidget: Cannot create a QWidget without QApplication" 直接 abort。"""
     return _View(SCRIPT)
 
 
@@ -93,7 +126,7 @@ def test_variables_strings_and_comments_are_colored(view):
     assert "none" not in (variable, string, comment)
 
 
-def test_hash_inside_a_string_is_not_a_comment(qtbot):
+def test_hash_inside_a_string_is_not_a_comment(qapp):
     """`echo "#不是注释"` 里的 `#` 必须按字符串上色。
 
     高亮与格式化共用同一套注释判定（`format.split_code_comment`），所以这条同时守住
@@ -112,13 +145,13 @@ def test_function_name_and_builtins_are_colored(view):
     assert view.color(10, "$1") not in ("none", "#000000")
 
 
-def test_options_and_test_operators_are_distinguished(qtbot):
+def test_options_and_test_operators_are_distinguished(qapp):
     view = _View('if [ -z "$x" ]; then\n    ls -la --color=auto\nfi\n')
     assert view.color(1, "-z") != view.color(2, "-la"), "测试操作符与命令行选项同色"
     assert view.color(2, "-la") != "none"
 
 
-def test_numbers_and_arithmetic(qtbot):
+def test_numbers_and_arithmetic(qapp):
     view = _View("n=42\nn=$((n + 7))\n")
     assert view.color(1, "42") not in ("none", "#000000")
 
@@ -132,7 +165,7 @@ def test_heredoc_body_is_string_colored_until_the_marker(view):
     assert body != marker
 
 
-def test_a_closed_string_does_not_leak_into_the_next_line(qtbot):
+def test_a_closed_string_does_not_leak_into_the_next_line(qapp):
     """成对的字符串之后，下一行必须是普通代码。
 
     这里曾经有个真 bug：字符串那一支无条件把 `quote` 留在"未闭合"上，于是
@@ -148,7 +181,7 @@ def test_a_closed_string_does_not_leak_into_the_next_line(qtbot):
     assert view.color(5, "echo") == view.color(1, "echo"), "命令色在后续行不一致"
 
 
-def test_blank_line_inside_a_heredoc_does_not_end_it(qtbot):
+def test_blank_line_inside_a_heredoc_does_not_end_it(qapp):
     """heredoc 正文里的**空行**不能把它判成结束（空行的 strip() 与空标记同形）。"""
     view = _View("cat <<EOF\n第一行\n\n第三行\nEOF\necho after\n")
     body_color = view.color(2, "第一行")
@@ -157,7 +190,7 @@ def test_blank_line_inside_a_heredoc_does_not_end_it(qtbot):
     assert view.color(6, "echo") != body_color, "结束后的普通行还按字符串上色"
 
 
-def test_large_script_highlights_quickly(qtbot):
+def test_large_script_highlights_quickly(qapp):
     """2000 行的脚本高亮要够快（中栏是拿来读大脚本的，卡住就等于白做）。"""
     import time
 
@@ -171,7 +204,7 @@ def test_large_script_highlights_quickly(qtbot):
     assert view.color(1, "if") != "none"
 
 
-def test_multiline_string_state_carries_to_the_next_line(qtbot):
+def test_multiline_string_state_carries_to_the_next_line(qapp):
     """引号没闭合：下一行继续按字符串上色；闭合之后那一行不再有字符串色。"""
     view = _View('echo "第一行\n第二行 里的 $x\n结束"\necho after\n')
     string_color = view.color(1, '"')
@@ -184,7 +217,7 @@ def test_multiline_string_state_carries_to_the_next_line(qtbot):
     assert string_color not in fourth_line, "字符串状态漏到了闭合之后的下一行"
 
 
-def test_highlighting_can_be_turned_off(qtbot):
+def test_highlighting_can_be_turned_off(qapp):
     """设置里允许关掉高亮：关掉之后任何行都不该有色段。"""
     view = _View("if true; then\n    echo hi\nfi\n")
     assert view.colored_spans(1), "默认应当有高亮"
@@ -196,7 +229,7 @@ def test_highlighting_can_be_turned_off(qtbot):
     assert view.colored_spans(1), "重新打开后没有恢复"
 
 
-def test_empty_document_is_safe():
+def test_empty_document_is_safe(qapp):
     view = _View("")
     assert view.colored_spans(1) == []
 
@@ -212,3 +245,14 @@ def test_span_colors_stay_inside_their_own_token(qtbot):
     spans = dict(reversed(view.colored_spans(1)))
     assert spans.get("echo") is not None
     assert "echohi" not in "".join(spans), spans
+
+
+def test_tab_indented_line_keeps_quotes_as_strings(qapp):
+    """用 tab 缩进的那一行，收尾引号也是字符串色（不能因为行首空白被当成注释）。"""
+    view = _View('\techo "缩进用 tab"\n')
+    spans = view.colored_spans(1)
+    string_color = view.color(1, '"')
+    assert '"缩进用 tab"' in dict(spans) or any(
+        text == '"缩进用 tab"' for text, _color in spans
+    ), f"字符串被拆开了（收尾引号跑掉了）：{spans}"
+    assert view.color(1, "echo") != string_color

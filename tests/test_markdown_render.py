@@ -205,11 +205,11 @@ def test_source_is_kept_and_font_change_rerenders(view):
     assert before == 1, "标题层级丢了"
 
 
-def test_document_surface_is_painted_in_the_read_only_shade(qtbot, restore_app, tmp_path):
-    """**渲染出来看**：文档面铺的是"只读那一档"底色，而不是只剩一圈空心边框。
+def test_document_surface_is_not_near_black(qtbot, restore_app, tmp_path):
+    """**渲染出来看**：文档面跟所在卡片同色 —— 不是近黑底、也不是只剩一圈空心边框。
 
-    用户看的是像素，不是调色板 —— 之前用 QSS 点名视口那条路在方案预览上没生效
-    （它在滚动容器里），屏幕上就是"有边框、里面空着"，所以这里直接比像素。
+    用户看过截图后明确要求："底不要弄成纯黑的呀，底还原回去"。这里直接比像素：
+    方案预览在左栏卡片里（#17181c），报告视图在右栏（#101114）。
     """
     from PySide6.QtCore import QPoint
     from PySide6.QtGui import QColor, QImage, QPainter
@@ -228,6 +228,7 @@ def test_document_surface_is_painted_in_the_read_only_shade(qtbot, restore_app, 
     window.show()
     window.apply_appearance()
     window.left_pane.set_plan(str(plan))
+    window.right_tabs.setCurrentWidget(window.right_pane)     # 右列页签不选中时那页不渲染
     qtbot.wait(40)
 
     shot = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
@@ -236,11 +237,21 @@ def test_document_surface_is_painted_in_the_read_only_shade(qtbot, restore_app, 
     window.render(painter, QPoint(0, 0))
     painter.end()
 
+    from PySide6.QtGui import QPalette
+
+    near_black = {"#0b0c0e", "#000000"}
     for name, view in (("方案预览", window.left_pane.plan_preview),
                        ("报告视图", window.right_pane.notes_view)):
         origin = view.mapTo(window, view.rect().topLeft())
         inside = shot.pixelColor(origin.x() + 6, origin.y() + view.height() // 2).name()
-        assert inside == "#0b0c0e", f"{name}的文档面没有铺成只读档底色（取到 {inside}）"
+        assert inside not in near_black, f"{name}的底色又变成近黑了（取到 {inside}）"
+        # 机制上也钉住：调色板里不能再有 `bg_under` 那一档的染色（QTextEdit 会拿 Base 填视口）。
+        # 顺带记一次教训：曾试图在 PaletteChange 里改调色板来"清底"，结果
+        # "设置→事件→再设置"成了环 —— 整个用例套件从 17 分钟变成跑不完。
+        # 现在靠 QSS 的 transparent 规则，不再动调色板。
+        for role in (QPalette.ColorRole.Base, QPalette.ColorRole.Window):
+            tinted = view.viewport().palette().color(role).name()
+            assert tinted != "#0b0c0e", f"{name}的 {role.name} 又被染成近黑底了"
 
 
 def test_set_plain_shows_markers_verbatim(view):
@@ -415,3 +426,14 @@ def test_a_reply_without_thinking_has_no_thinking_section(qtbot, restore_app):
     assert turn.thinking_open() is True                     # 状态是"开"，但没有内容
     assert not turn.thinking_label.text(), "没有思考却出现了思考正文"
     assert turn._thinking_text == "", "没有思考却记下了思考内容"
+
+
+def test_tab_stop_is_four_spaces(view):
+    """制表位按 **4 个空格** 算（用户："Tab 的长度有点长，应该是四个空格的长度"）。
+
+    Qt 的默认制表位是 8 个字符宽（≈80px），一份用 tab 缩进的方案在预览里会缩出去一大截。
+    """
+    view.set_markdown("# 标题\n\n\techo 缩进用 tab\n")
+    expected = 4 * view.fontMetrics().horizontalAdvance(" ")
+    actual = view.document().defaultTextOption().tabStopDistance()
+    assert abs(actual - expected) < 0.5, f"制表位 {actual}px，4 个空格应当是 {expected}px"

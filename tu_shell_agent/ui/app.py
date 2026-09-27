@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
@@ -76,6 +77,24 @@ def _self_check_appearance(window) -> list[str]:
     return problems
 
 
+def _tear_down_self_test(app: QApplication, window: "MainWindow") -> None:
+    """拆掉自检建出来的窗口树，别把"冒烟"变成"留一堆活控件"。
+
+    自检会把整棵界面（主窗口 + 控制台弹窗 + 各个浮层）都建起来，不清的话它们会一直活着：
+    实测每跑一次 `--self-test` 就多留 16 个顶层窗口、约 650 个控件，三次之后是 48 个窗口、
+    2628 个控件。这些控件会被之后**每一次** `apply_theme`（改缩放、保存设置）重新 polish ——
+    在用例里表现为"自检之后紧接着的界面用例慢十倍"（排查这个花了不少时间）。
+    """
+    for widget in app.topLevelWidgets():
+        if widget is window or widget.parent() is None:
+            widget.close()
+            widget.deleteLater()
+    app.processEvents()
+    # 事件循环没跑起来时 deleteLater 不会自己兑现，这里手动把删除事件派发掉
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     # `--self-test` 是给打包冒烟用的：构造并绘制一遍主窗口就返回，不进事件循环。
@@ -108,6 +127,12 @@ def main(argv: list[str] | None = None) -> int:
         # 又会让"这台机器缺工具"看起来像"打包坏了"，无头/CI 下还可能把冒烟进程拖住。
         app.processEvents()
         problems = _self_check_appearance(window)
+        # **收工前把建出来的窗口拆掉**：不清的话每次自检都会留下十来个顶层窗口、
+        # 上千个控件（实测跑三次：16 → 32 → 48 个顶层窗口，控件 651 → 1527 → 2628）。
+        # 后果不是"内存多一点"这么轻：这些控件还活着，之后每一次 `apply_theme`
+        # （设置页保存、改缩放）都要把它们重新 polish 一遍 —— 首当其冲的是
+        # `test_app_self_test` 之后紧接着跑的界面用例，实测被拖慢十倍以上。
+        _tear_down_self_test(app, window)
         if problems:
             print("外观自检失败：" + "；".join(problems), file=sys.stderr)
             return 1

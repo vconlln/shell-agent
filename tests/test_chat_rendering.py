@@ -31,11 +31,22 @@ count_lines() { local file="$1"; awk 'END { print NR + 0 }' "$file"; }
 """
 
 
-@pytest.fixture
-def chat(qtbot, restore_app):
+@pytest.fixture(scope="module", autouse=True)
+def _themed(qapp):
+    """主题**每个模块只装一次**。
+
+    每个用例都 `apply_theme` 会给所有存活控件来一次整树重抛光；实测这种"反复重装主题"
+    的组合最容易踩到 Qt 内部的坑（整轮用例随机段错误，C 栈落在 libQt6Widgets 的
+    `setStyle`/`setStyleSheet` 里）。装一次就够：这些用例不依赖主题切换，只依赖字体。
+    """
     from tu_shell_agent.ui.theme import apply_theme
 
-    apply_theme(restore_app)
+    apply_theme(qapp)
+    yield
+
+
+@pytest.fixture
+def chat(qtbot):
     panel = ChatPanel()
     qtbot.addWidget(panel)
     panel.resize(430, 640)
@@ -198,3 +209,87 @@ def test_streaming_shows_plain_text_so_headings_do_not_jump(chat):
     label = chat.transcript.last_turn().findChildren(QLabel, "chatReplyText")[0]
     assert label.textFormat().name == "PlainText"
     assert label.text() == "# 一行注释\n"
+
+
+def test_chat_code_block_uses_a_four_space_tab_stop(chat):
+    """会话里的代码块：制表位按 **4 个空格**（Qt 默认 8 个字符宽，缩进会宽一倍）。"""
+    chat.add_user("跑一下")
+    chat.begin_stream("第 1 轮 · 模型输出")
+    chat.append_delta("===TU-SCRIPT===\nif true; then\n\techo hi\nfi\n===TU-END===\n")
+    chat.end_stream()
+    QApplication.processEvents()
+
+    code = chat.transcript.last_turn().findChild(QWidget, "chatCodeText")
+    assert code is not None
+    from PySide6.QtGui import QFontMetricsF
+
+    expected = 4 * QFontMetricsF(code.document().defaultFont()).horizontalAdvance(" ")
+    assert abs(code.tabStopDistance() - expected) < 0.5, (
+        f"制表位是 {code.tabStopDistance()}px，4 个空格应当是 {expected}px"
+    )
+
+
+def test_chat_code_block_is_syntax_highlighted(chat):
+    """会话输出的代码要**上色**（用户："会话输出的代码没有渲染"）——
+    与中栏脚本视图同一套 shell 高亮。"""
+    chat.add_user("跑一下")
+    chat.begin_stream("第 1 轮 · 模型输出")
+    chat.append_delta('===TU-SCRIPT===\n#!/usr/bin/env bash\nif [ -f x ]; then\n\techo "hi"\nfi\n===TU-END===\n')
+    chat.end_stream()
+    QApplication.processEvents()
+
+    code = chat.transcript.last_turn().findChild(QWidget, "chatCodeText")
+    doc = code.document()
+
+    def span_colours(line_no: int) -> dict[str, str]:
+        block = doc.findBlockByNumber(line_no)
+        return {
+            block.text()[f.start : f.start + f.length]: f.format.foreground().color().name()
+            for f in (block.layout().formats() if block.layout() else [])
+        }
+
+    assert "#!/usr/bin/env bash" in span_colours(0), "shebang 没有上色"
+    line_two = span_colours(1)
+    assert line_two.get("if") and line_two.get("then"), f"关键字没有上色：{line_two}"
+    assert span_colours(2).get("echo"), "命令没有上色"
+    assert span_colours(3).get("fi"), "收尾关键字没有上色"
+
+
+def test_non_shell_code_blocks_are_not_shell_highlighted(chat):
+    """别的语言（比如 JSON）不按 shell 上色 —— 那会误导（`{` 被当成代码块）。"""
+    chat.add_user("给我一段 JSON")
+    chat.begin_stream("模型回复")
+    chat.append_delta('```json\n{"key": "value"}\n```\n')
+    chat.end_stream()
+    QApplication.processEvents()
+
+    code = chat.transcript.last_turn().findChild(QWidget, "chatCodeText")
+    assert code is not None
+    assert not hasattr(code, "highlighter"), "非 shell 的代码块被按 shell 上色了"
+
+
+def test_code_block_tab_stop_follows_the_font(chat, qtbot):
+    """字体变了（换缩放 / QSS 生效）之后制表位要**重算**。
+
+    踩过的坑：只在构造时算一次，而字体是 QSS 给的、polish 之后才生效 ——
+    实测制表位停在旧字体上（24px），比"4 个空格"（28px）窄一截。
+    这里直接改**文档默认字体**（那才是文字实际按它排版的那个），再让它重算一次。
+    """
+    from PySide6.QtGui import QFontDatabase, QFontMetricsF
+
+    chat.add_user("跑一下")
+    chat.begin_stream("第 1 轮 · 模型输出")
+    chat.append_delta("===TU-SCRIPT===\nif true; then\n\techo hi\nfi\n===TU-END===\n")
+    chat.end_stream()
+    QApplication.processEvents()
+
+    code = chat.transcript.last_turn().findChild(QWidget, "chatCodeText")
+    bigger = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    bigger.setPointSizeF(bigger.pointSizeF() + 5)
+    code.document().setDefaultFont(bigger)
+    code._refresh_metrics()
+
+    expected = 4 * QFontMetricsF(bigger).horizontalAdvance(" ")
+    assert abs(code.tabStopDistance() - expected) < 0.5, (
+        f"换字体后制表位没重算：{code.tabStopDistance()}px，应当是 {expected}px"
+    )

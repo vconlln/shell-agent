@@ -31,9 +31,9 @@ import re
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 
-from PySide6.QtGui import QTextOption
+from PySide6.QtGui import QFontDatabase, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -53,6 +53,9 @@ _FENCE = re.compile(r"```([a-zA-Z0-9_+.-]*)[ \t]*\n(.*?)(?:```|\Z)", re.S)
 # 用户消息里的引用头（`关于以下引用内容…`）在卡片里不必再占满整段：显示时收成一行摘要，
 # 但**发给模型的正文一个字符都不动**（原样在上面那句话里，见 compose_message）。
 _QUOTE_MARK = "关于以下引用内容"
+
+# 这些语言标记下的代码块按 shell 上色；空标记也算（引擎那条流发的就是没有围栏的 script）
+_SHELL_LANGUAGES = frozenset({"", "bash", "sh", "shell", "zsh", "ksh", "console", "shell-session"})
 
 # 题面契约的标记（与引擎那一侧同一个来源，不各写一份字面量）
 from ..orchestrator.cli_contract import (  # noqa: E402 - 见上方说明
@@ -132,6 +135,9 @@ def split_contract(text: str) -> list[tuple[str, str]]:
 # 这里 import 过来用，免得两处字面量各写一遍后漂移）
 from ..agent_backends.api_client import THINKING_HEADER  # noqa: E402 - 见上方说明
 from .markdown import use_markdown_label
+from .widgets.shell_highlight import ShellHighlighter
+from .widgets.defer import schedule_after_event_loop
+from .widgets.tabstop import TAB_SPACES, apply_shell_tab_stop
 
 
 def split_segments(text: str) -> list[tuple[str, str]]:
@@ -184,9 +190,10 @@ class CodeView(QPlainTextEdit):
     鼠标滚轮到底该滚谁也就说不清了。选中/复制/右键菜单都是现成的（`QLabel` 还得自己补菜单）。
     """
 
-    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+    def __init__(self, text: str, language: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("chatCodeText")
+        self._language = (language or "").strip().lower()
         self.setPlainText(text)
         self.setReadOnly(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -197,19 +204,52 @@ class CodeView(QPlainTextEdit):
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.document().setDocumentMargin(0)
+        # 制表位 4 个空格（Qt 默认 8 个字符宽，tab 缩进会宽一倍）。
+        # 字体由 QSS 给、polish 之后才生效，所以构造时设一次、字体变化时再设一次。
+        self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        apply_shell_tab_stop(self)
         # 高度跟着**排版后的内容高度**走。不能用 `documentSizeChanged` 报的尺寸：
         # 实测它给的是 186（真值 114），代码块底部因此空出三行（抓图里一眼可见）。
         # 逐块累加 `blockBoundingRect` 才是"折行之后到底占多高"的准确答案。
+        # shell 语法高亮：与中栏脚本视图同一套配色（用户："会话输出的代码没有渲染"）。
+        # 只在 shell-ish 的代码块上挂：别的语言（python/json…）按 shell 上色会误导。
+        if self._language in _SHELL_LANGUAGES:
+            self.highlighter = ShellHighlighter(self.document())
         self.document().contentsChanged.connect(self._reflow)
         QTimer.singleShot(0, self._reflow)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """宽度变了要重算高度 —— 但**延到事件循环下一拍**。
+
+        `resizeEvent` 会在一大串场合被触发，其中包括 Qt 应用样式表时的整树重抛光。
+        在那里面 `setFixedHeight()`（改几何）等于在 Qt 遍历控件树的中途改结构：
+        实测整轮用例会随机段错误，C 栈落在 libQt6Widgets、Python 栈落在
+        `apply_theme` 的 `setStyle()` 里。延一拍观感无差别，却把两件事分开了。
+        """
         super().resizeEvent(event)
-        self._reflow()
+        schedule_after_event_loop(self, self._reflow)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        """显示时再算一次：刚插进布局的那一刻宽度还没定（否则第一帧是 640x480 的默认块）。"""
+        """显示时再算一次：刚插进布局的那一刻宽度还没定（否则第一帧是 640x480 的默认块）。
+
+        同样延一拍（原因见 `resizeEvent`）：show 也可能发生在整树重抛光的过程中。
+        """
         super().showEvent(event)
+        schedule_after_event_loop(self, self._refresh_metrics)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """字体变了：制表位与高度都要重算 —— 但**延到事件循环下一拍**再做。
+
+        在 `changeEvent`（Qt 的 polish / 样式应用过程中）里改 `setFixedHeight`
+        等于在 Qt 遍历控件树的中途改几何，实测在"恢复样式表"那种整树重抛光时会把进程打崩
+        （C 栈落在 libQt6Widgets）。延一拍既不影响观感，也不给 Qt 制造这种时机。
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            schedule_after_event_loop(self, self._refresh_metrics)
+
+    def _refresh_metrics(self) -> None:
+        apply_shell_tab_stop(self)
         self._reflow()
 
     def _reflow(self) -> None:
@@ -267,6 +307,10 @@ def _selectable_label(text: str, object_name: str, *, markdown: bool = False) ->
     label.setObjectName(object_name)
     label.setWordWrap(True)
     if markdown:
+        # `QLabel` 的 Markdown 模式没法定制表位（Qt 默认按 8 个字符宽），
+        # 所以这里把 tab 展开成 4 个空格再交给它渲染（用户："会话栏……同样的 Tab 有点长"）。
+        # 行首的 tab 展开成 4 空格会被 Markdown 认成缩进代码块 —— 对 shell 片段来说正合适。
+        label.setText(text.replace("\t", " " * TAB_SPACES))
         use_markdown_label(label)
     else:
         label.setTextFormat(Qt.TextFormat.PlainText)
@@ -477,15 +521,15 @@ class TurnView(QFrame):
             return
         self.reply_body.setVisible(True)
         self.footer.setVisible(True)
-        for kind, body in self._sections(text):
+        for kind, body, language in self._sections(text):
             if kind == "code":
-                self.reply_layout.addWidget(self._code_block(body, ""))
+                self.reply_layout.addWidget(self._code_block(body, language))
                 continue
             label = _selectable_label(body, "chatReplyText", markdown=True)
             self._install_ask(label)
             self.reply_layout.addWidget(label)
 
-    def _sections(self, text: str) -> list[tuple[str, str]]:
+    def _sections(self, text: str) -> list[tuple[str, str, str]]:
         """把一段模型输出拆成"该按代码显示"与"该按 Markdown 显示"的若干段。
 
         三层判据，从严到宽：
@@ -496,18 +540,19 @@ class TurnView(QFrame):
         """
         contract = split_contract(text)
         if contract:
-            return contract
-        sections: list[tuple[str, str]] = []
+            # 契约里的脚本没有围栏标记 → 语言留空（空 = 按 shell 上色，它本来就是 shell）
+            return [(kind, body, "") for kind, body in contract]
+        sections: list[tuple[str, str, str]] = []
         language = ""
         for kind, body in split_segments(text):
             if kind == "lang":
                 language = body
                 continue
             if kind == "code":
-                sections.append(("code", body))
+                sections.append(("code", body, language))
                 language = ""
                 continue
-            sections.append(("code" if looks_like_code(body) else "prose", body))
+            sections.append(("code" if looks_like_code(body) else "prose", body, ""))
         return sections
 
     def add_activity(self, kind: str, text: str) -> None:
@@ -587,7 +632,7 @@ class TurnView(QFrame):
         head_layout.addWidget(_CopyButton(lambda text=code: text, tip="复制这段代码"))
         layout.addWidget(head)
         # 代码正文用 CodeView（见它的文档：QLabel 断不开没有空格的长串，会被裁掉半个）
-        body = CodeView(code)
+        body = CodeView(code, language)
         body.setContentsMargins(10, 6, 10, 8)
         layout.addWidget(body)
         return block

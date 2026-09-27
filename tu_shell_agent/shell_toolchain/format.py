@@ -84,17 +84,18 @@ def normalize_newlines(text: str) -> tuple[str, int]:
     return text.replace("\r\n", "\n").replace("\r", "\n"), crlf + lone_cr
 
 
-def split_code_comment(line: str) -> str:
-    """返回这一行的**代码部分**（去掉行内注释）；引号里的 `#` 不算注释。
+def comment_start(line: str) -> int | None:
+    """行内注释 `#` 在**原字符串**里的下标；没有注释返回 None。
 
-    `echo "#不是注释"` 与 `${x#prefix}` 都会被正确放过，否则"注释"会从字符串中间开始，
-    缩进判定与语法高亮都会跟着错。
+    **为什么必须是原字符串的下标**：语法高亮要按原文位置上色。这里踩过坑 ——
+    早期版本用 `len(split_code_comment(line))`(先 lstrip 过的长度)去当注释起点，
+    行首有空白时两个下标对不上，于是把**收尾引号**当成了注释起点
+    （实测：`\techo "缩进用 tab"` 的最后一个引号被涂成注释绿）。
     """
-    text = line.lstrip(" \t")
     quote = ""
     index = 0
-    while index < len(text):
-        char = text[index]
+    while index < len(line):
+        char = line[index]
         if quote:
             if char == "\\" and quote == '"':
                 index += 2
@@ -107,10 +108,21 @@ def split_code_comment(line: str) -> str:
             quote = char
             index += 1
             continue
-        if char == "#" and (index == 0 or text[index - 1] in " \t"):
-            return text[:index].rstrip()
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return index
         index += 1
-    return text.rstrip()
+    return None
+
+
+def split_code_comment(line: str) -> str:
+    """返回这一行的**代码部分**（去掉行内注释与首尾空白）；引号里的 `#` 不算注释。
+
+    `echo "#不是注释"` 与 `${x#prefix}` 都会被正确放过，否则"注释"会从字符串中间开始，
+    缩进判定与语法高亮都会跟着错。判定与 `comment_start` 共用一套扫描，不各写一份。
+    """
+    start = comment_start(line)
+    body = line if start is None else line[:start]
+    return body.strip()
 
 
 def open_quote(line: str) -> str | None:

@@ -49,11 +49,18 @@ def restore_app(qtbot):
         yield app
     finally:
         sheet, palette, point_size = previous
-        app.setStyleSheet(sheet)
-        app.setPalette(palette)
-        font = app.font()
-        font.setPointSizeF(point_size)
-        app.setFont(font)
+        # **只在真的被改过时才还原**：`setStyleSheet` / `setPalette` 会对进程里
+        # 所有活着的控件做一次整树重抛光，实测在 150% 缩放下这种"无谓重抛光"会把
+        # Qt 内部打崩（C 栈落在 libQt6Widgets，Python 栈就停在下面这几行）。
+        # 一件没改就没必要重抛光 —— 既省时间，也不给 Qt 制造那个时机。
+        if app.styleSheet() != sheet:
+            app.setStyleSheet(sheet)
+        if app.palette() != palette:
+            app.setPalette(palette)
+        if abs(app.font().pointSizeF() - point_size) > 0.01:
+            font = app.font()
+            font.setPointSizeF(point_size)
+            app.setFont(font)
 
 
 class Grab:

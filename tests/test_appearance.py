@@ -651,7 +651,10 @@ def test_panel_corners_show_the_pane_surface_not_a_deeper_wedge(restore_app, qtb
 
     pane_bg = (16, 17, 20)       # #101114：栏底色（off 模式下 bg_surface == bg）
     fills = {
-        "报告视图": (11, 12, 14),    # #0b0c0e 只读底
+        # 报告视图是**文档面**：用户明确要求"底不要弄成纯黑的呀，底还原回去"，
+        # 所以它跟栏底色一致（不再是近黑的 #0b0c0e）。输出视图是只读**代码**面，
+        # 保持深一档；校验报告是列表底。
+        "报告视图": (16, 17, 20),
         "输出视图": (11, 12, 14),
         "校验报告": (23, 24, 28),    # #17181c 列表底
     }
@@ -674,7 +677,10 @@ def test_panel_corners_show_the_pane_surface_not_a_deeper_wedge(restore_app, qtb
         # 极角那个像素：圆角生效时它落在圆外，应当是栏底色（或它与面板底色的过渡）；
         # 它等于面板底色就说明这个角是直角。
         extreme = tuple(image.pixelColor(origin.x(), origin.y()).getRgb()[:3])
-        assert extreme != fill, f"{name} 的角是直角（角上的像素就是面板底色）"
+        # 文档面（报告视图）与栏同色时，角上取到同色是**必然**的，这条判定失去意义 ——
+        # 只对"自己有底色"的面板成立（输出视图 / 校验报告仍在守这件事）。
+        if fill != pane_bg:
+            assert extreme != fill, f"{name} 的角是直角（角上的像素就是面板底色）"
         assert all(
             min(fill[i], pane_bg[i]) - 2 <= extreme[i] <= max(fill[i], pane_bg[i]) + 2
             for i in range(3)

@@ -21,7 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PySide6.QtGui import QFontDatabase
+
 from .shell_highlight import ShellHighlighter
+from .tabstop import apply_shell_tab_stop
 
 # (正则, 人话说明)。顺序即展示顺序；只做模式匹配，不做语义分析。
 DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -73,6 +76,9 @@ class ConfirmDialog(QDialog):
         # 执行前确认框里那份脚本也要高亮：用户盯着它决定"跑不跑"，
         # 大片同色文本里最容易漏掉 `rm -rf` 这种要命的一行
         ShellHighlighter(self.script_view.document())
+        # 制表位 4 个空格（Qt 默认 8 个字符宽）：脚本里的 tab 缩进不该比别处宽一倍
+        self.script_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        apply_shell_tab_stop(self.script_view)
         self.script_view.setPlainText(script)
 
         hits = dangerous_matches(script)
