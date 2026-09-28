@@ -1949,3 +1949,66 @@ False）。换成一次 `beginEditBlock` + 全选替换（`replace_all()`），�
 接上）。空跑的用例等于没有，删掉之后改成两条能验证的：`notify=False` 不发信号（控件层契约），
 以及"设置里记的目录已经没了 → 退回默认值"（顺手补的真缺口：原来看的是一棵空树且无提示）。
 
+## 修订四十五（2026-09-20）：Windows 上"调不起来 shellcheck"——查清了，也改成说得清
+
+用户原话：
+
+> windows 下调不起来 shellcheck，win11 好像没法运行 linux 脚本，但是 win11 有 bash 命令
+
+### 一、真因（三条，都是事实，不是猜）
+
+1. **仓库里随附的 `tools/shellcheck` 是 Linux 可执行文件**：
+   `file tools/shellcheck` → `ELF 64-bit LSB executable, x86-64, statically linked`。
+   Windows 启动它只会得到 `[WinError 193] %1 不是有效的 Win32 应用程序`。
+2. **用户的 Linux 机器上，组件路径正是指向它**（`shellcheck_path = <仓库>/tools/shellcheck`）。
+   同一套做法搬到 Windows 上就是这个结果 —— 这不是用户操作错，是"仓库里那份本来就是给
+   Linux 用的"。
+3. **`bash` 帮不了 shellcheck**：shellcheck 是独立的 Haskell 程序，Git Bash 与 WSL 都不带它；
+   Windows 上必须装 `shellcheck.exe`。而 Windows 上跑脚本要的是 **Git Bash**，不是
+   `%SystemRoot%\System32\bash.exe`（WSL 的 bash 探测能过，但脚本里是 Windows 路径，
+   WSL 里要 `/mnt/c/...` 才成立）。
+
+### 二、代码里改掉的真缺口
+
+以前只有"找到 / 没找到"两种结论，而**"文件在、但起不来"会被当成找到了**：探测只看文件
+是否存在，试跑失败被吞成"版本解析不出来"。于是 Linux 版 shellcheck（或被杀软拦、缺运行库的
+exe）会以 `shellcheck: unknown (<路径>)` 通过自检，一直等到运行时才炸出一句原始
+`[WinError 193]`。现在：
+
+1. **探测阶段真的试跑** `--version`，起不来就把原因记进新的 `DetectedTool.error`；
+   `[WinError 193]` / `ENOEXEC`、权限被拒、文件消失分别翻译成一句能指导行动的话；
+2. **"没找到"与"启动不了"分成两句不同的话**：前者让人去装，后者指出这个文件为什么不能用
+   （混成一句会把用户送去重装一个他已经有的东西）；
+3. **认得出两种"看着装了其实不能用"**：WSL 的 bash（能跑、但跑不了我们的脚本）、
+   拿错平台的二进制；
+4. **候选路径补齐**：bash 增加 Git for Windows **按用户安装**的默认位置
+   `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`（现在默认就是"仅为我安装"，老代码只找
+   Program Files）；shellcheck 以前**一个候选都没有**，连"程序旁边的
+   `tools\shellcheck.exe`"都不找 —— 而 `packaging/build.md` 里一直写着把 exe 放那儿，
+   照做也等于没做。现在两处都会找。
+5. **缺装提示按平台分开**：以前 Linux 上也让人去 `winget install`，等于没给建议；
+6. **自检页把原因写出来**（`shellcheck: 找到了但启动不了 (路径)` ＋ 一行缩进的原因），
+   这是用户唯一能看到的地方；
+7. **运行阶段也翻译**：`run_shellcheck` 启动失败时抛的不再是原始 `OSError`，而是
+   「启动不了 shellcheck（路径）：<原因>」且 `exit_code=None`（没有退出码就不编一个）。
+
+### 三、验证
+
+新增 10 条用例（`tests/test_detect.py` 9 条 ＋ 自检页 1 条）：Linux 版二进制被填进组件路径时报
+"启动不了"而**不是**"未找到"、提示语按平台分开、WSL 的 bash 被点名、**正常的 Git Bash 不被
+误伤**、三种启动失败的翻译、`%LOCALAPPDATA%` 与"程序旁边"两条候选、Linux 下候选仍为空
+（不改原有解析顺序）、自检页确实把原因写在了工具那一行、运行阶段也给了人话。
+
+**11 处变异验证**（逐条改坏，确认恰好对应用例变红）：起不来也当可用 → 1 条红；
+报成"未找到" → 1 条红；不翻译 WinError 193 → 1 条红；不认 WSL bash → 1 条红；
+**误伤正常 Git Bash** → 1 条红；提示不按平台分 → 1 条红；少找 `%LOCALAPPDATA%` → 1 条红；
+少找"程序旁边" → 1 条红；自检页不写原因 → 1 条红；自检页连"启动不了"都不打印 → 1 条红；
+运行阶段不翻译 → 1 条红。
+
+其中一个变异（"自检页不写原因"）**第一次没被抓住** —— 因为用例断言的是"整段文本里有这个
+原因"，而问题清单里本来就会复述一遍。改成只认**工具清单那一段**（`问题：` 之前）之后才抓住。
+这条跟上一轮那个"变异没打上却全绿"一起记在这里：**用例自己也会骗人，变异验证是唯一能发现的
+办法**。
+
+整套用例 743 → 753 条，100% 与 150% 两档全绿（749 passed / 4 skipped），`--self-test` exit=0。
+

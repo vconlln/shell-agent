@@ -9,6 +9,7 @@ from typing import Mapping
 
 from ..procflags import no_window_kwargs
 from ..types import ShellcheckFinding
+from .detect import start_failure_reason
 
 LEVELS = ("error", "warning", "info", "style")
 
@@ -60,13 +61,24 @@ def run_shellcheck(
     args = ["--norc", "-s", "bash", "-f", "json1", *(extra_args or []), "--", script_path]
     command = " ".join([shellcheck_path, *args])
 
-    completed = subprocess.run(
-        [shellcheck_path, *args],
-        capture_output=True,
-        text=True,
-        env=build_env(os.environ),
-        **no_window_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            [shellcheck_path, *args],
+            capture_output=True,
+            text=True,
+            env=build_env(os.environ),
+            **no_window_kwargs(),
+        )
+    except OSError as error:
+        # 启动不起来（不是"脚本有问题"）：Windows 上最常见的是把 Linux 版 shellcheck 填进了
+        # 组件路径 —— 原始异常是 `[WinError 193] %1 不是有效的 Win32 应用程序`，
+        # 照原样抛出去用户看不懂。这里翻成一句能指导行动的话（见 detect.start_failure_reason）。
+        raise ShellcheckError(
+            f"启动不了 shellcheck（{shellcheck_path}）：{start_failure_reason(error)}",
+            None,
+            command,
+            str(error),
+        ) from error
     exit_code = completed.returncode
 
     if exit_code in (0, 1):

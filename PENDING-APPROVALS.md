@@ -902,6 +902,60 @@ C 栈落在 Qt 内部、Python 栈每次都在不同的地方：有时在别的�
 
 **你那边要做的一件事**：Windows 的 exe 需要重新打包（`build.bat`）才会带上前面的改动。
 
+### Windows 上"调不起来 shellcheck"：查清了，也改成说得清（2026-09-20，已改 main）
+
+> 你的原话："windows 下调不起来 shellcheck，win11 好像没法运行 linux 脚本，但是 win11 有 bash 命令"。
+
+**真因是三条事实**：
+
+1. 仓库里随附的 `tools/shellcheck` 是 **Linux 可执行文件**（我 `file` 验过：`ELF 64-bit LSB
+   executable, x86-64, statically linked`）。Windows 启动它只会得到
+   `[WinError 193] %1 不是有效的 Win32 应用程序` —— 你说"win11 没法运行 linux 脚本"是对的。
+2. 你 Linux 这台机器的设置里，组件路径**正是指向它**（`shellcheck_path =
+   /home/vconlln/my-agent/tools/shellcheck`）。同一套做法搬到 Windows 上就是这个结果，
+   所以这不是你操作错。
+3. **bash 帮不了 shellcheck**：shellcheck 是独立的程序，Git Bash 和 WSL 都不带它；
+   Windows 上要单独装 **shellcheck.exe**。
+
+**你那边要做的（两条命令）**：
+
+```powershell
+winget install --id koalaman.shellcheck     # Windows 版 shellcheck.exe
+# Git for Windows（给 bash.exe）：https://git-scm.com/download/win
+```
+
+装完在**「设置 → 组件路径 → shellcheck」**里填 `shellcheck.exe` 的完整路径最稳（不依赖 PATH
+刷新）；然后到底部**「控制台」→ 环境自检**点「重新检测」，那里会逐条列出找到了什么、在哪。
+
+**注意**：Windows 上要的是 **Git Bash**（`C:\Program Files\Git\bin\bash.exe` 或按用户安装的
+`%LOCALAPPDATA%\Programs\Git\bin\bash.exe`），**不是** `C:\Windows\System32\bash.exe`
+（那是 WSL 的）。WSL 的 bash 探测能过，但脚本里是 Windows 路径，WSL 里要 `/mnt/c/...` 才成立，
+跑起来会是一堆与脚本内容无关的怪错。
+
+**代码这边补掉的缺口（都在 main 上，已提交）**：
+
+1. **"文件在、但起不来"以前会被当成"找到了"** —— 探测只看文件是否存在，试跑失败被吞成
+   "版本解析不出来"，于是 Linux 版 shellcheck 以 `shellcheck: unknown (路径)` 通过自检，
+   运行时才炸一句原始 WinError。现在**探测阶段真的试跑** `--version`，起不来就明说
+   "启动不了"并给出原因（WinError 193 / 权限被拒 / 文件不在了，各一句对症的话）。
+2. **"没找到"与"启动不了"分成两句不同的话** —— 前者让你去装，后者告诉你这个文件为什么不能用
+   （不然你会去重装一个自己已经有的东西）。
+3. **认得出两种"看着装了其实不能用"**：WSL 的 bash、拿错平台的二进制。
+4. **候选路径补齐**：bash 增加 Git for Windows 按用户安装的默认位置；
+   shellcheck 以前**一个候选都没有** —— 连"放在程序旁边的 `tools\shellcheck.exe`"都不找，
+   而 `packaging/build.md` 里一直写着放那儿（照做也白做）。现在会找。
+5. **缺装提示按平台分开**：以前 Linux 上也让你 `winget install`，等于没给建议。
+6. **自检页把原因写出来**：`shellcheck: 找到了但启动不了 (路径)` 加一行缩进的原因 ——
+   这是你唯一能看到的地方。
+7. **运行阶段也翻译**：真跑到 shellcheck 才发现启动不了时，报的是
+   「启动不了 shellcheck（路径）：<原因>」，而不是原始 `[WinError 193]`。
+
+**验证**：新增 10 条用例，**11 处变异验证**逐条改坏确认对应用例变红，整套 743 → 753 条、100% 与 150% 两档全绿。其中一条变异第一次
+**没被抓住**（用例断言"整段文本里有原因"，而问题清单里本来就会复述一遍）—— 收紧成只认
+工具清单那一段之后才抓住。连同上一轮"变异没打上却全绿"那件事一起记在设计文档修订四十五里。
+
+**你现在这台 Linux 机器什么都不用改**：`tools/shellcheck` 在 Linux 上是能用的（0.11.0）。
+
 ## 四、如果早上你看到有东西不对
 
 按这个顺序找证据，比"感觉不对"有用：

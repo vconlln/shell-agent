@@ -72,6 +72,37 @@ def test_selfcheck_page_renders_report_and_problems(qtbot):
     assert page.has_problems() is True
 
 
+def test_selfcheck_shows_why_a_found_tool_cannot_start(qtbot):
+    """找到了但起不来时，自检页必须**把原因写出来**（这是用户唯一能看到的地方）。
+
+    现场（Windows）：组件路径填了仓库里随附的 Linux 版 shellcheck，启动即 WinError 193。
+    以前这里只打印路径与版本，用户看到的就是"调不起来 shellcheck"却不知道why。
+    """
+    page = SelfCheckPage()
+    qtbot.addWidget(page)
+    reason = "这不是当前系统能运行的程序：多半是拿错了平台的版本"
+    page.render(
+        DetectionReport(
+            opencode=DetectedTool(path="/usr/bin/opencode", version="1.18.31"),
+            bash=DetectedTool(path="/usr/bin/bash", version="5.3.15"),
+            shellcheck=DetectedTool(
+                path="D:/repo/tools/shellcheck", version="unknown", error=reason
+            ),
+            problems=(f"shellcheck 启动不了（D:/repo/tools/shellcheck）：{reason}",),
+        )
+    )
+
+    text = page.summary_text()
+    # 只看**工具清单那一段**（"问题：" 之前）：原因也必须出现在那里。
+    # 只断言"整段文本里有这个原因"是不够的 —— 问题清单里本来就会复述一遍，
+    # 于是把工具行上的原因删掉用例照样通过（变异验证抓到过这个洞）。
+    tools_section = text.split("问题：")[0]
+    assert "找到了但启动不了" in tools_section
+    assert "D:/repo/tools/shellcheck" in tools_section
+    assert reason in tools_section, "工具那一行没写原因，用户就查不出问题在哪"
+    assert page.has_problems() is True
+
+
 def test_settings_save_without_load_path_raises():
     """`save()` 无参时只能写回 load() 记住的路径；没有路径就要立刻报错，不能瞎猜位置。"""
     settings = AppSettings()

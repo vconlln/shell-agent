@@ -120,6 +120,12 @@ class SelfCheckPage(QWidget):
             tool = getattr(report, name)
             if tool is None:
                 lines.append(f"{label}: 未找到")
+            elif tool.error:
+                # 找到了但起不来：**原因必须写在这一行**（例如 Windows 上把仓库里随附的
+                # Linux 版 shellcheck 填进了组件路径）。只打印路径、或者干巴巴写 unknown，
+                # 用户根本查不出问题在哪 —— 这正是"windows 下调不起来 shellcheck"那一例。
+                lines.append(f"{label}: 找到了但启动不了 ({tool.path})")
+                lines.append(f"    └ {tool.error}")
             else:
                 lines.append(f"{label}: {tool.version}  ({tool.path})")
         if report.problems:

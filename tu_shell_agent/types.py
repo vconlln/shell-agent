@@ -85,6 +85,11 @@ class FailureEvidence:
 class DetectedTool:
     path: str
     version: str
+    # 非空 = 这个文件找到了、但**起不来**（附一句能看懂的原因）。典型场景：把仓库里随附的
+    # Linux 版 shellcheck 填进了 Windows 的「组件路径」，启动时得到
+    # `[WinError 193] %1 不是有效的 Win32 应用程序`。这时**不能**当成"未找到"去报
+    # （用户会去重装一个本来就有的东西），也不能当成可用（运行时才炸成一句原始 OSError）。
+    error: str = ""
 
 
 @dataclass(frozen=True, slots=True)

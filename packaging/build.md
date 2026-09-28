@@ -194,7 +194,7 @@ Windows wheel 一般带 `styles/qmodernwindowsstyle.dll`，需在 Windows 侧确
 | # | §14 原文条目 | 怎么测 | Linux 状态 |
 | --- | --- | --- | --- |
 | 1 | [ ] Git Bash 探测与 `bash.exe --noprofile --norc` 执行；进程树取消（`taskkill /T /F`） | 自检页应列出 Git Bash 路径与版本；跑一个含 `sleep` 的方案后点「取消」，用任务管理器确认 `bash.exe` 整棵树没了 | ⚠ 未在 Linux 验证（Linux 走 POSIX 进程组，代码路径不同） |
-| 2 | [ ] shellcheck 探测与 winget 安装指引；UTF-8 输出无乱码 | 临时改名 `tools\shellcheck.exe` 验安装指引；跑一个输出中文的脚本，右栏输出区不应出现 `????` 或 `锟斤拷` | ⚠ 未在 Linux 验证（仅 Linux 的 UTF-8 环境通过） |
+| 2 | [ ] shellcheck 探测与 winget 安装指引；UTF-8 输出无乱码 | 把 Windows 版 `shellcheck.exe` 放进 `tools\`（探测现在**会**找这里，以前不找）；再故意把 Linux 版 `tools/shellcheck` 填进「组件路径」，自检页应显示「找到了但启动不了」＋原因，而不是「未找到」。跑一个输出中文的脚本，右栏输出区不应出现 `????` 或 `锟斤拷` | ⚠ 未在 Linux 验证（仅 Linux 的 UTF-8 环境通过） |
 | 3 | [ ] opencode 原生安装下的 `serve` 启动、agent 发现（`opencode agent list`）、结构化输出实际可用 | 先 `opencode auth login`（见第 8 节）；跑一次真实生成，确认 `serve` 子进程被拉起、agent 被列出、脚本按契约返回 | ⚠ 未在 Linux 验证（本机 `tools/opencode` 是 1.18.31 但无凭据） |
 | 4 | [ ] **权限确实生效**（整个安全模型的地基）：在受控运行目录里让 agent 尝试执行一条无害命令、尝试写一个文件，确认结果是**被拒绝**而不是弹出 `ask` 询问导致挂起；并确认用户全局配置里把 `bash` 设为 `allow` 也覆盖不了本 agent 的 `deny` | 生成阶段观察是否挂住（挂住 = `ask` 没被 deny 覆盖）；检查运行目录里没有多出文件 | ⚠ 未在 Linux 验证；**规则合并那一半已在 Linux + opencode 1.18.31 实测通过**（规格 §18 风险 6），Windows 侧是复核实跑行为 |
 | 5 | [ ] PyInstaller 产物：one-folder 目录与单文件便携 exe 双击可用；PySide6 的 Qt 插件（`platforms/`、`styles/`）被正确收集，界面能起来 | 双击 `dist\tu-shell-agent\tu-shell-agent.exe`；再确认 `_internal\PySide6\Qt\plugins\platforms\qwindows.dll` 与 `styles\qmodernwindowsstyle.dll` 存在 | ⚠ 未在 Linux 验证（Linux 侧 one-folder + `--self-test` exit=0 已过；`styles/` 见第 4 节；**单文件 exe 本次未产出**，见下） |

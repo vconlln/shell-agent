@@ -9,6 +9,7 @@ from tu_shell_agent.shell_toolchain.detect import (
     is_at_least,
     parse_auth_count,
     parse_version,
+    start_failure_reason,
     system_deps,
 )
 
@@ -202,3 +203,168 @@ def test_no_auth_capability_means_no_warning():
         )
     )
     assert report.warnings == ()
+
+
+# ── "找到了但起不来"：Windows 上的真实现场 ──────────────────────────────
+#
+# 用户实测（2026-09-20）："windows 下调不起来 shellcheck，win11 好像没法运行 linux 脚本"。
+# 查下来是他把**仓库里随附的 Linux 版 shellcheck** 填进了「设置 → 组件路径」——那个文件是
+# ELF 可执行文件，Windows 启动它只会得到 `[WinError 193] %1 不是有效的 Win32 应用程序`。
+# 下面这几条钉住三件事：不能当成"未找到"、不能当成可用、必须把原因说出来。
+
+
+def _winerror(number: int, text: str) -> OSError:
+    """造一个带 winerror 的 OSError（在 Linux 上也能复现 Windows 的失败文本）。"""
+    error = OSError(text)
+    error.winerror = number          # type: ignore[attr-defined]
+    return error
+
+
+def _deps_win32(*, exists, which=None, probe=None, overrides=None) -> DetectDeps:
+    return DetectDeps(
+        platform="win32",
+        exists=exists,
+        which=which or (lambda name: None),
+        run_version=lambda path: "",
+        overrides=overrides or {},
+        version_probe=probe,
+    )
+
+
+def test_linux_binary_in_component_path_is_reported_as_unrunnable():
+    """Linux 版 shellcheck 填进组件路径 → 说"启动不了"并给出原因，**不是**"未找到"。"""
+    linux_shellcheck = "D:/repo/tools/shellcheck"
+    report = detect_all(
+        _deps_win32(
+            exists=lambda path: path == linux_shellcheck,
+            overrides={"shellcheck": linux_shellcheck},
+            probe=lambda path: (
+                ("", start_failure_reason(_winerror(193, "[WinError 193] %1 不是有效的 Win32 应用程序")))
+                if "shellcheck" in path
+                else ("GNU bash, version 5.2.37(1)-release", "")
+            ),
+        )
+    )
+    problems = "\n".join(report.problems)
+
+    assert report.shellcheck is not None, "找到了的文件不该被当成没找到"
+    assert report.shellcheck.path == linux_shellcheck
+    assert report.shellcheck.error, "起不来的原因必须记下来，否则界面上没法解释"
+    assert "启动不了" in problems
+    assert "Win32" in problems or "拿错了平台" in problems
+    assert "winget" in problems, "要告诉他 Windows 上该装什么"
+    assert "未找到 shellcheck" not in problems, "报成未找到会让人去重装一个已有的东西"
+
+
+def test_missing_shellcheck_hint_is_platform_specific():
+    """缺 shellcheck 的提示按平台分开说：Windows 用 winget + shellcheck.exe，Linux 用包管理器。
+
+    以前这条提示在 Linux 上也让人去 `winget install`，等于没给建议。
+    """
+    missing = lambda path: False  # noqa: E731 - 故意一行，读起来更直
+    windows = "\n".join(
+        detect_all(_deps_win32(exists=missing)).problems
+    )
+    linux = "\n".join(
+        detect_all(
+            DetectDeps(
+                platform="linux", exists=missing, which=lambda name: None,
+                run_version=lambda path: "",
+            )
+        ).problems
+    )
+
+    assert "shellcheck.exe" in windows and "winget" in windows
+    assert "winget" not in linux
+    assert "apt install shellcheck" in linux
+    assert "Linux" in windows, "Windows 上要说明仓库里那份是 Linux 版"
+
+
+def test_wsl_bash_is_flagged_even_though_it_runs():
+    """WSL 的 bash 能跑起来，但跑不了我们的脚本（脚本里是 Windows 路径）——必须当场说清。"""
+    wsl = "C:/Windows/System32/bash.exe"
+    report = detect_all(
+        _deps_win32(
+            exists=lambda path: path == wsl,
+            which=lambda name: wsl if name == "bash" else None,
+        )
+    )
+    problems = "\n".join(report.problems)
+
+    assert report.bash is not None and report.bash.error
+    assert "WSL" in problems
+    assert "Git for Windows" in problems
+    assert "组件路径" in problems, "要告诉他 Git Bash 装在别处时怎么指过来"
+
+
+def test_real_git_bash_is_not_flagged():
+    """正常的 Git Bash 不能被上面那条误伤（它在候选路径里排第一）。"""
+    git_bash = "C:/Program Files/Git/bin/bash.exe"
+    report = detect_all(
+        _deps_win32(
+            exists=lambda path: path == git_bash,
+            probe=lambda path: ("GNU bash, version 5.2.37(1)-release", ""),
+        )
+    )
+
+    assert report.bash is not None
+    assert report.bash.error == ""
+    assert not [problem for problem in report.problems if "bash" in problem]
+
+
+def test_start_failure_reason_translates_the_common_cases():
+    """三种最常见的启动失败各有一句对症的话（原来的实现把它们都吞成"版本解析不出来"）。"""
+    assert "平台的版本" in start_failure_reason(_winerror(193, "[WinError 193]"))
+    assert "权限" in start_failure_reason(PermissionError(13, "Permission denied"))
+    assert "不在了" in start_failure_reason(FileNotFoundError(2, "No such file"))
+    # 认不出来的异常照原样带出去，不编一句假的
+    assert "怪错误" in start_failure_reason(RuntimeError("怪错误"))
+
+
+def test_candidate_paths_include_git_for_windows_per_user_install(monkeypatch):
+    """Git for Windows 默认是"仅为我安装"，装在 %LOCALAPPDATA%\\Programs\\Git —— 也要找。"""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\tester\AppData\Local")
+
+    paths = candidate_paths("win32", "bash")
+
+    assert any(path.endswith("/Programs/Git/bin/bash.exe") for path in paths), paths
+    assert any("AppData/Local" in path for path in paths), paths
+
+
+def test_candidate_paths_look_next_to_the_app_for_shellcheck():
+    """`packaging/build.md` 一直写着把 shellcheck.exe 放 `tools\\` 下，代码却从没去那儿找。"""
+    paths = candidate_paths("win32", "shellcheck")
+
+    assert any(path.endswith("/tools/shellcheck.exe") for path in paths), paths
+    assert any(path.endswith("/shellcheck.exe") for path in paths), paths
+
+
+def test_candidate_paths_stay_empty_on_linux():
+    """Linux 不改原有解析顺序：这些工具由 PATH / 包管理器提供（随附的 tools/shellcheck
+    是仓库里的开发用具，用例用它，替换掉用户的 PATH 解析会是另一个话题）。"""
+    assert candidate_paths("linux", "bash") == []
+    assert candidate_paths("linux", "shellcheck") == []
+    assert candidate_paths("linux", "opencode") == []
+
+
+def test_run_shellcheck_explains_a_binary_it_cannot_start(monkeypatch):
+    """跑的时候才炸的那种（文件被换掉 / 探测之后才坏）也要给一句人话，而不是原始 WinError。
+
+    这是用户"windows 下调不起来 shellcheck"在**运行阶段**的样子：以前这里直接把 OSError
+    交给上层，界面上就是一行 `[WinError 193] %1 不是有效的 Win32 应用程序`。
+    """
+    from tu_shell_agent.shell_toolchain import shellcheck as shellcheck_module
+
+    def explode(*_args, **_kwargs):
+        raise _winerror(193, "[WinError 193] %1 不是有效的 Win32 应用程序")
+
+    monkeypatch.setattr(shellcheck_module.subprocess, "run", explode)
+
+    with pytest.raises(shellcheck_module.ShellcheckError) as caught:
+        shellcheck_module.run_shellcheck("D:/repo/tools/shellcheck", "/tmp/script.sh")
+
+    message = str(caught.value)
+    assert "启动不了 shellcheck" in message
+    assert "D:/repo/tools/shellcheck" in message
+    assert "拿错了平台的版本" in message
+    assert caught.value.exit_code is None, "启动失败没有退出码，不能编一个出来"
