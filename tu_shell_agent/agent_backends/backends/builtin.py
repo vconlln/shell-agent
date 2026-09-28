@@ -163,6 +163,10 @@ def _client(config: dict[str, Any], **kwargs: Any) -> ModelApiClient:
         api_key=str(config.get("api_key") or ""),
         style=str(config.get("style") or STYLE_OPENAI),
         use_proxy=bool(config.get("use_proxy", True)),
+        # 内网 W3：凭据头与 401/403 的补充说明都从配置里来（「检测」与模型列表走同一个客户端，
+        # 否则会出现"检测通过、运行时被网关拒"这种最费解的组合）
+        extra_headers=config.get("extra_headers") or {},
+        auth_hint=str(config.get("auth_hint") or ""),
         **kwargs,
     )
 
@@ -180,6 +184,8 @@ def make_adapter(config: dict[str, Any]) -> BuiltinAdapter:
         thinking=bool(config.get("thinking", False)),
         use_proxy=bool(config.get("use_proxy", True)),
         tools=bool(config.get("tools", True)),
+        extra_headers=config.get("extra_headers") or {},
+        auth_hint=str(config.get("auth_hint") or ""),
     )
 
 

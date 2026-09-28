@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import w3_login
 from ..settings import AppSettings, default_settings_path, default_skills_dir
 from ...agent_backends import (
     BackendError,
@@ -151,6 +152,52 @@ class SettingsPage(QWidget):
         self.api_tools_check.setObjectName("apiToolsCheck")
         self.api_proxy_check = QCheckBox("走系统代理（本机代理不通时请取消勾选，改为直连）")
         self.api_proxy_check.setObjectName("apiProxyCheck")
+
+        # 内网 W3 登录：勾上后，用内置 agent 时会打开浏览器到 W3 登录页。
+        # 地址**故意不给默认值**：每个内网的登录页地址不同，猜一个错的只会更糟 ——
+        # 界面上会明确提示"到内网看一眼地址再填"（用户现在就没有这个地址）。
+        self.w3_login_check = QCheckBox("使用内置 agent 时先登录 W3（内网）")
+        self.w3_login_check.setObjectName("w3LoginCheck")
+        self.w3_login_url_edit = QLineEdit()
+        self.w3_login_url_edit.setObjectName("w3LoginUrlEdit")
+        self.w3_login_url_edit.setPlaceholderText(
+            "内网 W3 登录页的完整地址，例如 https://w3.example.com/（到内网看一眼再填）"
+        )
+        self.w3_login_button = QPushButton("打开浏览器登录 W3")
+        self.w3_login_button.setObjectName("w3LoginButton")
+        self.w3_login_button.clicked.connect(lambda _checked=False: self.open_w3_login())
+        w3_login_row = QWidget()
+        w3_login_layout = QHBoxLayout(w3_login_row)
+        w3_login_layout.setContentsMargins(0, 0, 0, 0)
+        w3_login_layout.addWidget(self.w3_login_url_edit, 1)
+        w3_login_layout.addWidget(self.w3_login_button)
+        # 凭据：留空就不带。头名也留出来 —— 有的网关不用 Cookie 而用自定义头。
+        self.w3_credential_header_edit = QLineEdit()
+        self.w3_credential_header_edit.setObjectName("w3CredentialHeaderEdit")
+        self.w3_credential_header_edit.setPlaceholderText("Cookie")
+        self.w3_credential_edit = QLineEdit()
+        self.w3_credential_edit.setObjectName("w3CredentialEdit")
+        # 与 API key 一样按密码显示：截图或旁人瞥一眼不该泄露会话凭据（也不写进日志）
+        self.w3_credential_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.w3_credential_edit.setPlaceholderText("登录后从浏览器复制，粘到这里；留空 = 不带凭据")
+        w3_credential_row = QWidget()
+        w3_credential_layout = QHBoxLayout(w3_credential_row)
+        w3_credential_layout.setContentsMargins(0, 0, 0, 0)
+        w3_credential_layout.addWidget(self.w3_credential_header_edit)
+        w3_credential_layout.addWidget(self.w3_credential_edit, 1)
+        self.w3_status_label = QLabel()
+        self.w3_status_label.setObjectName("w3StatusLabel")
+        self.w3_status_label.setProperty("role", "muted")
+        self.w3_status_label.setWordWrap(True)
+        # 状态行每次改动都重算，用户随时能看到"现在会发生什么"。
+        # 只接**输入框**的 textChanged（按钮没有这个信号，接上会在构造时报 AttributeError）
+        for edit in (
+            self.w3_login_url_edit,
+            self.w3_credential_header_edit,
+            self.w3_credential_edit,
+        ):
+            edit.textChanged.connect(lambda _text: self._refresh_w3_status())
+        self.w3_login_check.toggled.connect(lambda _checked: self._refresh_w3_status())
         self.api_base_edit = QLineEdit()
         self.api_base_edit.setObjectName("apiBaseEdit")
         self.api_key_edit = QLineEdit()
@@ -204,6 +251,10 @@ class SettingsPage(QWidget):
         backends_form.addRow("", self.api_thinking_check)
         backends_form.addRow("", self.api_tools_check)
         backends_form.addRow("", self.api_proxy_check)
+        backends_form.addRow("", self.w3_login_check)
+        backends_form.addRow("W3 登录地址", w3_login_row)
+        backends_form.addRow("登录凭据", w3_credential_row)
+        backends_form.addRow("", self.w3_status_label)
         backends_form.addRow("技能目录", skills_row)
         backends_form.addRow("启用技能", self.enabled_skills_edit)
         backends_form.addRow("", self.skills_hint)
@@ -417,6 +468,13 @@ class SettingsPage(QWidget):
         self.api_thinking_check.setChecked(bool(getattr(settings, "api_thinking", False)))
         self.api_tools_check.setChecked(bool(getattr(settings, "api_tools", True)))
         self.api_proxy_check.setChecked(bool(getattr(settings, "api_use_proxy", True)))
+        self.w3_login_check.setChecked(bool(getattr(settings, "w3_login_enabled", False)))
+        self.w3_login_url_edit.setText(str(getattr(settings, "w3_login_url", "") or ""))
+        self.w3_credential_header_edit.setText(
+            str(getattr(settings, "w3_credential_header", "") or "")
+        )
+        self.w3_credential_edit.setText(str(getattr(settings, "w3_credential", "") or ""))
+        self._refresh_w3_status()
         self.api_base_edit.setText(str(getattr(settings, "api_base", "") or ""))
         # 风格**先**按保存的值铺回控件，**再**按地址对齐（顺序不能反：反过来会被保存的旧值改回去）
         index = self.api_style_combo.findData(str(getattr(settings, "api_style", "openai")))
@@ -670,6 +728,44 @@ class SettingsPage(QWidget):
             f"「{style_label(implied)}」。"
         )
 
+    def _w3_view(self) -> Any:
+        """按**当前控件**（不是已保存的设置）拼一个小视图给 w3_login 判断。
+
+        用控件值而不是 `self._settings`：用户刚填完地址、还没点保存就按「打开浏览器登录 W3」
+        时，读设置会读到旧值（或空值），于是他明明填了却被告知"还没填地址"。
+        `w3_login` 里那几个函数只按属性名取值，不要求真的是 AppSettings。
+        """
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            w3_login_enabled=self.w3_login_check.isChecked(),
+            w3_login_url=self.w3_login_url_edit.text(),
+            w3_credential_header=self.w3_credential_header_edit.text(),
+            w3_credential=self.w3_credential_edit.text(),
+        )
+
+    def _refresh_w3_status(self) -> None:
+        """把"现在会发生什么"如实写出来（不写"已登录" —— 我们并不知道，也不去探测）。"""
+        self.w3_status_label.setText(w3_login.status_text(self._w3_view()))
+
+    def open_w3_login(self) -> bool:
+        """「打开浏览器登录 W3」：地址没填就**如实说去哪填**，绝不乱开一个页面。"""
+        view = self._w3_view()
+        url = w3_login.normalize_login_url(view.w3_login_url)
+        if not url:
+            self.w3_status_label.setText(w3_login.MISSING_URL_HINT)
+            return False
+        if not w3_login.open_login_page(url):
+            # 系统没给出浏览器（Linux 上没装 xdg-open、Windows 上没有默认浏览器）时
+            # 把地址原样留在界面上，用户还能自己复制过去
+            self.w3_status_label.setText(f"没能在浏览器里打开这个地址，请手动复制：{url}")
+            return False
+        note = "已在浏览器打开：{url} —— 登录完成后回到本窗口"
+        if not self.w3_credential_edit.text().strip():
+            note += "；若网关还要求凭据，把浏览器里的 Cookie 粘到「登录凭据」那一格。"
+        self.w3_status_label.setText(note.format(url=url))
+        return True
+
     def _on_api_provider_changed(self) -> None:
         """用户**主动**选了服务商：把地址、风格、模型候选一起填好（这是最容易填错的三处）。"""
         self._apply_provider_defaults(force=True)
@@ -922,6 +1018,9 @@ class SettingsPage(QWidget):
         self.agent_command_edit.setEnabled(not is_api)
         for widget in (
             self.skills_dir_edit, self.skills_pick_button, self.enabled_skills_edit,
+            # 内网 W3 这几行同理：只有内置 agent 走 HTTP，命令行后端与它无关
+            self.w3_login_check, self.w3_login_url_edit, self.w3_login_button,
+            self.w3_credential_header_edit, self.w3_credential_edit,
         ):
             widget.setEnabled(is_api)
         self.backend_detect_button.setEnabled(not is_api or True)   # 两条路都能"检测"
@@ -1026,6 +1125,10 @@ class SettingsPage(QWidget):
         settings.api_thinking = self.api_thinking_check.isChecked()
         settings.api_tools = self.api_tools_check.isChecked()
         settings.api_use_proxy = self.api_proxy_check.isChecked()
+        settings.w3_login_enabled = self.w3_login_check.isChecked()
+        settings.w3_login_url = self.w3_login_url_edit.text().strip()
+        settings.w3_credential_header = self.w3_credential_header_edit.text().strip()
+        settings.w3_credential = self.w3_credential_edit.text().strip()
         settings.skills_dir = self.skills_dir_edit.text().strip()
         settings.enabled_skills = self.enabled_skills_edit.text().strip()
         settings.opencode_path = self.opencode_path_edit.text().strip()

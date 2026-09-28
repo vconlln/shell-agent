@@ -76,6 +76,14 @@ class AppSettings:
     # 是否跟系统代理走。默认跟（国内访问 OpenAI/Anthropic 往往必须走代理）；
     # 本机代理挂掉时可以关掉 —— 那时所有请求都会卡在"连不上代理"上。
     api_use_proxy: bool = True
+    # 内网 W3 登录（只对内置 agent 有意义）：勾上后，用内置 agent 跑/对话时会打开浏览器
+    # 到 W3 登录页，并可按需把凭据（用户从浏览器粘的 Cookie / token）随每次请求发出去。
+    # 地址默认留空：每个内网的登录页地址不同，**猜一个错的地址只会更糟**，
+    # 界面上会明确提示"去内网看一眼地址再填"（见 ui/w3_login.py）。
+    w3_login_enabled: bool = False
+    w3_login_url: str = ""
+    w3_credential_header: str = ""    # 留空 = 用默认的 Cookie
+    w3_credential: str = ""           # 登录后从浏览器复制的值；与 api_key 一样存在设置文件里
     # 技能目录（每个子目录一个 SKILL.md，见 agent_backends/skills.py）。
     # 留空 = 用仓库自带的 `skills/`（与模板库同一套"随代码版本化"的思路）。
     skills_dir: str = ""

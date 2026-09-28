@@ -86,6 +86,8 @@ class BuiltinAdapter:
         thinking: bool = False,
         use_proxy: bool = True,
         tools: bool = True,
+        extra_headers: dict[str, str] | None = None,
+        auth_hint: str = "",
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
@@ -105,6 +107,10 @@ class BuiltinAdapter:
         # 只读工具：让模型能翻运行目录（范围与上限见 readonly_tools.py）。
         # 默认开（与 opencode 那条允许 Read/Glob/Grep 的口径一致），可在设置里关掉。
         self._tools_enabled = bool(tools)
+        # 内网 W3：随每次请求带上的额外头（用户从浏览器粘的凭据），以及 401/403 时要补的
+        # 那句话。两个都是**纯数据**（不含 Qt），由界面层准备好传进来 —— 传输层不认识设置页。
+        self._extra_headers = dict(extra_headers or {})
+        self._auth_hint = str(auth_hint or "")
         self._client_factory = client_factory or ModelApiClient
         self._client: ModelApiClient | None = None
         self._lock = threading.Lock()
@@ -434,6 +440,8 @@ class BuiltinAdapter:
                     api_key=self._api_key,
                     style=self._style,
                     use_proxy=self._use_proxy,
+                    extra_headers=dict(self._extra_headers),
+                    auth_hint=self._auth_hint,
                 )
                 effective = str(getattr(self._client, "style", "") or "")
                 if effective and effective != self._style:
@@ -510,6 +518,8 @@ def make_adapter(
     thinking: bool = False,
     use_proxy: bool = True,
     tools: bool = True,
+    extra_headers: dict[str, str] | None = None,
+    auth_hint: str = "",
 ) -> BuiltinAdapter:
     """工厂：注册表用它造适配器（与其它后端同一个签名风格）。"""
     return BuiltinAdapter(
@@ -523,4 +533,6 @@ def make_adapter(
         thinking=thinking,
         use_proxy=use_proxy,
         tools=tools,
+        extra_headers=extra_headers,
+        auth_hint=auth_hint,
     )

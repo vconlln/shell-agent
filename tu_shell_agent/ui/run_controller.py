@@ -55,6 +55,7 @@ from ..run_store.sessions import (
     write_session_model,
 )
 from .engine_worker import ChatWorker, DetectWorker, EngineWorker
+from . import w3_login
 from .widgets.confirm_dialog import ConfirmDialog
 
 # 阻断级别的合法取值（与设置页下拉里的那一份一致；引擎侧会再收敛一次）
@@ -152,6 +153,8 @@ class RunController(QObject):
         self._worker: EngineWorker | None = None
         self._detect_worker: DetectWorker | None = None
         self._chat_worker: ChatWorker | None = None
+        # 本次启动是否已经为"内网 W3 登录"打开过浏览器（是则不再自动打开，见 _offer_w3_login）
+        self._w3_login_offered = False
 
         self._session_id = ""          # 当前 opencode 会话（续跑、对话共用同一个）
         self._chat_preamble = ""       # 只在新会话的第一句话前带上（方案上下文）
@@ -291,6 +294,9 @@ class RunController(QObject):
 
         template = self._template_spec()
         config = self._config_from_ui()
+        # 输入齐了、真要用了，这时才谈"内网要不要先登录"（放在校验之后：跳出来的浏览器
+        # 与被拒绝的输入凑在一起，用户会以为登录出了问题）
+        self._offer_w3_login()
         plan_text = self.window.left_pane.plan_text()
         # 所有控件读取都必须在**主线程**完成后再交给 worker：Qt 控件不是线程安全的，
         # 在 worker 线程里调 text() 属于未定义行为（最坏是堆损坏，而不是一个可见异常）。
@@ -431,6 +437,8 @@ class RunController(QObject):
         if self._chat_worker is not None and self._chat_worker.isRunning():
             chat.add_note("上一条提问尚未返回，请等待或取消。")
             return
+        # 用内置 agent 提问前同样处理一次（同一次启动里已经被 start() 处理过就不再重复）
+        self._offer_w3_login()
 
         if self._adapter is None and self._opencode is None:
             try:
@@ -632,6 +640,11 @@ class RunController(QObject):
             "thinking": bool(getattr(settings, "api_thinking", False)),
             "use_proxy": bool(getattr(settings, "api_use_proxy", True)),
             "tools": bool(getattr(settings, "api_tools", True)),
+            # 内网 W3：只有勾了选项才带上凭据（见 ui/w3_login.extra_headers ——
+            # 不然用户把后端换回公网 API 时，那个 cookie 会被送到第三方站点去）。
+            # 401/403 时补的那句话同样按开关给，公网用户不会被引到"去登录 W3"。
+            "extra_headers": w3_login.extra_headers(settings),
+            "auth_hint": w3_login.auth_hint(settings),
         }
 
     def _start_api_model_list(self, chat: Any) -> None:
@@ -1111,6 +1124,43 @@ class RunController(QObject):
         return {
             tool: str(Path(path).expanduser().resolve()) for tool, path in pairs if path
         }
+
+    # ── 内网 W3 登录 ────────────────────────────────────────────────
+    def _offer_w3_login(self) -> None:
+        """用内置 agent 之前处理"内网要先登录 W3"：打开浏览器，或如实说明去哪填地址。
+
+        **刻意不做成硬闸门**：我们并不知道内网网关是按登录态放行、还是认某个 cookie，
+        所以这里只是"打开登录页 + 说清当前状态"，请求照发。把没登录当成错误拦下运行，
+        会让公网 API 的用户被这个开关莫名挡住；真正的判据是服务端的 401/403，
+        那时 `auth_hint` 会把两条路都告诉他（见 ui/w3_login.auth_hint）。
+
+        **每次启动只自动打开一次**：点一次「开始」就弹一次浏览器，用两次就会把这个功能关掉。
+        需要再来一次时，设置页有「打开浏览器登录 W3」按钮。
+        """
+        if self._w3_login_offered:
+            return
+        try:
+            from ..agent_backends import backend_descriptor
+
+            if not backend_descriptor(self._backend_id()).is_api:
+                return          # 命令行后端与 W3 无关，别去开浏览器
+        except Exception:       # noqa: BLE001 - 后端描述异常不该挡住建登录这步
+            return
+        settings = self.settings
+        if not w3_login.login_enabled(settings):
+            return
+        self._w3_login_offered = True       # 无论成不成，本次启动都不再自动打开
+        url = w3_login.normalize_login_url(str(getattr(settings, "w3_login_url", "") or ""))
+        if not url:
+            # 内网地址只有用户自己能看到，界面上不能假装已经处理过了
+            self._status(w3_login.MISSING_URL_HINT)
+            return
+        if w3_login.open_login_page(url):
+            self._status(
+                f"已打开浏览器登录 W3：{url} —— 登录完成后回到本窗口继续（每次启动只自动打开一次）。"
+            )
+        else:
+            self._status(f"没能在浏览器里打开 W3 登录页，请手动复制到浏览器：{url}")
 
     # ── 输入装配 ──────────────────────────────────────────────────
     def _config_from_ui(self) -> RunConfig:

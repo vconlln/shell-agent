@@ -133,6 +133,39 @@ class Completion:
     tool_calls: list[Any] = field(default_factory=list)
 
 
+# HTTP 头名允许的字符（RFC 7230 的 token）：用它挡掉 "Cookie x" 这种手抖
+_HEADER_NAME_OK = frozenset(
+    "!#$%&'*+-.^_`|~0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+
+def sanitize_headers(extra: dict[str, str] | None) -> dict[str, str]:
+    """把"额外请求头"过滤成**能安全发出去**的样子（空/非法一律丢掉）。
+
+    **为什么不能原样发**：这些值来自设置里用户手粘的文本（内网 W3 的 cookie）。
+    头值里混进 `\r\n` 就是**请求头注入** —— 轻则请求被服务端拒绝、报一个看不懂的错，
+    重则被塞进额外的一行头。头名同样要挡（写成 `Cookie x` 不是合法的头名）。
+    过滤是"静默丢掉"：用户填错时他会在 401/403 的提示里被引到正确做法，而不是看到
+    一个 httpx 抛出来的底层异常。
+    """
+    if not extra:
+        return {}
+    clean: dict[str, str] = {}
+    for name, value in extra.items():
+        key = str(name or "").strip()
+        text = str(value or "").strip()
+        if not key or not text:
+            continue
+        if any(char not in _HEADER_NAME_OK for char in key):
+            continue
+        if any(char in text for char in "\r\n"):
+            continue
+        clean[key] = text
+    return clean
+
+
 def _headers(style: str, api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
     if api_key:
@@ -217,7 +250,9 @@ def _model_names(payload: Any) -> list[str]:
     return names
 
 
-def _error_message(response: httpx.Response, url: str, model: str = "") -> str:
+def _error_message(
+    response: httpx.Response, url: str, model: str = "", auth_hint: str = ""
+) -> str:
     """把状态码翻译成"该怎么办" —— 只说"HTTP 401"没人知道要做什么。
 
     **必须报真正的请求地址**（不是 base）：用户实测报过"我模型配置好了啊" —— 界面上只打印
@@ -248,6 +283,10 @@ def _error_message(response: httpx.Response, url: str, model: str = "") -> str:
         429: "触发限流或余额不足：稍后再试，或换一个模型。",
     }
     hint = hints.get(status, "检查 API 地址、key 与模型名。")
+    # 内网（W3）那一路的提示只在**启用了它**的时候才出现：公网 API 的用户看到
+    # "去登录 W3"只会更糊涂。
+    if auth_hint and status in (401, 403):
+        hint = f"{hint}\n{auth_hint}"
     tail = f"：{detail}" if detail else ""
     where = f"（请求地址：{url}" + (f"；模型：{model}" if model else "") + "）"
     return f"模型 API 返回 HTTP {status}{tail}\n{hint}\n{where}"
@@ -451,9 +490,15 @@ class ModelApiClient:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         transport: httpx.BaseTransport | None = None,
         use_proxy: bool = True,
+        extra_headers: dict[str, str] | None = None,
+        auth_hint: str = "",
     ) -> None:
         self.base_url = (base_url or "").strip()
         self.api_key = api_key or ""
+        # 额外请求头（内网 W3 的凭据）：过一次过滤，非法/带换行的直接丢掉（见 sanitize_headers）
+        self.extra_headers = sanitize_headers(extra_headers)
+        # 401/403 时补在报错后面的那句话，由界面层按"是否启用内网登录"准备好（传输层不认识 Qt）
+        self.auth_hint = str(auth_hint or "").strip()
         self.style_requested = STYLE_ANTHROPIC if style == STYLE_ANTHROPIC else STYLE_OPENAI
         self.style = resolve_style(self.base_url, self.style_requested)
         self.style_note = style_mismatch_note(self.base_url, self.style_requested, self.style)
@@ -500,7 +545,9 @@ class ModelApiClient:
                 response = self._client.get(
                     url,
                     headers=_headers(
-                        self.style, self.api_key, {"Accept": "application/json"}
+                        self.style,
+                        self.api_key,
+                        {"Accept": "application/json", **self.extra_headers},
                     ),
                     timeout=timeout_s,
                 )
@@ -517,7 +564,7 @@ class ModelApiClient:
                 continue
             if response.status_code >= 400:
                 # 401/403 这类是"配置不对"，换地址也没用 —— 直接把它报出来
-                raise ApiError(_error_message(response, url))
+                raise ApiError(_error_message(response, url, auth_hint=self.auth_hint))
             try:
                 payload = response.json()
             except ValueError as error:
@@ -625,13 +672,15 @@ class ModelApiClient:
             with self._client.stream(
                 "POST",
                 url,
-                headers=_headers(self.style, self.api_key),
+                headers=_headers(self.style, self.api_key, dict(self.extra_headers)),
                 json=payload,
                 timeout=request_timeout,
             ) as response:
                 if response.status_code >= 400:
                     response.read()
-                    error = ApiError(_error_message(response, url, model))
+                    error = ApiError(
+                        _error_message(response, url, model, auth_hint=self.auth_hint)
+                    )
                     error.status = response.status_code        # 供重试判断用
                     raise error
                 tool_buffer: dict[int, dict[str, Any]] = {}
