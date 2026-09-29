@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget, QTextBrowser,
-    QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget,
+    QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from ...filetext import write_text_lf
 from ..widgets.diff_view import diff_counts, render_diff_html
 from ..widgets.script_view import ScriptView
 from ..widgets.selection_menu import install_ask_action, selected_text
@@ -19,6 +23,7 @@ from ..theme import DIFF_GUTTER_FG
 
 _CURRENT_TAB = 0
 _COMPARE_TAB = 1
+_FILE_TAB = 2
 
 
 class CenterPane(QWidget):
@@ -28,6 +33,8 @@ class CenterPane(QWidget):
     ask_about_selection = Signal(str, str)
     # 自动整理的说明（粘贴时换了换行符、格式化了哪些行）：转给状态栏，用户得看得见
     notice = Signal(str)
+    # 「文件」页保存成功（携带绝对路径）：主窗口据此刷新方案预览等依赖这份文件的地方
+    file_saved = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -61,6 +68,14 @@ class CenterPane(QWidget):
         self.tabs.addTab(self.script_view, "本轮")
         self.tabs.addTab(self.compare_view, "对比上一轮")
 
+        # ── 「文件」页：左栏文件树里点一个文件，就在这里编辑并保存 ──────────
+        # 用户要求（2026-09-20）："这个方案文档我还不能编辑……可以在底下文件夹选择文件，
+        # 并在中间这栏脚本这里进行编辑"。复用 ScriptView：行号、shell 高亮、Tab=4 空格、
+        # Ctrl+Z/Ctrl+Shift+Z 撤销重做、粘贴自动整理，全都是现成的同一套行为。
+        self.file_view = ScriptView()
+        self.file_view.setObjectName("fileView")
+        self.tabs.addTab(self.file_view, "文件")
+
         # 「格式化」放在**页签右上角**：不额外占一行高度（中栏本来就矮），
         # 但它是"手改脚本"这条路上最常用的动作，不该藏进菜单。
         self.format_button = QPushButton("格式化")
@@ -69,8 +84,21 @@ class CenterPane(QWidget):
             "按结构整理脚本缩进、去掉行尾空白、换行符统一成 LF（Ctrl+Shift+F）。\n"
             "只动行首与行尾空白，不改任何语句；heredoc 正文与跨行字符串原样保留。"
         )
-        self.format_button.clicked.connect(lambda _checked=False: self.script_view.format_now())
-        self.tabs.setCornerWidget(self.format_button, Qt.Corner.TopRightCorner)
+        self.format_button.clicked.connect(lambda _checked=False: self._format_current())
+        # 「保存」只对「文件」页有意义：脚本页的内容归运行流程管，不在这里写盘。
+        self.save_button = QPushButton("保存")
+        self.save_button.setObjectName("saveFileButton")
+        self.save_button.setToolTip("把这一页的内容写回文件（Ctrl+S）；换行符统一成 LF。")
+        self.save_button.clicked.connect(lambda _checked=False: self.save_file())
+        self.save_button.setVisible(False)
+        corner = QWidget()
+        corner_layout = QHBoxLayout(corner)
+        corner_layout.setContentsMargins(0, 0, 0, 0)
+        corner_layout.setSpacing(4)
+        corner_layout.addWidget(self.save_button)
+        corner_layout.addWidget(self.format_button)
+        self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self.tabs.currentChanged.connect(lambda _index: self._sync_corner_buttons())
 
         self.timeline = QListWidget()
         self.timeline.setObjectName("timeline")
@@ -86,6 +114,12 @@ class CenterPane(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.splitter)
 
+        # 「文件」页的状态：当前路径、是否只读（读的时候就打不开）、页签标签
+        self._file_path = ""
+        self._file_readonly = False
+        self._file_label = "文件"
+        self._sync_corner_buttons()
+
         self._rounds: list[tuple[int, str]] = []  # 已展示过的 (轮次, 脚本)，按到达顺序
         self._current_round: int | None = None
         self._compare_with_previous = False
@@ -97,6 +131,14 @@ class CenterPane(QWidget):
         self.script_view.ask_about_selection.connect(self.ask_about_selection)
         # 自动整理（粘贴换行符 / 格式化）的结果说明转给状态栏
         self.script_view.notice.connect(self.notice)
+        # 文件页同样：选中提问、自动整理说明、以及"改了没保存"的标记
+        self.file_view.ask_about_selection.connect(self.ask_about_selection)
+        self.file_view.notice.connect(self.notice)
+        self.file_view.document().modificationChanged.connect(self._on_file_modified)
+        # Ctrl+S 只在这个页里生效（WidgetShortcut）：全局抢 Ctrl+S 会影响别的控件
+        self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self.file_view)
+        self.save_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.save_shortcut.activated.connect(self.save_file)
 
     # ── 选中提问 ──────────────────────────────────────────────────
     def selected_code(self) -> str:
@@ -177,6 +219,104 @@ class CenterPane(QWidget):
     def current_text(self) -> str:
         """本轮脚本全文（右栏点击跳转、历史回填与界面测试都用它）。"""
         return self.script_view.toPlainText()
+
+    # ── 文件页：编辑左栏文件树里选中的文件 ──────────────────────────
+    def open_path(self, path: str) -> bool:
+        """在中栏「文件」页打开一个文件供编辑；读不了就如实说明并**标为只读**。
+
+        为什么标只读而不是留一个空编辑器：读不了（二进制、非 UTF-8、没权限）时让用户
+        以为可以改、改完保存却发现写坏了文件，比直接说"这个打不开"糟得多。
+        """
+        target = Path(str(path or ""))
+        if not str(path or "").strip():
+            return False
+        try:
+            text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            self._show_uneditable(
+                target, "这个文件不是 UTF-8 文本（可能是二进制，或用了 GBK/UTF-16 编码），"
+                "不能在这里编辑。"
+            )
+            return False
+        except OSError as error:
+            self._show_uneditable(target, f"读不了这个文件：{error}")
+            return False
+        # set_text 会归一化换行（CRLF→LF）并保持可撤销；读完先清"已修改"标记
+        self.file_view.set_text(text)
+        self.file_view.document().setModified(False)
+        self._file_path = str(target)
+        self._file_readonly = False
+        self._set_file_tab_label(target.name)
+        self.tabs.setCurrentIndex(_FILE_TAB)
+        self._sync_corner_buttons()
+        self.notice.emit(f"已在中栏打开 {target.name}（改完按 Ctrl+S 保存）")
+        return True
+
+    def save_file(self) -> bool:
+        """把「文件」页的内容写回磁盘（LF 结尾）；成功与否都发一句说明。"""
+        if not self._file_path:
+            self.notice.emit("还没有打开任何文件：先在左栏的文件夹里点一个文件。")
+            return False
+        if self._file_readonly:
+            self.notice.emit("这个文件读的时候就没打开成功，不能保存（先修好编码或权限）。")
+            return False
+        target = Path(self._file_path)
+        try:
+            write_text_lf(target, self.file_view.toPlainText())
+        except OSError as error:
+            self.notice.emit(f"保存失败（{target}）：{error}")
+            return False
+        self.file_view.document().setModified(False)
+        self._set_file_tab_label(target.name)
+        self._sync_corner_buttons()
+        self.notice.emit(f"已保存 {target.name}（{target}）")
+        self.file_saved.emit(str(target))
+        return True
+
+    def file_path(self) -> str:
+        """「文件」页当前编辑的文件（没打开则为空串）。"""
+        return self._file_path
+
+    def file_is_dirty(self) -> bool:
+        """有没有未保存的改动（标签上的圆点与它同源）。"""
+        return bool(self.file_view.document().isModified())
+
+    def _show_uneditable(self, target: Path, reason: str) -> None:
+        """把"为什么不能编辑"写在文件页里：用户点开就该看到原因，而不是空白。"""
+        self.file_view.set_text(f"（{target.name} 打不开）\n\n{reason}\n\n路径：{target}\n")
+        self.file_view.setReadOnly(True)
+        self.file_view.document().setModified(False)
+        self._file_path = str(target)
+        self._file_readonly = True
+        self._set_file_tab_label(target.name)
+        self.tabs.setCurrentIndex(_FILE_TAB)
+        self._sync_corner_buttons()
+        self.notice.emit(f"{target.name} 打不开：{reason}")
+
+    def _set_file_tab_label(self, name: str) -> None:
+        """页签上写文件名，有未保存改动时加一个圆点（用户一眼看得出保存没保存）。"""
+        dirty = " •" if self.file_is_dirty() else ""
+        self._file_label = f"{name}{dirty}" if name else "文件"
+        self.tabs.setTabText(_FILE_TAB, self._file_label)
+
+    def _sync_corner_buttons(self) -> None:
+        """页签右上角的按钮跟着当前页走：保存只在文件页、格式化作用于"你正在看的那一篇"。"""
+        on_file = self.tabs.currentIndex() == _FILE_TAB
+        self.save_button.setVisible(on_file)
+        if on_file:
+            self.save_button.setEnabled(not self._file_readonly)
+            self.save_button.setText("保存 •" if self.file_is_dirty() else "保存")
+
+    def _format_current(self) -> None:
+        """格式化当前这一页（脚本页改脚本、文件页改文件）——按钮的含义跟着眼睛走。"""
+        view = self.file_view if self.tabs.currentIndex() == _FILE_TAB else self.script_view
+        view.format_now()
+
+    def _on_file_modified(self, _modified: bool) -> None:
+        """内容一改就更新页签标记与保存按钮（不弹窗、不拦截，只是如实显示状态）。"""
+        if self._file_path and not self._file_readonly:
+            self._set_file_tab_label(Path(self._file_path).name)
+        self._sync_corner_buttons()
 
     def set_compare_with_previous(self, enabled: bool) -> None:
         """打开/关闭「对比上一轮」：控制器把它接在复选框上，打开即切到对比页。"""

@@ -53,6 +53,8 @@ class PlanTree(QWidget):
 
     plan_chosen = Signal(str)      # 用户在树里选了一个方案文档（携带绝对路径）
     root_changed = Signal(str)     # 换根目录了（调用方可以记进设置）
+    # 用户在树里点开了**任何**文件：主窗口据此把它放进中栏「文件」页编辑
+    file_opened = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -87,8 +89,9 @@ class PlanTree(QWidget):
         self.view.clicked.connect(self._on_clicked)
         self.view.doubleClicked.connect(self._on_double_clicked)
         self.view.setToolTip(
-            "点选方案文档（.md / .txt）即设为方案；双击任何文件也当选中它。\n"
-            "以 . 开头的条目已隐藏。"
+            "点一下任何文件：在中栏「文件」页打开编辑（Ctrl+S 保存）；"
+            "点 .md / .txt 还会把它设为方案。\n"
+            "双击任何文件也当选中它；点文件夹是展开/收起。以 . 开头的条目已隐藏。"
         )
 
         self.pick_button = QPushButton("选择文件夹…")
@@ -248,6 +251,9 @@ class PlanTree(QWidget):
             # 视图自己也会按 expandsOnDoubleClick 处理双击，这里管的是单击
             self.view.setExpanded(index, not self.view.isExpanded(index))
             return
+        # 点任何文件都在中栏打开它（用户要求"选文件 → 在中间这栏编辑"），
+        # 方案文档再多做一件事：设为方案（预览跟着变）。
+        self.file_opened.emit(path)
         if Path(path).suffix.lower() in PLAN_SUFFIXES:
             self.plan_chosen.emit(path)
 
@@ -256,6 +262,7 @@ class PlanTree(QWidget):
             return
         path = self.model.filePath(index)
         if path and not Path(path).is_dir():
+            self.file_opened.emit(path)
             self.plan_chosen.emit(path)
 
 

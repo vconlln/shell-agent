@@ -56,11 +56,38 @@ DEFAULT_TEMPLATES_DIR = ".tu-templates"
 _ID_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
+# 生成内容的插入锚点：模板里没有它时，导入会在末尾补一行（见 import_from_file）
+_BODY_ANCHOR = "# @@TU:BODY@@"
+
+
+def _import_notice(imported: list[str], anchored: list[str], skipped: list[str]) -> str:
+    """把导入结果拼成一句人话：做了什么、动了哪里、哪个没进来。"""
+    parts: list[str] = []
+    if imported:
+        parts.append(f"已导入 {len(imported)} 个模板：{'、'.join(imported)}")
+    if anchored:
+        parts.append(
+            f"其中 {len(anchored)} 个文件没有 {_BODY_ANCHOR} 锚点，已在**末尾**各补一行"
+            f"（生成的内容会写在那里）：{'、'.join(anchored)}"
+        )
+    if skipped:
+        parts.append("未导入：" + "；".join(skipped))
+    if not parts:
+        return ""
+    return "。".join(parts) + "。"
+
+
 def _template_id_from_path(path: Path) -> str:
-    """把拖进来的文件名转成合法 id：小写、非法字符换 `-`、去掉 `.tpl.sh` 后缀。"""
+    """把文件名转成合法 id：小写、非法字符换 `-`、去掉 `.tpl.sh` / `.sh` 后缀。
+
+    后缀必须去掉：现在主打"导入普通 shell 文件"，`cleanup.sh` 若不去后缀会被清洗成
+    `cleanup-sh`（那个点在 id 里只允许变成 `-`）—— 用户看到的模板名会莫名其妙多个 `-sh`。
+    """
     stem = path.name
-    if stem.endswith(".tpl.sh"):
-        stem = stem[: -len(".tpl.sh")]
+    for suffix in (".tpl.sh", ".sh"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
     cleaned = "".join(ch if ch in _ID_ALLOWED else "-" for ch in stem.lower())
     return cleaned.strip("-") or "imported"
 
@@ -112,12 +139,26 @@ class TemplatesPane(QWidget):
 
         self.save_button = QPushButton("保存")
         self.delete_button = QPushButton("删除")
-        self.import_button = QPushButton("导入 .tpl.sh")
+        # 名字里点明"shell 文件"：用户要的是"把我自己的 .sh 传进来当模板"，而旧名字
+        # 「导入 .tpl.sh」让人以为只收那个特定后缀（其实对话框一直认 *.sh）。
+        self.import_button = QPushButton("导入 shell 文件…")
+        self.import_button.setObjectName("templateImportButton")
+        self.import_button.setToolTip(
+            "把 .sh / .tpl.sh 文件导入成模板（可一次选多个）。\n"
+            "正文原样收下；文件里没有 # @@TU:BODY@@ 锚点时会**在末尾**补一行，"
+            "生成的内容就写在那里。导入的模板一律先按**不可信**处理（执行前仍要人工确认）。"
+        )
         self.new_button = QPushButton("新建")
         buttons = QHBoxLayout()
         for button in (self.save_button, self.delete_button, self.import_button, self.new_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
+
+        # 导入结果要有地方说清楚：收下几个、补没补锚点、哪个读不了 —— 否则用户只能靠猜
+        self.notice_label = QLabel()
+        self.notice_label.setObjectName("templatesNotice")
+        self.notice_label.setProperty("role", "muted")
+        self.notice_label.setWordWrap(True)
 
         editor = QWidget()
         editor_layout = QVBoxLayout(editor)
@@ -128,6 +169,7 @@ class TemplatesPane(QWidget):
         editor_layout.addWidget(self.trusted_check)
         editor_layout.addWidget(_section("渲染预览"))
         editor_layout.addWidget(self.preview, 3)
+        editor_layout.addWidget(self.notice_label)
         editor_layout.addLayout(buttons)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -365,31 +407,62 @@ class TemplatesPane(QWidget):
         self.reload()
 
     def import_from_file(self) -> None:
-        """导入外部 .tpl.sh：正文原样收下（只做 LF 归一化），id 从文件名清洗而来。"""
-        path, _ = QFileDialog.getOpenFileName(self, "导入模板", "", "shell 模板 (*.tpl.sh *.sh)")
-        if not path:
-            return
-        source = Path(path)
-        body = to_lf(source.read_text(encoding="utf-8"))
-        template_id = _template_id_from_path(source)
-        if self._row_for(template_id) >= 0:
-            answer = QMessageBox.question(
-                self, "模板已存在", f"模板 {template_id} 已存在，用导入的内容覆盖？"
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self._store.save(
-            TemplateInput(
-                id=template_id,
-                name=template_id,
-                description="",
-                trusted=False,                     # 外来脚本一律先按不可信处理
-                placeholders=[PlaceholderSpec(name=n) for n in declared_names(body)],
-                body=body,
-            )
+        """导入 shell 文件当模板：**可一次选多个**，正文原样收下（只做 LF 归一化）。
+
+        与旧版的三点不同（用户要求"支持我上传 shell 文件来当作模板库"）：
+        1. 对话框**先列 shell 脚本**（`*.sh`），并且能多选 —— 一次把几个脚本都传进来；
+        2. 没有 `# @@TU:BODY@@` 锚点就在**末尾**补一行：锚点是"生成的内容写在哪里"，
+           没有它这个模板对引擎来说只是个普通骨架（提示词里会写"本模板无锚点"）；
+           补在末尾意味着**用户的脚本原样在前、生成的部分追加在后**；
+        3. 结果写在通知行里（收下几个、补没补锚点、哪个文件读不了），不靠用户猜。
+        """
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "导入 shell 文件当模板",
+            "",
+            "shell 脚本 (*.sh);;模板骨架 (*.tpl.sh);;全部文件 (*)",
         )
+        if not paths:
+            return
+        imported: list[str] = []
+        anchored: list[str] = []
+        skipped: list[str] = []
+        for raw_path in paths:
+            source = Path(raw_path)
+            try:
+                # 编码要如实报错：GBK 的脚本在 Windows 上很常见，硬读会得到一堆乱码正文
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                skipped.append(f"{source.name}（{error}）")
+                continue
+            body = to_lf(text)
+            if _BODY_ANCHOR not in body:
+                body = body.rstrip("\n") + "\n\n" + _BODY_ANCHOR + "\n"
+                anchored.append(source.name)
+            template_id = _template_id_from_path(source)
+            if self._row_for(template_id) >= 0 and template_id not in imported:
+                answer = QMessageBox.question(
+                    self, "模板已存在", f"模板 {template_id} 已存在，用导入的内容覆盖？"
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    skipped.append(f"{source.name}（同名模板已存在，已跳过）")
+                    continue
+            self._store.save(
+                TemplateInput(
+                    id=template_id,
+                    name=template_id,
+                    description="",
+                    trusted=False,                     # 外来脚本一律先按不可信处理
+                    placeholders=[PlaceholderSpec(name=n) for n in declared_names(body)],
+                    body=body,
+                )
+            )
+            imported.append(template_id)
+
         self.reload()
-        self.select(template_id)
+        if imported:
+            self.select(imported[-1])
+        self.notice_label.setText(_import_notice(imported, anchored, skipped))
 
     def create_current(self) -> None:
         """新建空模板：沿用内置骨架的锚点，省得用户从零记锚点格式。"""

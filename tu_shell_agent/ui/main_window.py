@@ -289,6 +289,13 @@ class MainWindow(QMainWindow):
         self.settings_page.appearance_changed.connect(self._preview_appearance)
         # 中栏（脚本 / 差异页）里"就选中的代码提问" → 右栏对话面板带上这段引用。
         self.center_pane.ask_about_selection.connect(self.quote_into_chat)
+        # 左栏文件树里点一个文件 → 中栏「文件」页打开编辑；中栏的说明转给状态栏
+        # （"已在中栏打开 X（改完按 Ctrl+S 保存）"这类话用户得看得见）。
+        self.left_pane.file_opened.connect(self.center_pane.open_path)
+        self.center_pane.notice.connect(self.set_status)
+        # 在「文件」页保存的如果正是当前方案文档，把方案预览重读一遍 —— 否则用户改完方案、
+        # 左边预览还是旧的，运行读到的也是旧正文（而"能改方案"正是他要的）。
+        self.center_pane.file_saved.connect(self._on_file_saved)
 
         # 把手宽度写进代码而不是只靠 QSS：样式表没加载时（或换主题时）它会退回 Qt 默认的
         # 4px，而 4px 抓不住 —— 用户"不能调节竖向的长度"就是这么来的。命中目标不能依赖样式。
@@ -654,6 +661,17 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError):
             # 写盘失败不该影响正在做的事；下次保存会再试一次
             pass
+
+    def _on_file_saved(self, path: str) -> None:
+        """中栏「文件」页保存完之后：如果存的就是当前方案文档，把方案预览重读一遍。
+
+        不重读的话，用户改完方案点保存、左边预览与接下来那次运行用的都还是**旧正文** ——
+        "我明明改了"就成了最难查的那类问题（界面看着一切正常）。
+        """
+        if not path or path != self.left_pane.plan_path():
+            return
+        self.left_pane.set_plan(path)
+        self.set_status(f"方案文档已更新：{path}")
 
     def _on_settings_saved(self, _path: str) -> None:
         """设置保存后重新装载：只影响**之后**的运行，不打断正在跑的。"""

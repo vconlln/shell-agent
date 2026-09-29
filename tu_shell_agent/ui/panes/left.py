@@ -45,6 +45,8 @@ class LeftPane(QWidget):
     plan_changed = Signal(str)
     # 文件树的根目录换了（由主窗口记进设置，下次打开还在原处）
     plan_tree_root_changed = Signal(str)          # 选择方案后发出（绝对路径）
+    # 用户在下面那个文件夹里点开了一个文件：主窗口把它放进中栏「文件」页编辑
+    file_opened = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -100,6 +102,7 @@ class LeftPane(QWidget):
         layout.addWidget(_section("文件夹（点选方案文档）"))
         self.plan_tree = PlanTree()
         self.plan_tree.plan_chosen.connect(self.set_plan)
+        self.plan_tree.file_opened.connect(self.file_opened)
         self.plan_tree.root_changed.connect(self.plan_tree_root_changed)
         layout.addWidget(self.plan_tree)
 

@@ -521,9 +521,34 @@ class RunController(QObject):
 
     # ── 历史会话（按目录检索）────────────────────────────────────────────
     def refresh_sessions(self) -> list:
-        """扫运行根目录，把可恢复的会话铺进对话面板的下拉。"""
-        sessions = scan_sessions(self._session_root())
-        self.window.chat_panel.set_sessions(sessions, self._run_dir)
+        """扫运行根目录，把会话铺进下拉，**并真的接上最近一段**。
+
+        为什么必须"真的接上"（用户实测报的 bug）：`set_sessions()` 铺列表时会**屏蔽信号**
+        （否则铺的过程会触发一串切换），于是它只是把第一项**点亮**，什么都没载入 ——
+        用户看到的是"扫完了、下拉里亮着一段、对话区还是空的"；而且他再点那一条时
+        `currentIndexChanged` 也不发（索引没变），点了照样没反应。现在扫完就接上最近一段
+        （连记录一起回填），并把扫到几段、接上了哪一段写在状态行里。
+        """
+        root = self._session_root()
+        sessions = scan_sessions(root)
+        chat = self.window.chat_panel
+        chat.set_sessions(sessions, self._run_dir)
+        if not sessions:
+            # 如实说"没找到"，并**带上扫的是哪个目录**：用户才知道该去改哪个设置
+            chat.set_status(f"没有发现可恢复的会话（扫的是：{root}）")
+            return sessions
+
+        known = {item.run_dir for item in sessions}
+        if self._run_dir and self._run_dir in known:
+            # 当前这段还在列表里就保持不动：正在聊的那段不该被"刷新"打断
+            current = session_in(self._run_dir)
+            label = current.label() if current is not None else self._run_dir
+            chat.set_status(f"已刷新：{len(sessions)} 段会话，当前仍是 {label}")
+            return sessions
+
+        newest = sessions[0]
+        self._on_session_selected(newest.run_dir)
+        chat.set_status(f"扫到 {len(sessions)} 段会话，已接上最近一段：{newest.label()}")
         return sessions
 
     def _session_root(self) -> str:

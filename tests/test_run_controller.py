@@ -1113,6 +1113,94 @@ def test_session_picker_lists_and_switches(qtbot, tmp_path):
     assert "第一段" in window.chat_panel.transcript.toPlainText()
 
 
+def test_scanning_sessions_loads_the_latest_transcript(qtbot, tmp_path):
+    """用户实测报的 bug：点「扫描历史会话」之后，下拉里亮着一段、**对话区却是空的**。
+
+    根因有两层：① `set_sessions()` 铺列表时屏蔽了信号（否则会触发一串切换），于是它只把
+    第一项点亮、什么都没载入；② 用户再点那一条时 `currentIndexChanged` 也不会发（索引没变）。
+    所以这里钉住"扫完就把最近一段的记录真的回填进去"。
+    """
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    older = run_root / "20260919-101010-aaaa"
+    newer = run_root / "20260919-121212-bbbb"
+    for directory, session, text in ((older, "ses_a", "旧的一段"), (newer, "ses_b", "最近的一段")):
+        directory.mkdir(parents=True)
+        write_session_meta(str(directory), session, kind="chat")
+        append_chat(str(directory), "user", text)
+        append_chat(str(directory), "assistant", f"回复：{text}")
+
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    controller.refresh_sessions()
+
+    chat = window.chat_panel
+    assert controller._run_dir == str(newer), "扫完没有接上最近一段"
+    assert controller._session_id == "ses_b"
+    transcript = chat.transcript.toPlainText()
+    assert "最近的一段" in transcript, f"对话区没有回填记录：{transcript!r}"
+    assert "旧的一段" not in transcript, "接上了最近一段，却把别的会话也混了进来"
+    assert "2 段会话" in chat.status.text(), f"状态行没说清扫到了什么：{chat.status.text()!r}"
+
+
+def test_scanning_keeps_the_session_you_are_in(qtbot, tmp_path):
+    """正在聊的那一段还在列表里时，"刷新"不该把你踢到别的会话去。"""
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    older = run_root / "20260919-101010-aaaa"
+    newer = run_root / "20260919-121212-bbbb"
+    for directory, session, text in ((older, "ses_a", "我在这段里"), (newer, "ses_b", "更新的一段")):
+        directory.mkdir(parents=True)
+        write_session_meta(str(directory), session, kind="chat")
+        append_chat(str(directory), "user", text)
+
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    controller._on_session_selected(str(older))
+
+    controller.refresh_sessions()
+
+    assert controller._run_dir == str(older), "刷新把当前会话换掉了"
+    assert "我在这段里" in window.chat_panel.transcript.toPlainText()
+    assert "当前仍是" in window.chat_panel.status.text()
+
+
+def test_scanning_without_sessions_says_where_it_looked(qtbot, tmp_path):
+    """一段都没扫到时也要说清楚"扫的是哪个目录" —— 否则用户不知道去哪改设置。"""
+    run_root = tmp_path / "runs"
+    run_root.mkdir()
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+
+    listed = controller.refresh_sessions()
+
+    assert listed == []
+    status = window.chat_panel.status.text()
+    assert "没有发现可恢复的会话" in status
+    assert str(run_root) in status, f"没说是哪个目录：{status!r}"
+
+
+def test_reselecting_the_current_session_reloads_it(qtbot, tmp_path):
+    """再点一次**已经亮着**的那一项也要重新载入（用户发现没反应时会再点一次）。
+
+    只接 `currentIndexChanged` 时这次点击是静默的（索引没变）；接 `activated` 才有反应。
+    """
+    from tu_shell_agent.run_store.sessions import append_chat, write_session_meta
+
+    run_root = tmp_path / "runs"
+    session_dir = run_root / "20260919-121212-bbbb"
+    session_dir.mkdir(parents=True)
+    write_session_meta(str(session_dir), "ses_b", kind="chat")
+    append_chat(str(session_dir), "user", "再点一次也要能回填")
+    controller, _opencode, window = _chat_controller(qtbot, tmp_path, run_root)
+    controller.refresh_sessions()
+    chat = window.chat_panel
+    chat.clear_history()                      # 模拟"对话区空了"
+
+    chat.session_combo.activated.emit(chat.session_combo.currentIndex())
+
+    assert "再点一次也要能回填" in chat.transcript.toPlainText()
+
+
 def test_replay_adopts_the_run_session(qtbot, tmp_path):
     """看一眼历史运行之后，应当能直接就着那一次的会话继续问。"""
     controller, _opencode, window = _chat_controller(qtbot, tmp_path, tmp_path / "runs")

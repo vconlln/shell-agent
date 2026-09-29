@@ -170,7 +170,11 @@ class ChatPanel(QWidget):
         # 就成了问题：1440 宽的窗口里右列吃 599，左栏被挤到 284）。下拉本身可以缩，
         # 缩窄时显示走省略号，比"挤扁左栏"好。
         self.session_combo.setMinimumWidth(150)
-        self.session_combo.currentIndexChanged.connect(self._on_session_changed)
+        # 接 `activated` 而**不是** `currentIndexChanged`：前者是"用户真的选了这一项"，
+        # 后者在"用户点的那一项本来就亮着"时不会发（扫完之后第一项就是当前项，
+        # 用户再点它一次索引没变、信号不发，于是"点了没反应"——用户实测报过）。
+        # 铺列表那条路由 `set_sessions()` 屏蔽信号，本来就不依赖 currentIndexChanged。
+        self.session_combo.activated.connect(self._on_session_activated)
         self.refresh_button = QPushButton("扫描历史会话")
         self.refresh_button.setObjectName("chatSessionRefreshButton")
         self.refresh_button.clicked.connect(lambda: self.sessions_refresh_requested.emit())
@@ -544,7 +548,12 @@ class ChatPanel(QWidget):
     def selected_session(self) -> str:
         return str(self.session_combo.currentData() or "")
 
-    def _on_session_changed(self, _index: int) -> None:
+    def _on_session_activated(self, _index: int) -> None:
+        """用户在下拉里**选定了**一段会话（哪怕是本来就亮着的那一段）。
+
+        重选同一项也要发：用户"再点一次"是很自然的动作（第一次点完发现没反应时会再点），
+        而只接 `currentIndexChanged` 的话那次点击是静默的。
+        """
         run_dir = self.selected_session()
         if run_dir:
             self.session_selected.emit(run_dir)
