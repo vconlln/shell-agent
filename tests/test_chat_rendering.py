@@ -293,3 +293,130 @@ def test_code_block_tab_stop_follows_the_font(chat, qtbot):
     assert abs(code.tabStopDistance() - expected) < 0.5, (
         f"换字体后制表位没重算：{code.tabStopDistance()}px，应当是 {expected}px"
     )
+
+
+# ── 流式期间滚动条要能用（用户实测的 Windows 症状）────────────────────
+#
+# 原话："如果页面缩放没有弄好，会把会话卡的看不见，要等对话结束才能滑动滑动条"。
+# 复现出来的是：每条增量都调 scroll_to_bottom()，于是用户往上翻着看时**每来一个字
+# 就被拽回底部** —— 体感就是"滚动条拖不动，得等它说完"。
+
+
+def _overflow(panel, lines: int = 60) -> None:
+    """把记录区撑出滚动条（内容不够高就没有可拖的滚动条）。"""
+    panel.begin_stream("模型回复")
+    for index in range(lines):
+        panel.append_delta(f"第 {index} 行：把记录区撑高，好让滚动条出现。\n")
+
+
+def test_streaming_follows_the_bottom_when_the_user_is_at_the_bottom(qtbot):
+    """本来就停在底部（默认）→ 增量来了继续贴底，这是"跟着流走"。"""
+    from tu_shell_agent.ui.chat import ChatPanel
+
+    panel = ChatPanel()
+    qtbot.addWidget(panel)
+    panel.resize(520, 620)
+    panel.show()
+    _overflow(panel)
+    qtbot.wait(300)
+
+    bar = panel.transcript.verticalScrollBar()
+    assert panel.transcript.is_following() is True
+    assert bar.value() >= bar.maximum() - 4, "停在底部时应当继续跟随"
+
+
+def test_scrolling_up_stops_the_auto_follow(qtbot):
+    """用户往上翻 → 停止跟随；后续增量**不许**把他拽回底部（这是那条症状的真因）。"""
+    from tu_shell_agent.ui.chat import ChatPanel
+
+    panel = ChatPanel()
+    qtbot.addWidget(panel)
+    panel.resize(520, 620)
+    panel.show()
+    _overflow(panel)
+    qtbot.wait(300)
+    bar = panel.transcript.verticalScrollBar()
+
+    bar.setValue(0)                       # 用户往上翻
+    qtbot.wait(50)
+    assert panel.transcript.is_following() is False
+
+    for _ in range(5):
+        panel.append_delta("流式还在继续，不该把我拽下去。\n")
+    qtbot.wait(200)
+
+    assert bar.value() == 0, "用户看的位置被抢走了（「要等对话结束才能滑动」就是这个）"
+
+
+def test_returning_to_the_bottom_resumes_following(qtbot):
+    """用户自己回到最底部之后，跟随恢复（不用重启程序，也不用等这一轮结束）。"""
+    from tu_shell_agent.ui.chat import ChatPanel
+
+    panel = ChatPanel()
+    qtbot.addWidget(panel)
+    panel.resize(520, 620)
+    panel.show()
+    _overflow(panel)
+    qtbot.wait(300)
+    bar = panel.transcript.verticalScrollBar()
+    bar.setValue(0)
+    qtbot.wait(50)
+    assert panel.transcript.is_following() is False
+
+    bar.setValue(bar.maximum())
+    qtbot.wait(50)
+    assert panel.transcript.is_following() is True
+
+    panel.append_delta("新的增量\n")
+    qtbot.wait(200)
+    assert bar.value() >= bar.maximum() - 4, "回到最底部后应当重新跟随"
+
+
+def test_loading_history_lands_on_the_newest_message(qtbot):
+    """载入历史是"程序主动跳转"：即使当前不跟随，也要停在最新一条上。"""
+    from tu_shell_agent.run_store.sessions import ChatEntry
+    from tu_shell_agent.ui.chat import ChatPanel
+
+    panel = ChatPanel()
+    qtbot.addWidget(panel)
+    panel.resize(520, 620)
+    panel.show()
+    _overflow(panel)
+    qtbot.wait(200)
+    panel.transcript.verticalScrollBar().setValue(0)     # 用户正翻在上面
+    qtbot.wait(50)
+
+    entries = [ChatEntry("user", f"历史第 {i} 条", "") for i in range(40)]
+    panel.load_history(entries)
+    qtbot.wait(300)
+
+    bar = panel.transcript.verticalScrollBar()
+    assert bar.maximum() > 0, "历史没撑出滚动条，这条用例就没意义了"
+    assert bar.value() >= bar.maximum() - 4, "载入历史后应当停在最新一条"
+
+
+def test_chat_panel_stays_usable_at_high_scale(qtbot, tmp_path):
+    """缩放再大，记录区也不许被挤到看不见（用户："会把会话卡的看不见"）。
+
+    这里量的是**记录区还能拿到多少高度**：窗口地板、会话条、输入框都吃空间，
+    记录区被挤成 0 就等于会话看不见了。
+    """
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.settings import AppSettings
+
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path), ui_scale=1.4),
+    )
+    qtbot.addWidget(window)
+    window.apply_appearance()
+    window.resize(1024, 600)                 # 小屏 + 放大：最容易把会话挤没的组合
+    window.show()
+    qtbot.wait(200)
+
+    transcript = window.chat_panel.transcript
+    assert transcript.height() >= 48, f"记录区只剩 {transcript.height()}px，会话等于看不见"
+    assert transcript.isVisible() is True
+    assert window.minimumSizeHint().height() <= 700, (
+        "窗口地板高过 720（1080p 在 150% 下的逻辑高度）时，小屏上会被裁掉一截"
+    )

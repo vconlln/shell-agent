@@ -320,3 +320,147 @@ def test_left_pane_forwards_file_opened(qtbot, tmp_path: Path):
     pane.plan_tree.file_opened.emit("/tmp/whatever.sh")
 
     assert seen == ["/tmp/whatever.sh"]
+
+
+# ── Markdown 文件要渲染（用户："markdown 文件没有渲染"）──────────────────
+
+
+def test_markdown_file_opens_rendered_with_a_switch_back_to_editing(
+    center: CenterPane, tmp_path: Path
+):
+    """打开 .md 默认给**渲染后的样子**，右上角「编辑」能切回编辑器。"""
+    doc = tmp_path / "方案.md"
+    doc.write_text("# 标题\n\n正文一段\n", encoding="utf-8")
+
+    center.open_path(str(doc))
+
+    assert center.is_previewing_markdown() is True, "Markdown 打开时应当直接是渲染视图"
+    assert center.preview_button.isVisible() is True
+    assert center.preview_button.text() == "编辑"
+    # 渲染的是 HTML（标题成了 h1），不是把 `# 标题` 原样显示
+    html = center.file_preview.toHtml()
+    assert "标题" in html and "# 标题" not in center.file_preview.toPlainText()
+
+
+def test_switching_back_to_editing_shows_the_source(center: CenterPane, tmp_path: Path):
+    doc = tmp_path / "方案.md"
+    doc.write_text("# 标题\n", encoding="utf-8")
+    center.open_path(str(doc))
+
+    assert center.toggle_file_preview() is False      # 切到编辑
+
+    assert center.preview_button.text() == "预览"
+    assert center.file_view.toPlainText() == "# 标题\n"
+    assert center.save_button.isVisible() is True, "编辑视图要能保存"
+
+
+def test_preview_renders_the_current_editor_text_not_the_saved_one(
+    center: CenterPane, tmp_path: Path
+):
+    """预览用**编辑器里的当前内容**：改了没保存也要能看效果（用户要的就是边改边看）。"""
+    doc = tmp_path / "方案.md"
+    doc.write_text("# 旧标题\n", encoding="utf-8")
+    center.open_path(str(doc))
+    center.toggle_file_preview()                       # 到编辑
+    center.file_view.set_text("# 新标题\n\n- 一\n- 二\n")
+
+    center.toggle_file_preview()                       # 回预览
+
+    assert "新标题" in center.file_preview.toPlainText()
+    assert "旧标题" not in center.file_preview.toPlainText()
+    assert doc.read_text(encoding="utf-8") == "# 旧标题\n", "切到预览不该顺手写盘"
+
+
+def test_plain_text_file_has_no_preview_button(center: CenterPane, tmp_path: Path):
+    """.sh 之类不给「预览」按钮（没有可渲染的东西，摆着只会让人以为坏了）。"""
+    script = tmp_path / "run.sh"
+    script.write_text("echo hi\n", encoding="utf-8")
+
+    center.open_path(str(script))
+
+    assert center.is_previewing_markdown() is False
+    assert center.preview_button.isVisible() is False
+    assert center.file_view.toPlainText().strip() == "echo hi"
+
+
+def test_saving_a_markdown_file_keeps_the_preview_in_sync(center: CenterPane, tmp_path: Path):
+    doc = tmp_path / "方案.md"
+    doc.write_text("# 一\n", encoding="utf-8")
+    center.open_path(str(doc))
+    center.toggle_file_preview()
+    center.file_view.set_text("# 二\n")
+
+    center.save_file()
+
+    assert doc.read_text(encoding="utf-8") == "# 二\n"
+    center.toggle_file_preview()                       # 回预览
+    assert "二" in center.file_preview.toPlainText()
+
+
+# ── 对比上一轮：右键「回退到上一轮」────────────────────────────────────
+
+
+def test_diff_menu_offers_revert_to_previous_round(center: CenterPane):
+    """右键菜单里要有「回退到上一轮」（用户要求："可以右键选择回退上一轮的结果"）。"""
+    from tu_shell_agent.ui.widgets import selection_menu
+
+    captured: dict = {}
+    real_build = selection_menu.build_menu
+
+    def capture(widget, on_ask, label, *args, **kwargs):
+        menu = real_build(widget, on_ask, label, *args, **kwargs)
+        captured["menu"] = menu
+        return menu
+
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(selection_menu, "build_menu", capture)
+    monkeypatch.setattr(selection_menu, "exec_menu", lambda *_a, **_k: None)
+    try:
+        center.compare_view.customContextMenuRequested.emit(
+            center.compare_view.rect().topLeft()
+        )
+    finally:
+        monkeypatch.undo()
+
+    titles = [action.text() for action in captured["menu"].actions()]
+    assert "回退到上一轮" in titles, titles
+
+
+def test_revert_puts_the_previous_round_script_back(center: CenterPane):
+    """回退把中栏脚本换成上一轮那一版，并且**可撤销**（Ctrl+Z 能退回来）。"""
+    notes: list[str] = []
+    center.notice.connect(notes.append)
+    center.show_round(1, "echo 第一版\n")
+    center.show_round(2, "echo 第二版（改坏了）\n")
+
+    assert center.revert_to_previous() is True
+
+    assert center.current_text() == "echo 第一版\n"
+    assert "第 1 轮" in notes[-1] and "改后重跑" in notes[-1]
+    center.script_view.undo()
+    assert center.current_text() == "echo 第二版（改坏了）\n", "回退必须能撤销"
+
+
+def test_revert_is_honest_when_there_is_no_previous_round(center: CenterPane):
+    notes: list[str] = []
+    center.notice.connect(notes.append)
+    center.show_round(1, "echo 只有一轮\n")
+
+    assert center.revert_to_previous() is False
+
+    assert "没有上一轮" in notes[-1]
+    assert center.current_text() == "echo 只有一轮\n", "没有上一轮时不许动内容"
+
+
+def test_revert_updates_the_compare_page(center: CenterPane):
+    """回退之后对比页要说实话：现在与上一轮**一致**（差异清空），而不是继续显示旧差异。"""
+    center.show_round(1, "echo 第一版\n")
+    center.show_round(2, "echo 第二版\n")
+    assert "第一版" in center.compare_html()
+
+    center.revert_to_previous()
+
+    html = center.compare_html()
+    assert "第二版" not in html or "diff-removed" in html, "对比页还在拿旧内容比"

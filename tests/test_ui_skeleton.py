@@ -25,9 +25,21 @@ def test_main_window_has_three_panes_and_tool_tabs(qtbot):
     # "把控制台里面运行部分的按钮放到主界面和控制台同一行"）
     tabs = window.findChild(QTabWidget, "toolTabs")
     assert tabs is not None, "控制台里的页签不见了"
+    # 用户 2026-09-20 的两次裁定：模板库搬到左列（"挪到方案文档这里，让我可以点击模板库按钮
+    # 切换页面"），历史运行在控制台里没用（"你可以删掉了"）—— 后者是**隐藏**页签而不是删代码，
+    # 所以文字还在、只是 setTabVisible(False)。
     assert [tabs.tabText(i) for i in range(tabs.count())] == [
-        "历史运行", "模板库", "环境自检", "设置",
+        "历史运行", "环境自检", "设置",
     ]
+    assert tabs.isTabVisible(tabs.indexOf(window.history_page)) is False, "历史运行不该再露出来"
+    assert tabs.isTabVisible(tabs.indexOf(window.selfcheck_page)) is True
+
+    # 左列也是页签：方案文档 / 模板库（与右列 模型对话/校验与输出 同一个交互）
+    left = window.findChild(QTabWidget, "leftTabs")
+    assert left is not None, "左列应当是分页（方案文档 / 模板库）"
+    assert [left.tabText(i) for i in range(left.count())] == ["方案文档", "模板库"]
+    assert left.widget(0) is window.left_pane
+    assert left.widget(1) is window.templates_pane
     assert window.findChild(QDialog, "consoleDialog") is not None, "没有控制台弹窗"
     assert window.console_button.text() == "控制台"
 

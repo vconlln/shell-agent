@@ -681,6 +681,45 @@ class TranscriptView(QScrollArea):
         self.setWidget(body)
         self._turns: list[TurnView] = []
         self._current: TurnView | None = None
+        # 「跟着流走」：**只有用户本来就在底部**时才自动滚到底。
+        # 用户实测（Windows）：流式期间想往上翻着看，每来一个字都被拽回底部 ——
+        # 体感就是"滚动条拖不动，得等对话结束才能滑"。
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_range_changed)
+        bar.valueChanged.connect(self._on_value_changed)
+        bar.sliderPressed.connect(self._on_slider_pressed)
+        bar.sliderReleased.connect(self._on_slider_released)
+
+    # ── 自动滚动：跟着流走，但不跟用户抢 ──────────────────────────────────
+    def is_following(self) -> bool:
+        """当前是否处于"跟随流式输出"的状态（停在底部 = 跟随）。"""
+        return self._follow
+
+    def _at_bottom(self) -> bool:
+        bar = self.verticalScrollBar()
+        return bar.value() >= bar.maximum() - 4
+
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        """内容变高时（布局完成才发这个信号）如果还在跟随，就贴到底。
+
+        用 `rangeChanged` 而不是"追加时设一次最大值"：追加的那一刻布局还没完成、
+        `maximum()` 还是旧值，直接设会**差一截**（实测：流式结束停在半路、根本没跟随）。
+        """
+        if self._follow:
+            self.verticalScrollBar().setValue(maximum)
+
+    def _on_value_changed(self, value: int) -> None:
+        bar = self.verticalScrollBar()
+        if bar.isSliderDown():
+            return                      # 正在拖：位置由用户说了算，此刻不改跟随状态
+        self._follow = value >= bar.maximum() - 4
+
+    def _on_slider_pressed(self) -> None:
+        self._follow = False            # 一上手拖就停止跟随，直到他自己回到最底下
+
+    def _on_slider_released(self) -> None:
+        self._follow = self._at_bottom()
 
     # ── 对外 ─────────────────────────────────────────────────────────────
     def setPlaceholderText(self, text: str) -> None:  # noqa: N802 - 与 QPlainTextEdit 同名
@@ -706,7 +745,9 @@ class TranscriptView(QScrollArea):
         self._turns.append(turn)
         self._current = turn
         self._placeholder.setVisible(False)
-        self.scroll_to_bottom()
+        # 强制到底：刚开了新的一轮（用户发了消息 / 流式开始），他要看到这一轮的开头。
+        # 这不是"抢滚动条"——它发生在新增内容的那一刻，而不是每次增量。
+        self.scroll_to_bottom(force=True)
         return turn
 
     def current_turn(self) -> TurnView:
@@ -724,8 +765,21 @@ class TranscriptView(QScrollArea):
     def toPlainText(self) -> str:  # noqa: N802 - 与 QPlainTextEdit 同名，调用方不用改
         return self.plain_text()
 
-    def scroll_to_bottom(self) -> None:
-        """滚到底。延到事件循环的下一拍：此刻控件还没完成布局，直接设最大值会差一截。"""
+    def scroll_to_bottom(self, *, force: bool = False) -> None:
+        """滚到底 —— **但用户正在往上看时不抢**。
+
+        `force=True` 只给"程序主动跳转"用（例如载入历史记录后要停在最新一条）；
+        流式追加一律走默认值：跟随状态由 `_follow` 决定（见上面的 `rangeChanged`）。
+        """
+        if force:
+            # 强制到底 = "从现在起跟随"。这一步不能省：只 schedule 一次 `_do_scroll`，
+            # 它可能跑在布局还没完成的时候（那时 `maximum()` 还很小，设了等于没设），
+            # 而内容随后长高时**只有 `_follow` 为真**才会继续贴底 ——
+            # "载入 40 轮历史后停在最顶上"就是这么来的（实测）。
+            self._follow = True
+        elif not self._follow:
+            return
+        # 延到事件循环下一拍：此刻控件还没完成布局，直接设最大值会差一截
         QTimer.singleShot(0, self._do_scroll)
 
     def _do_scroll(self) -> None:

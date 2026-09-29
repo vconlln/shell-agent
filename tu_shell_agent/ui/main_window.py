@@ -175,9 +175,17 @@ class MainWindow(QMainWindow):
         self.center_pane.notice.connect(self.set_status)
         self.right_tabs.addTab(self.right_pane, "校验与输出")
 
+        # 左列也分页（用户要求："把控制台的模板库挪到方案文档这里，让我可以点击模板库按钮
+        # 切换页面，就像模型对话跟校验输出这样的按钮"）。用 QTabWidget 而不是自己画按钮：
+        # 右列那两个页签就是它，交互与外观天然一致。
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setObjectName("leftTabs")
+        self.left_tabs.addTab(self.left_pane, "方案文档")
+        self.left_tabs.addTab(self.templates_pane, "模板库")
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")   # 测试契约
-        self.splitter.addWidget(_titled(self.left_pane, "方案与运行参数"))
+        self.splitter.addWidget(_card(self.left_tabs))
         self.splitter.addWidget(_titled(self.center_pane, "脚本与轮次"))
         self.splitter.addWidget(_card(self.right_tabs))
         # 默认比例按新分工调过：右列现在是「模型对话 / 校验与输出」两个页签，比原来那条
@@ -221,14 +229,21 @@ class MainWindow(QMainWindow):
                        self.verify_button, self.open_dir_button):
             button.setToolTip(self.run_hint.text())
 
-        self.tool_tabs.addTab(self.history_page, "历史运行")
-        self.tool_tabs.addTab(self.templates_pane, "模板库")
+        # 历史运行已从控制台移除（用户："控制台的历史运行没有什么作用你可以删掉了"）；
+        # 模板库搬到了左列页签（见上面的 left_tabs）。**页面对象仍然建着、回放接线也仍在**：
+        # 那是一条被用例覆盖着的能力，删干净要连它的用例一起删 —— 用户要的是"别再占着控制台"，
+        # 这一点已经做到；哪天要连代码一起删，说一声即可（见 PENDING-APPROVALS）。
+        history_index = self.tool_tabs.addTab(self.history_page, "历史运行")
         self.tool_tabs.addTab(self.selfcheck_page, "环境自检")
         self.tool_tabs.addTab(self.settings_page, "设置")
+        # **隐藏**而不是删掉那一页：用户说"控制台的历史运行没有什么作用你可以删掉了" ——
+        # 界面上它已经不该出现；而页面对象与"回放历史运行"那条接线是被用例覆盖着的能力，
+        # 连同用例一起删是另一件事（要删干净说一声）。想让它回来时删掉下面这一行即可。
+        self.tool_tabs.setTabVisible(history_index, False)
 
         self.console_dialog = QDialog(self)
         self.console_dialog.setObjectName("consoleDialog")
-        self.console_dialog.setWindowTitle("控制台 — 历史运行 / 模板库 / 环境自检 / 设置")
+        self.console_dialog.setWindowTitle("控制台 — 环境自检 / 设置")
         # 舒适尺寸；每次打开都会按**当前屏幕**重算（小屏上固定尺寸会让底部按钮出界）——见 open_console
         self.console_dialog.resize(860, 560)
         console_layout = QVBoxLayout(self.console_dialog)

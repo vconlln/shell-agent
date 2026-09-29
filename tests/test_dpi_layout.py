@@ -221,11 +221,13 @@ def test_run_buttons_live_in_the_bottom_bar_next_to_the_console(qtbot):
     )
 
     # 弹窗里只剩低频面板（没有空的「运行」页）
-    window.open_console(window.history_page)
+    # 用**可见**的那一页来验"弹窗停在请求的页"：历史运行已按用户要求从控制台隐藏
+    # （隐藏页签选不中，那不再是一条有效的落点）。
+    window.open_console(window.settings_page)
     for _ in range(3):
         qtbot.wait(10)
     assert window.console_dialog.isVisible(), "点了控制台按钮弹窗没出来"
-    assert window.tool_tabs.currentWidget() is window.history_page, "弹窗没停在请求的那一页"
+    assert window.tool_tabs.currentWidget() is window.settings_page, "弹窗没停在请求的那一页"
     tabs = [window.tool_tabs.tabText(index) for index in range(window.tool_tabs.count())]
     assert "运行" not in tabs, f"控制台里不该再留一个空的运行页：{tabs}"
     assert window.center_pane.script_view.height() == script_height, (

@@ -584,7 +584,9 @@ class ChatPanel(QWidget):
                 turn.begin_reply(ROLE_LABELS.get(role, "模型回复"))
                 turn.append_reply(text)
                 turn.finish_reply()
-        self.transcript.scroll_to_bottom()
+        # 这里**不再**额外滚一次：每开一轮时 `begin_turn()` 已经强制到底（并且把"跟随"
+        # 恢复成真），载入完自然停在最新一条上。多写这一句是冗余的 —— 变异验证时发现
+        # 把它删掉用例照样全绿，于是删掉，让"落在最新一条"只有一个来源。
 
     def set_busy(self, busy: bool) -> None:
         # 发送按钮"能用 == 空闲"这一条**保留**：它是外部（用例、控制器）判断"这一轮结束了"
@@ -668,7 +670,8 @@ class ChatPanel(QWidget):
 
     def add_error(self, text: str) -> None:
         self.transcript.current_turn().add_error(text)
-        self.transcript.scroll_to_bottom()
+        # 错误必须被看见：即使用户正在往上翻，也把他带到这一条（错误很少，值得打断一次）
+        self.transcript.scroll_to_bottom(force=True)
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)

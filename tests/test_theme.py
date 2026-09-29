@@ -130,7 +130,10 @@ def test_pane_headers_exist_for_all_three_columns(themed_app, qtbot):
     # 右栏现在是**页签**（模型对话 / 校验与输出），标题由页签本身承担，不再有 paneHeader；
     # 工具区搬进控制台弹窗，也不再是主窗口里的可折叠区块。
     headers = {label.text() for label in window.findChildren(QLabel, "paneHeader")}
-    assert headers == {"方案与运行参数", "脚本与轮次"}
+    # 两边的栏现在都是**页签**（左列 方案文档/模板库、右列 模型对话/校验与输出），
+    # 分区感由页签自己承担，所以 paneHeader 只剩中间那栏；用户就是按"像模型对话那样能切页"
+    # 来要求左列的（见 test_ui_skeleton 里那条）。
+    assert headers == {"脚本与轮次"}
     assert [window.right_tabs.tabText(i) for i in range(window.right_tabs.count())] == [
         "模型对话", "校验与输出",
     ]
@@ -176,7 +179,7 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
     只断言"QSS 里有 border-radius"是不够的：控件没吃到那条规则、或被 :read-only 之类
     的分支顶掉，字符串照样对，界面还是直角。
     """
-    from PySide6.QtWidgets import QListWidget
+    from PySide6.QtWidgets import QTreeWidget
 
     from tu_shell_agent.ui.main_window import MainWindow
 
@@ -187,20 +190,22 @@ def test_rounded_corners_are_actually_rendered(themed_app, qtbot):
     window.show()
     qtbot.waitExposed(window)
 
-    # 历史运行搬进控制台弹窗了：不显示弹窗，列表控件不在窗口的渲染路径上，取色会拿到空白帧。
-    window.open_console(window.history_page)
+    # 取色要在"这个控件真的渲染着"的那一帧里做：没被选中的页签根本不渲染。
+    # 历史运行已从控制台隐藏（用户裁定），所以拿右列「校验与输出」里的发现树当样本 ——
+    # 同样是 bg_elevated + 14px 圆角的列表类控件（实测中心 #17181c、角落是父底色）。
+    window.right_tabs.setCurrentWidget(window.right_pane)
     qtbot.wait(50)
 
-    history = window.history_page.list_widget      # bg_elevated + 14px 圆角（QSS 里定的）
-    assert isinstance(history, QListWidget)
+    history = window.right_pane.findings_tree        # bg_elevated + 14px 圆角（QSS 里定的）
+    assert isinstance(history, QTreeWidget)
 
-    # 取色必须在**弹窗自己的帧**里做：弹窗是顶层窗口，把它的控件映射到主窗口上拿到的是
-    # 无意义的坐标（跨顶层窗口映射），第一版就是在这里取到了相邻控件的颜色。
-    dialog = window.console_dialog
-    grab = Grab(dialog)
+    # 取色必须在**控件所在的那个顶层窗口**的帧里做：跨顶层窗口映射拿到的是无意义坐标
+    # （第一版就是这么取到相邻控件的颜色的）。模板列表现住在主窗口里。
+    frame_window = window
+    grab = Grab(frame_window)
 
     def sample(offset: QPoint) -> str:
-        point = history.mapTo(dialog, history.rect().topLeft() + offset)
+        point = history.mapTo(frame_window, history.rect().topLeft() + offset)
         return grab.name(point.x(), point.y())
 
     center = sample(QPoint(history.width() // 2, history.height() // 2))

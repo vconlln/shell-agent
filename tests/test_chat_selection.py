@@ -212,8 +212,9 @@ def _open_context_menu(monkeypatch, widget):
     captured: dict = {}
     real_build = selection_menu.build_menu
 
-    def capture(target, on_ask, label):
-        menu = real_build(target, on_ask, label)
+    def capture(target, on_ask, label, *args, **kwargs):
+        # 签名跟着生产代码走（右键菜单现在还能带额外项，例如差异页的「回退到上一轮」）
+        menu = real_build(target, on_ask, label, *args, **kwargs)
         captured["menu"] = menu
         return menu
 

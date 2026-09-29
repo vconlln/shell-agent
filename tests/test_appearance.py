@@ -505,7 +505,7 @@ def test_tab_strip_background_is_rounded(restore_app, qtbot, tmp_path):
     window.apply_appearance()
 
     # 控制台弹窗的页签条（工具区搬进弹窗之后，页签都在这里）
-    window.open_console(window.history_page)
+    window.open_console(window.settings_page)
     bar = window.tool_tabs.tabBar()
     grab = Grab(window.console_dialog)      # 弹窗是顶层窗口，只它的帧里能取到色
 
@@ -732,18 +732,20 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
     # **没被选中的页签根本不渲染**，硬从一帧里按坐标取色会取到过期几何下的别的控件
     # （这类假红踩过两次），所以每个面板都在"它真的显示着"的那一帧里取色。
     window.right_tabs.setCurrentWidget(window.chat_panel)
-    window.open_console(window.history_page)
     qtbot.wait(30)
     chat_frame = capture(window)
-    history_frame = capture(window.console_dialog)
-
-    window.open_console(window.templates_pane)
-    qtbot.wait(30)
-    templates_frame = capture(window.console_dialog)
 
     window.right_tabs.setCurrentWidget(window.right_pane)
     qtbot.wait(30)
     pane_frame = capture(window)
+
+    # 模板列表搬到了左列页签：切到那一页再取（没被选中的页签根本不渲染）。
+    # 历史列表不再有可见入口（用户裁定），所以它不再参与取样。
+    window.left_tabs.setCurrentWidget(window.templates_pane)
+    qtbot.wait(30)
+    templates_frame = capture(window)
+    window.left_tabs.setCurrentWidget(window.left_pane)
+    qtbot.wait(30)
 
     # 允许色 = 面板底色 / 背后的底色 / 两者之间的过渡 / **底色与白色描边的过渡**。
     # 描边是白色带 alpha（`border` 与 `border_heavy` 两个令牌），角上的反锯齿像素就是
@@ -769,8 +771,7 @@ def test_no_rounded_panel_shows_foreign_colors_at_its_corners(restore_app, qtbot
         ("输出视图", window.right_pane.output_view, window, pane_frame),
         ("报告视图", window.right_pane.notes_view, window, pane_frame),
         ("对话记录", window.chat_panel.transcript, window, chat_frame),
-        ("历史列表", window.history_page.list_widget, window.console_dialog, history_frame),
-        ("模板列表", window.templates_pane.list_widget, window.console_dialog, templates_frame),
+        ("模板列表", window.templates_pane.list_widget, window, templates_frame),
     )
     problems: list[str] = []
     for name, widget, frame, image in panels:

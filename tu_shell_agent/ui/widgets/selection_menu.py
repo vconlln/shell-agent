@@ -43,7 +43,12 @@ def selected_text(widget) -> str:
     return text
 
 
-def build_menu(widget: QWidget, on_ask: Callable[[str], None], label: str) -> QMenu:
+def build_menu(
+    widget: QWidget,
+    on_ask: Callable[[str], None],
+    label: str,
+    extra_actions: tuple[tuple[str, Callable[[], None]], ...] = (),
+) -> QMenu:
     """右键菜单 + 置顶的「提问」项；没有选中内容时不加这一项。
 
     能给出标准菜单的控件（文本编辑类）就用它的标准菜单（复制 / 全选 / 清空这些项的行为
@@ -54,6 +59,18 @@ def build_menu(widget: QWidget, on_ask: Callable[[str], None], label: str) -> QM
     """
     maker = getattr(widget, "createStandardContextMenu", None)
     menu: QMenu = maker() if callable(maker) else _label_menu(widget)
+    # 额外项**总是**加（不依赖选中）：它们作用于整块内容，而不是选中的那几行
+    for title, callback in reversed(tuple(extra_actions)):
+        extra = QAction(title, menu)
+        extra.triggered.connect(lambda _checked=False, run=callback: run())
+        existing = menu.actions()
+        if existing:
+            menu.insertAction(existing[0], extra)
+        else:
+            menu.addAction(extra)
+    if extra_actions and menu.actions():
+        first_extra = menu.actions()[0]
+        menu.insertSeparator(first_extra)
     text = selected_text(widget)
     if not text.strip():
         return menu
@@ -94,11 +111,12 @@ def install_ask_action(
     on_ask: Callable[[str], None],
     *,
     label: str = "就选中的代码提问",
+    extra_actions: tuple[tuple[str, Callable[[], None]], ...] = (),
 ) -> None:
-    """把「选中 → 提问」接进控件的右键菜单。"""
+    """把「选中 → 提问」（以及额外项，如"回退到上一轮"）接进控件的右键菜单。"""
     widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     widget.customContextMenuRequested.connect(
-        lambda point: _popup(widget, point, on_ask, label)
+        lambda point: _popup(widget, point, on_ask, label, extra_actions)
     )
 
 
@@ -111,8 +129,14 @@ def exec_menu(menu: QMenu, global_pos: QPoint) -> None:
     menu.exec(global_pos)
 
 
-def _popup(widget: QWidget, point: QPoint, on_ask: Callable[[str], None], label: str) -> None:
-    menu = build_menu(widget, on_ask, label)
+def _popup(
+    widget: QWidget,
+    point: QPoint,
+    on_ask: Callable[[str], None],
+    label: str,
+    extra_actions: tuple[tuple[str, Callable[[], None]], ...] = (),
+) -> None:
+    menu = build_menu(widget, on_ask, label, extra_actions)
     try:
         exec_menu(menu, widget.mapToGlobal(point))
     finally:

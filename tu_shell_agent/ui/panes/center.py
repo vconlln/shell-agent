@@ -11,11 +11,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QHBoxLayout, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget,
-    QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QListWidget, QListWidgetItem, QPushButton, QSplitter, QStackedWidget,
+    QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ...filetext import write_text_lf
+from ..markdown import MarkdownBrowser
 from ..widgets.diff_view import diff_counts, render_diff_html
 from ..widgets.script_view import ScriptView
 from ..widgets.selection_menu import install_ask_action, selected_text
@@ -55,6 +56,7 @@ class CenterPane(QWidget):
             self.compare_view,
             lambda text: self.ask_about_selection.emit(text, self._compare_source()),
             label="就选中的差异提问",
+            extra_actions=(("回退到上一轮", self.revert_to_previous),),
         )
         # 各块都要有能用的最小高度，否则窗口一缩小就被压成一条缝（实测 12~35px）
         # 140 是"宽屏舒服"的值，但在高 DPI（Windows 150% 时 1080p 只有 720 逻辑像素高）下
@@ -74,7 +76,15 @@ class CenterPane(QWidget):
         # Ctrl+Z/Ctrl+Shift+Z 撤销重做、粘贴自动整理，全都是现成的同一套行为。
         self.file_view = ScriptView()
         self.file_view.setObjectName("fileView")
-        self.tabs.addTab(self.file_view, "文件")
+        # Markdown 文件要有**渲染视图**（用户："虽然说你中间可以编辑文件了，但是 markdown
+        # 文件没有渲染"）：编辑页与预览页叠在一起，用右上角那个按钮切换，默认给渲染好的样子。
+        self.file_preview = MarkdownBrowser()
+        self.file_preview.setObjectName("filePreview")
+        self.file_stack = QStackedWidget()
+        self.file_stack.setObjectName("fileStack")
+        self.file_stack.addWidget(self.file_view)
+        self.file_stack.addWidget(self.file_preview)
+        self.tabs.addTab(self.file_stack, "文件")
 
         # 「格式化」放在**页签右上角**：不额外占一行高度（中栏本来就矮），
         # 但它是"手改脚本"这条路上最常用的动作，不该藏进菜单。
@@ -91,10 +101,20 @@ class CenterPane(QWidget):
         self.save_button.setToolTip("把这一页的内容写回文件（Ctrl+S）；换行符统一成 LF。")
         self.save_button.clicked.connect(lambda _checked=False: self.save_file())
         self.save_button.setVisible(False)
+        # 「预览」(Markdown 专用)：编辑 ↔ 渲染之间切换
+        self.preview_button = QPushButton("预览")
+        self.preview_button.setObjectName("previewMarkdownButton")
+        self.preview_button.setToolTip(
+            "在「编辑」与「渲染后的样子」之间切换（只对 .md / .markdown 文件显示）。\n"
+            "预览用的是当前编辑器里的内容（改了没保存也能看）。"
+        )
+        self.preview_button.clicked.connect(lambda _checked=False: self.toggle_file_preview())
+        self.preview_button.setVisible(False)
         corner = QWidget()
         corner_layout = QHBoxLayout(corner)
         corner_layout.setContentsMargins(0, 0, 0, 0)
         corner_layout.setSpacing(4)
+        corner_layout.addWidget(self.preview_button)
         corner_layout.addWidget(self.save_button)
         corner_layout.addWidget(self.format_button)
         self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
@@ -248,8 +268,18 @@ class CenterPane(QWidget):
         self._file_readonly = False
         self._set_file_tab_label(target.name)
         self.tabs.setCurrentIndex(_FILE_TAB)
+        # Markdown 直接给渲染后的样子（可一键切回编辑）；其它文件就是编辑器
+        if self.file_is_markdown():
+            self.file_stack.setCurrentIndex(1)
+            self.file_preview.set_markdown(text)
+            self.preview_button.setText("编辑")
+            self.preview_button.setVisible(True)
+        else:
+            self.file_stack.setCurrentIndex(0)
+            self.preview_button.setVisible(False)
         self._sync_corner_buttons()
-        self.notice.emit(f"已在中栏打开 {target.name}（改完按 Ctrl+S 保存）")
+        hint = "改完按 Ctrl+S 保存" if not self.file_is_markdown() else "点右上角「编辑」可改，Ctrl+S 保存"
+        self.notice.emit(f"已在中栏打开 {target.name}（{hint}）")
         return True
 
     def save_file(self) -> bool:
@@ -268,6 +298,8 @@ class CenterPane(QWidget):
             return False
         self.file_view.document().setModified(False)
         self._set_file_tab_label(target.name)
+        if self.is_previewing_markdown():
+            self.file_preview.set_markdown(self.file_view.toPlainText())
         self._sync_corner_buttons()
         self.notice.emit(f"已保存 {target.name}（{target}）")
         self.file_saved.emit(str(target))
@@ -281,6 +313,30 @@ class CenterPane(QWidget):
         """有没有未保存的改动（标签上的圆点与它同源）。"""
         return bool(self.file_view.document().isModified())
 
+    def file_is_markdown(self) -> bool:
+        """当前打开的是不是 Markdown（决定要不要给"预览"按钮）。"""
+        return Path(self._file_path).suffix.lower() in (".md", ".markdown")
+
+    def toggle_file_preview(self) -> bool:
+        """在"编辑"与"渲染"之间切换；返回切换后是否处于**渲染**状态。
+
+        渲染用的是**编辑器里的当前内容**（改了没保存也能看），而不是磁盘上的旧版本 ——
+        用户要的就是"边改边看效果"。
+        """
+        if not self.file_is_markdown():
+            return False
+        to_preview = self.file_stack.currentIndex() == 0
+        if to_preview:
+            self.file_preview.set_markdown(self.file_view.toPlainText())
+        self.file_stack.setCurrentIndex(1 if to_preview else 0)
+        self.preview_button.setText("编辑" if to_preview else "预览")
+        self.save_button.setVisible(not to_preview)     # 预览页不给保存按钮（那里不能改）
+        return to_preview
+
+    def is_previewing_markdown(self) -> bool:
+        """文件页当前是不是停在渲染视图上。"""
+        return self.file_stack.currentIndex() == 1
+
     def _show_uneditable(self, target: Path, reason: str) -> None:
         """把"为什么不能编辑"写在文件页里：用户点开就该看到原因，而不是空白。"""
         self.file_view.set_text(f"（{target.name} 打不开）\n\n{reason}\n\n路径：{target}\n")
@@ -288,6 +344,8 @@ class CenterPane(QWidget):
         self.file_view.document().setModified(False)
         self._file_path = str(target)
         self._file_readonly = True
+        self.file_stack.setCurrentIndex(0)
+        self.preview_button.setVisible(False)     # 打不开的文件谈不上预览
         self._set_file_tab_label(target.name)
         self.tabs.setCurrentIndex(_FILE_TAB)
         self._sync_corner_buttons()
@@ -302,7 +360,9 @@ class CenterPane(QWidget):
     def _sync_corner_buttons(self) -> None:
         """页签右上角的按钮跟着当前页走：保存只在文件页、格式化作用于"你正在看的那一篇"。"""
         on_file = self.tabs.currentIndex() == _FILE_TAB
-        self.save_button.setVisible(on_file)
+        previewing = on_file and self.is_previewing_markdown()
+        self.save_button.setVisible(on_file and not previewing)
+        self.preview_button.setVisible(on_file and self.file_is_markdown() and not self._file_readonly)
         if on_file:
             self.save_button.setEnabled(not self._file_readonly)
             self.save_button.setText("保存 •" if self.file_is_dirty() else "保存")
@@ -363,6 +423,31 @@ class CenterPane(QWidget):
             if existing == round_no:
                 return script
         return None
+
+    def revert_to_previous(self) -> bool:
+        """把中栏的脚本**退回上一轮那一版**（差异页右键菜单里的那一项）。
+
+        为什么要有它：模型这一轮改坏了，用户想"就要上一轮那版" —— 以前只能自己抄回去。
+        退回的是**文本**（进编辑框、Ctrl+Z 也能撤销这次回退），要执行仍然走「改后重跑」
+        （shellcheck → 人工确认 → 执行），一道闸门都没少。
+        """
+        previous = self._previous_script()
+        if previous is None:
+            self.notice.emit("没有上一轮可回退（这是首轮，或还没有对比对象）。")
+            return False
+        earlier = [no for no, _script in self._rounds if no < (self._current_round or 0)]
+        source_round = max(earlier) if earlier else None
+        self.script_view.set_text(previous)          # 可撤销：Ctrl+Z 能退回回退之前
+        if self._current_round is not None:
+            # 当前轮的内容换成了上一轮那一版，对比页随之变成"与上一轮一致"
+            for index, (existing, _script) in enumerate(self._rounds):
+                if existing == self._current_round:
+                    self._rounds[index] = (self._current_round, previous)
+                    break
+        self._refresh_compare()
+        where = f"第 {source_round} 轮" if source_round is not None else "上一轮"
+        self.notice.emit(f"已把中栏脚本回退到{where}那一版（要执行请点「改后重跑」；Ctrl+Z 可撤销）")
+        return True
 
     def _previous_script(self) -> str | None:
         """比当前轮更早的最近一轮脚本；首轮（或历史回放）没有就返回 None。
