@@ -1018,12 +1018,40 @@ QPushButton#chatModeButton:hover {{ background-color: {_color('bg_button_hover',
    ＋ 自己就是那个图标，再叠一个三角会挤在一起（实测 150% 下＋被压成 "+ ·"）。 */
 QPushButton#chatModeButton::menu-indicator,
 QPushButton#chatPlusButton::menu-indicator {{ image: none; width: 0; }}
-/* 中栏页签右上角的「格式化」：紧凑一档，别把页签条顶高 */
+/* 中栏页签右上角那几颗（预览 / 保存 / 格式化）：**透明底 + 同一尺寸**。
+   它们坐在页签条上，画成"凸起的卡片按钮"既抢眼、又和页签条打架；尺寸也必须一致 ——
+   以前只有「格式化」有一条紧凑规则，而「保存」「预览」走通用按钮样式（底色 5% 白、
+   1px 边框、padding 5px 12px、min-height 22），于是**底色不透明、高度也不一样**
+   （用户实测："保存与格式化的按钮不是透明底，并且按钮大小也不一样"）。
+   三颗共用一条规则，就不会再各自漂移。 */
+QPushButton#previewMarkdownButton,
+QPushButton#saveFileButton,
 QPushButton#formatScriptButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {sized('radius', scale)};
+    color: {_color('fg_secondary', colors)};
     padding: 1px 10px;
     min-height: 18px;
     margin: 2px 4px 0 0;
     font-size: {sized('font_size_small', scale)};
+}}
+QPushButton#previewMarkdownButton:hover,
+QPushButton#saveFileButton:hover,
+QPushButton#formatScriptButton:hover {{
+    background-color: {_color('bg_hover', colors)};
+    color: {_color('fg', colors)};
+}}
+QPushButton#previewMarkdownButton:pressed,
+QPushButton#saveFileButton:pressed,
+QPushButton#formatScriptButton:pressed {{
+    background-color: {_color('bg_button_active', colors)};
+}}
+QPushButton#previewMarkdownButton:disabled,
+QPushButton#saveFileButton:disabled,
+QPushButton#formatScriptButton:disabled {{
+    background-color: transparent;
+    color: {_color('fg_disabled', colors)};
 }}
 /* 模型下拉也是一颗胶囊：藏在输入框里时不该再画成输入框的样子 */
 QFrame#chatComposer QComboBox#chatModelCombo {{

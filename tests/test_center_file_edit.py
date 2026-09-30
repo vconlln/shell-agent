@@ -464,3 +464,52 @@ def test_revert_updates_the_compare_page(center: CenterPane):
 
     html = center.compare_html()
     assert "第二版" not in html or "diff-removed" in html, "对比页还在拿旧内容比"
+
+
+# ── 页签右上角那几颗按钮：透明底 + 同一尺寸 ────────────────────────────
+#
+# 用户实测："脚本与轮次，文件这里，保存与格式化的按钮不是透明底，并且按钮大小也不一样。"
+# 根因：「格式化」有一条紧凑规则，而「保存」「预览」走通用按钮样式（底色 5% 白 + 1px 边框 +
+# 更大的内边距与最小高度），于是三颗既不是透明底、高度也不一致。
+
+
+def test_corner_buttons_are_flat_and_the_same_size(qtbot, tmp_path):
+    """预览 / 保存 / 格式化：三颗都要**透明底**，且**高度一致**（像素 + 几何一起量）。"""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from conftest import Grab
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.settings import AppSettings
+
+    doc = tmp_path / "方案.md"
+    doc.write_text("# 标题\n\n正文\n", encoding="utf-8")
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path), plan_tree_root=str(tmp_path)),
+    )
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.apply_appearance()
+    window.show()
+    QTest.qWait(200)
+    center = window.center_pane
+    center.open_path(str(doc))
+    center.toggle_file_preview()                 # 编辑模式：三颗都会显示
+    QTest.qWait(200)
+
+    buttons = (center.preview_button, center.save_button, center.format_button)
+    assert all(button.isVisible() for button in buttons), "三颗按钮没有同时显示，量不到尺寸"
+
+    heights = {button.height() for button in buttons}
+    assert len(heights) == 1, f"三颗按钮高度不一致：{[(b.text(), b.height()) for b in buttons]}"
+
+    # 透明底：按钮内部的取色应当与**紧挨着它的页签条底色**一致（有底色就会不一样）
+    grab = Grab(window)
+    for button in buttons:
+        origin = button.mapTo(window, button.rect().topLeft())
+        inner = grab.name(origin.x() + 2, origin.y() + button.height() // 2)
+        outside = grab.name(max(origin.x() - 3, 0), origin.y() + button.height() // 2)
+        assert inner == outside, (
+            f"「{button.text()}」不是透明底：按钮内 {inner}，旁边的页签条是 {outside}"
+        )
