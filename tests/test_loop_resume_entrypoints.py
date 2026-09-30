@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 # tests/test_loop_resume_entrypoints.py
 """新增的两个入口：手工改脚本后只重跑校验/执行；以及在既有会话上从第 n 轮继续修。
 
@@ -219,3 +220,40 @@ def test_resume_repair_continues_existing_session_without_restarting_opencode(tm
     assert len(harness.prompts) == 1
     assert "## 第" in harness.prompts[0]  # 修复消息的抬头
     assert "## 方案文档" not in harness.prompts[0]  # 首轮消息才有的段落
+
+
+def test_resume_evidence_carries_the_script_from_disk(qtbot, tmp_path):
+    """「继续修复」那条路也要把上一版脚本带进证据 —— 否则模型只能照模板骨架重写。
+
+    脚本从运行目录的 `attempts/<轮次>/script.sh` 读回来（与界面上回填的那份同源）。
+    """
+    from tu_shell_agent.run_store.store import attempt_dir
+    from tu_shell_agent.types import ExecuteEvidence, ShellcheckFinding
+    from tu_shell_agent.ui.main_window import MainWindow
+    from tu_shell_agent.ui.run_controller import RunController
+    from tu_shell_agent.ui.settings import AppSettings
+
+    run_dir = tmp_path / "run"
+    (Path(attempt_dir(str(run_dir), 1))).mkdir(parents=True)
+    script = "#!/usr/bin/env bash\n# @@TU:BODY@@\necho $x\n"
+    (Path(attempt_dir(str(run_dir), 1)) / "script.sh").write_text(script, encoding="utf-8")
+
+    window = MainWindow(
+        wire_controller=False,
+        settings=AppSettings(run_root=str(tmp_path), templates_dir=str(tmp_path / "t")),
+    )
+    # **必须交给 qtbot 托管**：这个文件其它用例不碰 Qt，没有 QApplication 时构造窗口会直接
+    # 让进程 abort（实测：核心转储，栈在 libpython 里）。
+    qtbot.addWidget(window)
+    controller = RunController(window=window, settings=window.settings, run_root=str(tmp_path))
+    controller._run_dir = str(run_dir)
+    controller._last_result = SimpleNamespace(
+        last_findings=(ShellcheckFinding("SC2086", 3, 6, "warning", "quote it"),),
+        last_execute=None,
+    )
+
+    evidence = controller._evidence_from_last_result(1)
+
+    assert evidence is not None
+    assert evidence.script.strip() == script.strip(), "续跑证据里没有上一版脚本"
+    assert evidence.shellcheck, "顺带确认这条路径仍然带着失败发现"

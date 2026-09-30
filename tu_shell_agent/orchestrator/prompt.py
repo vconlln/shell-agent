@@ -90,7 +90,30 @@ def build_repair_message(
     skeleton: str,
     extra: str = "",
 ) -> str:
+    """修复轮的消息：**以"你上一轮写的那一版"为主体**，失败证据说明"要改哪里"。
+
+    用户实测报过一个真问题：一出错就"退回模板的 shell 代码"。根因就在这条消息里 ——
+    它原来只给了失败证据与模板骨架，**唯独没有上一轮那份脚本**，末尾还写着"保持锚点与模板
+    结构不变，返回完整脚本"。模型手里只有骨架，自然照着骨架重写一遍。
+    现在把上一轮脚本放在最前面并写明"在这一版上改"，骨架降级成"仅供参考的结构要求"。
+    """
     lines: list[str] = [f"## 第 {evidence.round} 轮失败反馈（阶段：{evidence.stage}）", ""]
+
+    previous = evidence.script.strip()
+    if previous:
+        lines.extend(
+            [
+                "## 你上一轮写的脚本（**在这一版上修改**）",
+                "```bash",
+                previous,
+                "```",
+                "",
+                "**要求**：只改下面指出的问题，保留其它已经正确的部分；"
+                "不要在模板骨架上重写、不要把内容换成模板里的占位实现。"
+                "返回的必须是完整脚本（包含上一轮里没出问题的那些行）。",
+                "",
+            ]
+        )
 
     if evidence.contract is not None:
         contract = evidence.contract
@@ -127,10 +150,27 @@ def build_repair_message(
             lines.extend(["stdout 尾部：", "```", stdout_tail, "```", ""])
 
     if skeleton.strip():
-        lines.extend(["## 模板骨架（结构不得改动）", "```bash", skeleton.rstrip(), "```", ""])
+        # 骨架只作**结构参考**：它排在上一轮脚本之后，并明说不要拿它替换内容
+        # （以前它是这条消息里唯一像"脚本"的东西，于是成了模型抄回去的对象）
+        lines.extend(
+            [
+                "## 模板骨架（仅供参考：结构要求来自它，**不要**用它替换你上一轮的脚本）",
+                "```bash",
+                skeleton.rstrip(),
+                "```",
+                "",
+            ]
+        )
 
     anchor_lines = "\n".join(f"- {anchor}" for anchor in anchors) or "（无）"
     lines.extend(["## 必须保留的锚点", anchor_lines, ""])
     lines.extend(extra_section(extra))
-    lines.append("只修复上述问题，保持锚点与模板结构不变，返回完整脚本。")
+    if previous:
+        lines.append(
+            "在你**上一轮那份脚本**的基础上只修复上述问题，返回完整脚本"
+            "（锚点与模板结构保持不变，但内容是上一版的延续，不是模板骨架）。"
+        )
+    else:
+        # 生成阶段就失败、或续跑时拿不到上一版：这时确实只能从骨架来（如实说明，不装）
+        lines.append("只修复上述问题，保持锚点与模板结构不变，返回完整脚本。")
     return "\n".join(lines)

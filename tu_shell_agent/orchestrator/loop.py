@@ -100,6 +100,16 @@ def render_findings(findings: list[ShellcheckFinding] | tuple[ShellcheckFinding,
     )
 
 
+def _is_the_skeleton(script: str, skeleton: str) -> bool:
+    """这一版是不是**就是**模板骨架（忽略首尾空白与换行差异）。
+
+    只认"完全相同"这一种：宽松一点（比如"大部分行与骨架相同"）会误伤那些确实重写了
+    脚本的正常轮次 —— 宁可漏报，也不要把正确的修复判成失败。骨架里的正文是占位实现，
+    所以"等于骨架"必然是没干活。
+    """
+    return script.strip() == normalize_script(skeleton).strip()
+
+
 def _jsonable(value: Any) -> Any:
     """把 dataclass 递归转成**安全可序列化**的结构。
 
@@ -422,6 +432,32 @@ def _drive_loop(
         # normalize 留在循环里（与重构前同一位置）：确认对话框拿到的必须是**规范化后**的
         # 脚本，而规范化结果带不进 _check_script 的返回值，所以不能藏进那个辅助里。
         script = normalize_script(generated.script)
+
+        # 防御：修复轮里模型把**模板骨架原样**交回来，不算"修好了"。
+        # 用户实测报过"一出错就退回模板的 shell 代码"；提示词已改成以上一轮脚本为主体
+        # （见 prompt.build_repair_message），但模型仍可能这么干 —— 骨架里的正文是占位实现
+        # （`main() { : }`），放它过去等于把一次失败悄悄变成"成功"。
+        if evidence is not None and evidence.script.strip() and _is_the_skeleton(script, skeleton):
+            note = (
+                f"第 {round_no} 轮返回的是模板骨架本身（不是上一轮脚本的修订版），已退回重试"
+            )
+            emit(RunEvent("note", round_no, {"message": note}))
+            ports.store.write_attempt(round_no, {"skeleton-revert.txt": note + "\n"})
+            evidence = FailureEvidence(
+                round=round_no,
+                stage="contract",
+                contract=ContractEvidence(
+                    reason="reverted_to_skeleton",
+                    message=(
+                        "你返回的是模板骨架本身：里面没有实现方案，只有模板里的占位实现"
+                        "（例如 `main() { : }`）。请在**上一轮那份脚本**上修改，"
+                        "保留它已经正确的部分，只修复失败反馈里指出的问题。"
+                    ),
+                ),
+                # 继续带着上一版：下一轮仍然以它为基准改
+                script=evidence.script,
+            )
+            continue
         try:
             script_path, contract, findings = _check_script(
                 round_no=round_no,
@@ -454,6 +490,8 @@ def _drive_loop(
                     reason=contract.reason or "empty",
                     missing_anchors=contract.missing_anchors,
                 ),
+                # 契约没过也把这一版带上：模型要在它上面补锚点，而不是从骨架重写
+                script=script,
             )
             ports.store.write_attempt(round_no, {"contract.json": f"{contract}\n"})
             emit(
@@ -466,7 +504,13 @@ def _drive_loop(
         last_findings = findings
         blocking = tuple(f for f in findings if blocks_run(f.level, config.blocking_level))
         if blocking:
-            evidence = FailureEvidence(round=round_no, stage="shellcheck", shellcheck=findings)
+            evidence = FailureEvidence(
+                round=round_no,
+                stage="shellcheck",
+                shellcheck=findings,
+                # **关键**：把这一版脚本带进修复消息（见 types.FailureEvidence.script）
+                script=script,
+            )
             continue
 
         try:
@@ -525,6 +569,7 @@ def _drive_loop(
         evidence = FailureEvidence(
             round=round_no,
             stage="execute",
+            script=script,
             execute=ExecuteEvidence(
                 exit_code=result.exit_code,
                 timed_out=result.timed_out,

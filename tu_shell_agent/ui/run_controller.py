@@ -1187,14 +1187,21 @@ class RunController(QObject):
             return {}
 
     def _evidence_from_last_result(self, last_round: int) -> FailureEvidence | None:
-        """用上一轮的引擎结果构造修复证据；没有就返回 None（编排层会补空占位）。"""
+        """用上一轮的引擎结果构造修复证据；没有就返回 None（编排层会补空占位）。
+
+        **必须带上上一轮那份脚本**：修复消息是以它为"要改的那一版"的，缺了它模型就只能
+        照着模板骨架重写（用户实测的"一出错就退回模板代码"就是这么来的）。
+        脚本从运行目录里读回来（`attempts/<轮次>/script.sh`），与界面上回填的那份同源。
+        """
         result = self._last_result
         if result is None:
             return None
         execute = result.last_execute
+        previous_script = self._last_script_on_disk(self._run_dir, max(last_round, 1)) or ""
         return FailureEvidence(
             round=max(last_round, 1),
             stage="shellcheck" if result.last_findings else "execute",
+            script=previous_script,
             shellcheck=result.last_findings,
             execute=(
                 None

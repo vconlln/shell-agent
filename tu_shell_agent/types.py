@@ -79,6 +79,11 @@ class FailureEvidence:
     contract: ContractEvidence | None = None
     shellcheck: tuple[ShellcheckFinding, ...] = ()
     execute: ExecuteEvidence | None = None
+    # 上一轮那份**脚本本身**（修复要在它基础上改）。用户报的问题正是缺了它：
+    # 修复消息里只有失败证据 + 模板骨架，模型手里没有"我刚才写的那一版"，
+    # 于是它照着骨架重写一遍 —— 表现就是"一出错就退回模板的 shell 代码"。
+    # 生成阶段就失败的轮次没有脚本，留空（那时确实只能从骨架来）。
+    script: str = ""
 
 
 @dataclass(frozen=True, slots=True)

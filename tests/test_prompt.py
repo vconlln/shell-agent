@@ -11,6 +11,9 @@ from tu_shell_agent.types import (
     ShellcheckFinding,
 )
 
+# 模板骨架（与内置模板同形）：修复消息里它只能当"结构参考"，不能当"要改的那一版"
+SKELETON = "#!/usr/bin/env bash\nset -euo pipefail\n\n# @@TU:BODY@@\n\nmain() {\n  :\n}\n\nmain \"$@\"\n"
+
 
 def test_output_schema_requires_three_fields():
     assert OUTPUT_SCHEMA["required"] == ["script", "notes", "assumptions"]
@@ -128,3 +131,49 @@ def test_repair_message_also_carries_extra():
         evidence=evidence, anchors=("@@TU:BODY@@",), skeleton="#!/usr/bin/env bash\n", extra="别动 logs/"
     )
     assert "## 补充要求" in message and "别动 logs/" in message
+
+
+# ── 修复轮必须给"上一轮那份脚本"（用户报的"一出错就退回模板代码"）──────────
+#
+# 原话："你这个生成脚本要是有错误，他会回退到模板的 shell 代码，这样不行啊，应该是修复错误，
+# 而不是回退。" 根因：修复消息里只有失败证据 + 模板骨架，**没有上一轮那份脚本**，
+# 模型手里只有骨架，自然照着骨架重写一遍。
+
+
+def test_repair_message_leads_with_the_previous_script():
+    from tu_shell_agent.types import FailureEvidence, ShellcheckFinding
+
+    previous = "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\ncp a b\n"
+    evidence = FailureEvidence(
+        round=2,
+        stage="shellcheck",
+        shellcheck=(
+            ShellcheckFinding(code="SC2086", line=5, column=1, level="warning", message="quote it"),
+        ),
+        script=previous,
+    )
+
+    message = build_repair_message(
+        evidence=evidence, anchors=("@@TU:BODY@@",), skeleton=SKELETON
+    )
+
+    assert previous.strip() in message, "修复消息里没有上一轮那份脚本"
+    assert "在这一版上修改" in message
+    # 骨架还在（结构要求来自它），但必须**明说别拿它替换**
+    assert SKELETON.strip() in message
+    assert "不要**用它替换" in message or "不要用它替换" in message
+    # 上一轮脚本要排在骨架**前面**：模型先看到"要改的那一版"，而不是先看到骨架
+    assert message.index(previous.strip()) < message.index(SKELETON.strip())
+    assert "上一版" in message.splitlines()[-1], "结尾的指令没有指向上一版"
+
+
+def test_repair_message_without_a_previous_script_stays_honest():
+    """生成阶段就失败（没有上一版脚本）时，仍然只能从骨架来 —— 但不能假装有上一版。"""
+    from tu_shell_agent.types import FailureEvidence
+
+    evidence = FailureEvidence(round=1, stage="contract", script="")
+
+    message = build_repair_message(evidence=evidence, anchors=(), skeleton=SKELETON)
+
+    assert "你上一轮写的脚本" not in message
+    assert "保持锚点与模板结构不变" in message

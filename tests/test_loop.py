@@ -175,7 +175,12 @@ def test_shellcheck_failure_then_fix_succeeds_on_round_two():
             return [ShellcheckFinding("SC2086", 4, 4, "warning", "Double quote")]
         return []
 
-    ports, harness = make_ports([broken, GOOD], shellcheck_for=shellcheck_for)
+    # 修复轮给的必须是**在上一版上改好**的脚本，不能是模板骨架（用户报过"退回模板代码"）。
+    # 这一行以前是 GOOD（正好等于模板骨架），等于把"退回模板"当成了"修好"。
+    fixed = GeneratedScript(
+        script='#!/usr/bin/env bash\n# @@TU:BODY@@\nf="a b"\nls "$f"\n', notes="", assumptions=()
+    )
+    ports, harness = make_ports([broken, fixed], shellcheck_for=shellcheck_for)
     result = run(ports)
     assert result.outcome == "succeeded"
     assert result.rounds == 2
@@ -190,7 +195,11 @@ def test_execute_failure_feeds_exit_code_and_stderr_forward():
             return ExecuteResult(3, None, False, False, 5, "", "缺少输入文件\n")
         return ExecuteResult(0, None, False, False, 5, "ok\n", "")
 
-    ports, harness = make_ports([failing, GOOD], execute_for=execute_for)
+    # 修复轮要**真的改脚本**（这里把 exit 3 改成正常退出），而不是退回模板骨架
+    fixed = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho 准备好输入了\n", notes="", assumptions=()
+    )
+    ports, harness = make_ports([failing, fixed], execute_for=execute_for)
     result = run(ports)
     assert result.outcome == "succeeded"
     assert "退出码 3" in harness.prompts[1]
@@ -279,7 +288,11 @@ def test_user_rejection_cancels_without_next_round():
 
 def test_missing_anchor_reports_contract_failure_into_next_prompt():
     no_anchor = GeneratedScript(script="#!/usr/bin/env bash\necho hi\n", notes="", assumptions=())
-    ports, harness = make_ports([no_anchor, GOOD])
+    # 修复轮在上一版基础上补上锚点（而不是换成模板骨架）
+    with_anchor = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho hi\n", notes="", assumptions=()
+    )
+    ports, harness = make_ports([no_anchor, with_anchor])
     result = run(ports)
     assert result.outcome == "succeeded"
     assert "@@TU:BODY@@" in harness.prompts[1]
@@ -297,8 +310,11 @@ def test_info_level_findings_block_at_the_default_level():
     broken = GeneratedScript(
         script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho $f\n", notes="", assumptions=()
     )
+    fixed = GeneratedScript(
+        script='#!/usr/bin/env bash\n# @@TU:BODY@@\necho "$f"\n', notes="", assumptions=()
+    )
     ports, harness = make_ports(
-        [broken, GOOD],
+        [broken, fixed],
         shellcheck_for=lambda s: (
             [ShellcheckFinding("SC2086", 3, 6, "info", "quote it")] if "echo $f" in s else []
         ),
@@ -548,3 +564,104 @@ def test_verify_and_execute_normalizes_crlf_script_in_place(tmp_path):
     # 除换行外内容一字不动（只去 \r，不重排、不裁剪、不翻译）
     assert script.read_bytes() == b'#!/usr/bin/env bash\n# @@TU:BODY@@\necho "ok"\n'
     assert "normalized.txt" in _attempt_names(harness)  # 归一化这件事留下证据
+
+
+# ── "一出错就退回模板代码"：修复轮不许把骨架当结果 ────────────────────────
+#
+# 用户原话："你这个生成脚本要是有错误，他会回退到模板的 shell 代码，这样不行啊，应该是修复
+# 错误，而不是回退。" 两条防线：① 修复消息里带上上一轮那份脚本（见 test_prompt.py）；
+# ② 模型真把骨架原样交回来时，不算"修好了"。
+
+
+def test_repair_round_receives_the_previous_script_in_the_prompt():
+    """第二轮（修复轮）发给模型的消息里必须有第一轮那份脚本。"""
+    broken = "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\necho $x\n"
+    fixed = "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\necho \"$x\"\n"
+    ports, harness = make_ports(
+        [GeneratedScript(script=broken, notes="", assumptions=()),
+         GeneratedScript(script=fixed, notes="", assumptions=())],
+        shellcheck_for=lambda script: (
+            [ShellcheckFinding("SC2086", 4, 6, "warning", "Double quote")]
+            if "$x" in script and '"$x"' not in script else []
+        ),
+    )
+
+    run(ports)
+
+    assert len(harness.prompts) >= 2, "只发了一轮消息，这条用例就没测到修复轮"
+    repair_prompt = harness.prompts[1]
+    assert broken.strip() in repair_prompt, "修复轮的消息里没有上一轮那份脚本"
+    assert "在这一版上修改" in repair_prompt
+
+
+def test_a_round_that_returns_the_skeleton_is_rejected_not_accepted():
+    """修复轮把**模板骨架原样**交回来 → 不能当成功，要退回重试并点名说清。"""
+    broken = "#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\necho $x\n"
+    ports, harness = make_ports(
+        [
+            GeneratedScript(script=broken, notes="", assumptions=()),
+            # 模型"退回模板"：把骨架原样交回来（正文还是占位实现 `echo ok`）
+            GeneratedScript(script=SKELETON, notes="", assumptions=()),
+            GeneratedScript(
+                script="#!/usr/bin/env bash\nset -euo pipefail\n# @@TU:BODY@@\necho \"$x\"\n",
+                notes="", assumptions=(),
+            ),
+        ],
+        shellcheck_for=lambda script: (
+            [ShellcheckFinding("SC2086", 4, 6, "warning", "Double quote")]
+            if "$x" in script and '"$x"' not in script else []
+        ),
+    )
+
+    result = run(ports)
+
+    assert result.outcome == "succeeded", result.outcome
+    # 第二轮被判为"退回骨架"，没有当成修复结果
+    messages = [event.payload.get("message", "") for event in harness.events
+                if event.type == "note"]
+    assert any("模板骨架本身" in message for message in messages), messages
+    assert any("skeleton-revert.txt" in files for _round, files in harness.attempts), (
+        "没有把这次退回留证据（skeleton-revert.txt）"
+    )
+    # 第三轮的消息仍然是"在上一轮脚本上改"，而不是只有骨架
+    assert len(harness.prompts) >= 3
+    assert broken.strip() in harness.prompts[2], "骨架被拒之后，修复消息丢了上一版脚本"
+
+
+def test_a_real_fix_that_keeps_the_skeleton_structure_is_not_rejected():
+    """**正常修复不能被误伤**：与骨架同结构、但正文实现了方案的脚本必须放行。"""
+    implemented = SKELETON.replace("echo ok", "echo hi")
+    ports, harness = make_ports(
+        [GeneratedScript(script=implemented, notes="", assumptions=())],
+        shellcheck_for=lambda _script: [],
+    )
+
+    result = run(ports)
+
+    assert result.outcome == "succeeded"
+    messages = [event.payload.get("message", "") for event in harness.events
+                if event.type == "note"]
+    assert not any("模板骨架本身" in message for message in messages), messages
+
+
+def test_execute_failure_repair_prompt_also_carries_the_previous_script():
+    """执行失败那条路同样要把上一版脚本带进修复消息（三种失败阶段都要带）。"""
+    failing = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho 开始\nexit 3\n", notes="", assumptions=()
+    )
+
+    def execute_for(script: str):
+        if "exit 3" in script:
+            return ExecuteResult(3, None, False, False, 5, "", "缺少输入文件\n")
+        return ExecuteResult(0, None, False, False, 5, "ok\n", "")
+
+    fixed = GeneratedScript(
+        script="#!/usr/bin/env bash\n# @@TU:BODY@@\necho 开始\necho 好了\n",
+        notes="", assumptions=(),
+    )
+    ports, harness = make_ports([failing, fixed], execute_for=execute_for)
+
+    run(ports)
+
+    assert "echo 开始" in harness.prompts[1], "执行失败的修复消息里没有上一版脚本"
+    assert "在这一版上修改" in harness.prompts[1]
